@@ -25,6 +25,13 @@ env/
 # Claude Code memory bank (per-worktree, не коммитим)
 .claude/memory/
 
+# Auto-loop runtime logs (генерируются launcher.sh / watchdog.sh)
+.claude/auto-loop-*.log
+.claude/watchdog-*.log
+
+# State snapshots для rollback (per-session, не коммитим)
+.claude/state/
+
 # Auto-memory SQLite + vector indices (per-session local state)
 .memory/
 
