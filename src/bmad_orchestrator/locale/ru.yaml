@@ -1,0 +1,49 @@
+# Русская локализация (spec §14.3)
+# i18n.t(key, **kwargs) dict-lookup, без gettext
+
+# Bot lifecycle
+bot:
+  welcome: "Привет! Я оркестратор bmad-auto-dev. Пиши свободно — пойму."
+  unauthorized: "У тебя нет доступа. Если это ошибка — добавь chat_id в whitelist."
+  pii_warning: "В сообщении найдено похожее на персональные данные ({categories}). Продолжить?"
+
+# Worker events
+worker:
+  started: "✓ Worker {pid} (story {story}) запущен"
+  completed: "✓ Worker {pid} (story {story}) завершил"
+  halted: "🛑 Worker {pid} (story {story}) остановлен: {reason}"
+  elicitation: "❓ Worker {pid} (story {story}) спрашивает: {question}"
+
+# Budget
+budget:
+  alarm_story: "⚠ Story {story}: ${spent} / ${cap} (alarm threshold)"
+  halt_story: "🛑 Story {story}: ${spent} / ${cap} HALT — escalate"
+  alarm_batch: "⚠ Batch: ${spent} / ${cap}"
+  halt_batch: "🛑 Batch HALT: ${spent} / ${cap}"
+
+# Wave / Epic / Phase
+wave:
+  started: "🚀 Wave {wave} запущена, {parallel} worker'ов"
+  completed: "✅ Wave {wave} завершена: {done}/{total}, потрачено ${spent}"
+  retro_pending: "📝 Retrospective для wave {wave} в работе..."
+
+epic:
+  retro_pending: "📝 Deep retro для Epic {epic} в работе..."
+
+phase5:
+  starting: "🎯 Phase 4 завершена. Начинаю Phase 5 final retro + Wave 2 PRD draft (нужно твоё ревью)."
+
+# Escalations
+escalation:
+  destructive: "Подтверди destructive op: {op}"
+  budget: "Бюджет превышен: {scope} ${spent} / ${cap}. Что делать?"
+  security: "🛡 Security risk обнаружен: {detail}. Halt + жду решения."
+  unknown: "Не уверен на ≥99%. {question}"
+
+# Confirmations (inline buttons)
+confirm:
+  graceful_stop: "Мягкая остановка (дождаться workers)"
+  hard_stop: "Жёсткая остановка (kill сейчас, потеря работы)"
+  cancel: "Отмена"
+  approve: "✓ Подтвердить"
+  reject: "✗ Отклонить"

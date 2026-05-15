@@ -1,0 +1,27 @@
+{# Daily summary email (spec §14.2 mention, full template) #}
+Сводка за {{ date }} — {{ project }}
+
+Stories:
+  Merged: {{ done_count }}
+  В работе: {{ in_progress_count }}
+  Заблокировано: {{ blocked_count }}
+  Failed: {{ failed_count }}
+
+Затраты:
+  Сегодня: ${{ today_spent }}
+  Wave {{ current_wave }} total: ${{ wave_spent }} / ${{ wave_cap }}
+  Phase 4 running total: ${{ phase_spent }}
+
+Эскалации сегодня: {{ escalations|length }}
+{%- for e in escalations %}
+  • {{ e.time }}: {{ e.subject }}
+{%- endfor %}
+
+Top elicitation topics (для policy review):
+{%- for t in top_topics %}
+  {{ loop.index }}. {{ t.topic }} ({{ t.count }} раз)
+{%- endfor %}
+
+{% if next_action %}
+Завтра: {{ next_action }}
+{% endif %}

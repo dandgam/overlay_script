@@ -1,0 +1,42 @@
+# English localization (fallback, spec §14.3)
+
+bot:
+  welcome: "Hi! I'm bmad-auto-dev orchestrator. Talk to me in plain language."
+  unauthorized: "Access denied. Add your chat_id to whitelist if this is a mistake."
+  pii_warning: "Detected possible PII ({categories}). Continue?"
+
+worker:
+  started: "✓ Worker {pid} (story {story}) started"
+  completed: "✓ Worker {pid} (story {story}) completed"
+  halted: "🛑 Worker {pid} (story {story}) halted: {reason}"
+  elicitation: "❓ Worker {pid} (story {story}) asks: {question}"
+
+budget:
+  alarm_story: "⚠ Story {story}: ${spent} / ${cap} (alarm threshold)"
+  halt_story: "🛑 Story {story}: ${spent} / ${cap} HALT — escalating"
+  alarm_batch: "⚠ Batch: ${spent} / ${cap}"
+  halt_batch: "🛑 Batch HALT: ${spent} / ${cap}"
+
+wave:
+  started: "🚀 Wave {wave} started, {parallel} workers"
+  completed: "✅ Wave {wave} complete: {done}/{total}, spent ${spent}"
+  retro_pending: "📝 Retrospective for wave {wave} in progress..."
+
+epic:
+  retro_pending: "📝 Deep retro for Epic {epic} in progress..."
+
+phase5:
+  starting: "🎯 Phase 4 complete. Starting Phase 5 final retro + Wave 2 PRD draft (needs your review)."
+
+escalation:
+  destructive: "Confirm destructive op: {op}"
+  budget: "Budget exceeded: {scope} ${spent} / ${cap}. What now?"
+  security: "🛡 Security risk detected: {detail}. Halted, awaiting decision."
+  unknown: "Not ≥99% confident. {question}"
+
+confirm:
+  graceful_stop: "Graceful stop (wait for workers)"
+  hard_stop: "Hard stop (kill now, lose progress)"
+  cancel: "Cancel"
+  approve: "✓ Confirm"
+  reject: "✗ Reject"

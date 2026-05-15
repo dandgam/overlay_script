@@ -1,0 +1,21 @@
+{# Escalation message template (spec §15.4 example) #}
+{{ icon }} {{ project }} · {{ wave }} · {{ subject }}
+
+Story: {{ story_id }} ({{ story_title }})
+{% if worker_pid %}Worker pid: {{ worker_pid }}{% endif %}
+{% if stage %}Stage: {{ stage }}{% endif %}
+{% if spent_usd %}Потрачено: ${{ spent_usd }} / ${{ cap_usd }} cap{% endif %}
+
+{% if findings %}
+Findings ({{ findings|length }}):
+{%- for f in findings %}
+  {{ f.severity|upper }}: {{ f.message }}
+{%- endfor %}
+{% endif %}
+
+{% if options %}
+Options:
+{%- for opt in options %}
+  [{{ opt.label }}]
+{%- endfor %}
+{% endif %}

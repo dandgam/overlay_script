@@ -25,6 +25,9 @@ env/
 # Claude Code memory bank (per-worktree, не коммитим)
 .claude/memory/
 
+# Auto-memory SQLite + vector indices (per-session local state)
+.memory/
+
 # Serena project files (local-only)
 .serena/
 

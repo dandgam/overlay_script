@@ -15,24 +15,52 @@ authors = [
 keywords = ["bmad", "claude", "anthropic", "agent", "orchestration"]
 
 dependencies = [
-    # Core Anthropic SDK — для DAG planner, elicitation engine, merge gate decisions
+    # ── LLM / Agent ──────────────────────────────────────────────────────
+    # Raw Anthropic SDK — DAG planner, retro subagent, low-level calls
     "anthropic>=0.40.0",
-    # Claude Agent SDK (Python) — для worker'ов с полным tool harness
-    "claude-agent-sdk>=0.1.0",
-    # DAG + graph operations
+    # Claude Agent SDK — runtime master orchestrator agent (ClaudeSDKClient)
+    "claude-agent-sdk>=0.2.82",
+    # Typed LLM calls внутри tools (e.g. structured DAG output)
+    "pydantic-ai[anthropic]>=1.96",
+
+    # ── Graph / Data ─────────────────────────────────────────────────────
     "networkx>=3.2",
-    # Data contracts
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
-    # Config
     "pyyaml>=6.0",
-    # CLI
+
+    # ── CLI / TUI ────────────────────────────────────────────────────────
     "typer>=0.12",
     "rich>=13.7",
-    # Async git operations
+
+    # ── Git ──────────────────────────────────────────────────────────────
     "gitpython>=3.1",
-    # Structured logging
+
+    # ── Telegram bot (§15) ───────────────────────────────────────────────
+    "python-telegram-bot>=22.0",
+
+    # ── PII detection (§15.5) ────────────────────────────────────────────
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+    # Russian spaCy model устанавливается отдельно:
+    # python -m spacy download ru_core_news_lg
+
+    # ── Templates (email summary, escalation messages) ───────────────────
+    "jinja2>=3.1",
+
+    # ── State / persistence ──────────────────────────────────────────────
+    "aiosqlite>=0.20",
+
+    # ── Process management ───────────────────────────────────────────────
+    "psutil>=5.9",         # liveness check before kill (§9.3)
+    "watchdog>=4.0",       # skill-patch file-watch sync (§3 cap #6)
+
+    # ── Observability ────────────────────────────────────────────────────
     "structlog>=24.1",
+
+    # ── Voice (§15.8 STT) ────────────────────────────────────────────────
+    # 152-ФЗ skipped per AABIT (личный проект)
+    "openai-whisper>=20240930",
 ]
 
 [project.optional-dependencies]

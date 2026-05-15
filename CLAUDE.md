@@ -5,7 +5,7 @@
 
 ## Project Overview
 
-**bmad-orchestrator** — отдельный Python-инструмент, читает `_bmad/planning-artifacts/` целевого проекта и автоматизирует Phase 4 (Implementation):
+**bmad-orchestrator** — отдельный Python-инструмент, читает `_bmad-output/planning-artifacts/` целевого проекта и автоматизирует Phase 4 (Implementation):
 
 - Строит DAG зависимостей stories внутри эпиков
 - Определяет какие stories можно гнать параллельно (нет shared files)
@@ -77,8 +77,8 @@
 ## Pointers to Read on Demand
 
 - Architecture spec: `spec/spec_master_orchestrator.md`
-- Target project (Odyssey) BMad artifacts: `/home/server/odyssey-ux/_bmad/planning-artifacts/`
-- Target project epics: `/home/server/odyssey-ux/_bmad/planning-artifacts/epics.md` (16 эпиков, 133 FR)
+- Target project (Odyssey) BMad artifacts: `/home/server/odyssey-ux/_bmad-output/planning-artifacts/`
+- Target project epics: `/home/server/odyssey-ux/_bmad-output/planning-artifacts/epics.md` (16 эпиков, 133 FR)
 - Существующий `bmad-auto-dev` skill: `~/.claude/skills/bmad-auto-dev/` (если установлен глобально) или в target `.claude/skills/`
 
 ## Memory Bank Protocol
