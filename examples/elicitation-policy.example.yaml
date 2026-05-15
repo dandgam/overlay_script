@@ -1,0 +1,168 @@
+# Пример elicitation policy для оркестратора.
+#
+# Когда worker во время dev-story встречает неоднозначность — он не задаёт вопрос
+# пользователю напрямую, а сначала консультируется с policy engine. Policy решает:
+#   - auto_resolve: выбрать default из правила и продолжить (записать в audit log)
+#   - escalate: остановить story, послать notification пользователю, ждать ответа
+#
+# Категории риска:
+#   low    — стилистические / именования / форматирование → auto_resolve
+#   medium — выбор библиотеки / pattern / placement → auto_resolve если есть default, иначе escalate
+#   high   — security / data retention / API contract → ВСЕГДА escalate
+#
+# Совпадение правил — first match wins (порядок важен).
+
+version: 1
+project: odyssey-ux
+
+defaults:
+  # Если ни одно правило не подошло — fallback escalate
+  unknown_topic_action: escalate
+  escalation_channel: telegram  # или email
+  max_auto_resolve_per_story: 5  # > этого числа auto-resolve — story помечается suspicious, escalate
+
+rules:
+  # ============================================================
+  # SECURITY — всегда эскалация
+  # ============================================================
+  - id: sec-crypto-choice
+    match:
+      topics: [crypto, hashing, encryption, kdf, signing]
+    risk: high
+    action: escalate
+    reason: "Crypto choices = legal + security review. Не auto."
+
+  - id: sec-pii-handling
+    match:
+      topics: [pii, personal-data, gdpr, 152-fz, redaction]
+    risk: high
+    action: escalate
+    reason: "PII handling = 152-ФЗ compliance. Юр.консультант принимает решение (Story 0.0)."
+
+  - id: sec-auth-flow
+    match:
+      topics: [jwt, session, refresh-token, oauth, sso]
+    risk: high
+    action: escalate
+    reason: "Auth flow design = architecture decision, не runtime choice."
+
+  # ============================================================
+  # ARCHITECTURE — обычно эскалация, но с известными defaults
+  # ============================================================
+  - id: arch-db-migration-strategy
+    match:
+      topics: [migration, schema-change, alter-table]
+      file_patterns: ["**/migrations/*.sql"]
+    risk: high
+    action: escalate
+    reason: "Миграция = potential downtime. Pre-flight review обязателен."
+
+  - id: arch-new-dependency
+    match:
+      topics: [add-dependency, new-crate, new-package]
+    risk: medium
+    action: conditional
+    auto_if:
+      package_in_allowlist: [tokio, axum, sqlx, serde, anyhow, thiserror, tracing]
+    else_action: escalate
+    reason: "Allowlist deps = ok. Новые crate = нужен audit."
+
+  # ============================================================
+  # IMPLEMENTATION CHOICES — auto с defaults
+  # ============================================================
+  - id: impl-naming-convention
+    match:
+      topics: [variable-name, function-name, file-name]
+    risk: low
+    action: auto_resolve
+    default: "Следуй существующему naming в файле/модуле. snake_case для Rust/Python, camelCase для TS."
+
+  - id: impl-error-handling-pattern
+    match:
+      topics: [error-handling, result-type, panic]
+    risk: medium
+    action: auto_resolve
+    default: |
+      Rust: `Result<T, E>` с `thiserror` для library, `anyhow` для binary.
+      Python: typed exceptions, never bare `except:`.
+      TS: discriminated union `{ ok: true, data } | { ok: false, error }`.
+
+  - id: impl-test-placement
+    match:
+      topics: [test-location, unit-test, integration-test]
+    risk: low
+    action: auto_resolve
+    default: |
+      Rust: unit-тесты в `#[cfg(test)] mod tests {}` внутри файла.
+      Python: `tests/` параллельно `src/`, файл `test_<module>.py`.
+
+  # ============================================================
+  # ODYSSEY-SPECIFIC 6 RESOLUTIONS — уже decided в epics.md
+  # ============================================================
+  - id: odyssey-sub-tenancy
+    match:
+      topics: [sub-tenant, parent-child-tenant, hierarchical-tenancy]
+    risk: medium
+    action: auto_resolve
+    default: |
+      Sub-tenancy → Growth/v0.2. В MVP только schema column `parent_tenant_id` (nullable),
+      без логики. Reference: epics.md «Open Conflicts & Default Resolutions» #1.
+
+  - id: odyssey-session-strategy
+    match:
+      topics: [session, jwt-ttl, refresh-strategy]
+    risk: high
+    action: auto_resolve
+    default: |
+      Hybrid: JWT 15 мин access + Redis refresh token.
+      Admin sessions 8 часов, operator sessions 30 дней.
+      Reference: epics.md resolution #2, ARC-17.
+
+  - id: odyssey-audit-retention
+    match:
+      topics: [audit-retention, log-retention, surveillance-period]
+    risk: high
+    action: auto_resolve
+    default: |
+      Three-channel: surveillance (152-ФЗ) 3 года, outbound comms 12 мес, operational 90д→30д.
+      Reference: epics.md resolution #3, ARC-23.
+
+  - id: odyssey-impersonation
+    match:
+      topics: [impersonation, admin-as-user, support-access]
+    risk: high
+    action: auto_resolve
+    default: |
+      DPA opt-in + 4-eyes approval + 30 мин max session + full audit.
+      Reference: epics.md resolution #4.
+
+  - id: odyssey-st14-st21-priority
+    match:
+      topics: [compliance-priority, st14, st21, concurrent-request]
+    risk: high
+    action: auto_resolve
+    default: |
+      State machine, priority = receipt order (FIFO). Не lexical priority типов.
+      Reference: epics.md resolution #5.
+
+  - id: odyssey-crypto-shred
+    match:
+      topics: [crypto-shred, key-revocation, backup-restore]
+    risk: high
+    action: auto_resolve
+    default: |
+      `forget_list` (forgotten user_ids) + post-restore replay через event bus.
+      Reference: epics.md resolution #6.
+
+# ============================================================
+# Escalation channels
+# ============================================================
+channels:
+  telegram:
+    bot_token_env: TELEGRAM_BOT_TOKEN
+    chat_id_env: TELEGRAM_CHAT_ID
+    timeout_seconds: 3600  # 1 час ждём ответа, потом halt
+  email:
+    smtp_env: SMTP_URL
+    to: yulia.yugay777@gmail.com
+    timeout_seconds: 14400  # 4 часа

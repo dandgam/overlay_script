@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Claude Code memory bank (per-worktree, не коммитим)
+.claude/memory/
+
+# Serena project files (local-only)
+.serena/
+
+# Worktrees, временные state файлы
+.worktrees/
+*.queue
+*.lock
+state/
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — никогда не коммитим
+.env
+.env.local
+*.secret
+anthropic_api_key.txt
+
+# Trash
+trash/

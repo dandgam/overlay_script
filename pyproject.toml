@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bmad-orchestrator"
+version = "0.0.1"
+description = "Autonomous BMad Phase 4 orchestrator — DAG-driven parallel story execution via Claude Agent SDK"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+    { name = "AABIT", email = "yulia.yugay777@gmail.com" },
+]
+keywords = ["bmad", "claude", "anthropic", "agent", "orchestration"]
+
+dependencies = [
+    # Core Anthropic SDK — для DAG planner, elicitation engine, merge gate decisions
+    "anthropic>=0.40.0",
+    # Claude Agent SDK (Python) — для worker'ов с полным tool harness
+    "claude-agent-sdk>=0.1.0",
+    # DAG + graph operations
+    "networkx>=3.2",
+    # Data contracts
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    # Config
+    "pyyaml>=6.0",
+    # CLI
+    "typer>=0.12",
+    "rich>=13.7",
+    # Async git operations
+    "gitpython>=3.1",
+    # Structured logging
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "types-pyyaml>=6.0",
+]
+
+[project.scripts]
+bmad-orchestrator = "bmad_orchestrator.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bmad_orchestrator"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "RUF", # ruff-specific
+    "S",   # bandit security
+    "ASYNC", # async checks
+]
+ignore = [
+    "E501", # line too long — managed by formatter
+    "S101", # assert in tests — fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
