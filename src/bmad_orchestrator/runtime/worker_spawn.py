@@ -41,6 +41,16 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_BUDGET_CAP_USD = 30.0
 DEFAULT_SKILL_INVOCATION = "/bmad-auto-dev"
 
+# FS3 H15: Worker subprocesses run user stories that can take ~30 min each on
+# a hot path; an upper bound of 24h still catches genuinely-hung workers
+# (e.g. claude binary deadlocked on stdin) without killing legitimate runs.
+# Override via BMAD_WORKER_TIMEOUT_SEC env (positive int).
+def _worker_timeout_sec() -> int:
+    raw = os.environ.get("BMAD_WORKER_TIMEOUT_SEC", "")
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return 86_400
+
 # FS1 B8: workers do NOT call LLMs (per spec §16.3 dev role isolation), so the
 # only env vars they need are the bare-minimum runtime ones. Everything else —
 # *_TOKEN, *_SECRET, *_API_KEY, ANTHROPIC_*, TELEGRAM_*, OPENAI_*, YANDEX_*,
@@ -117,8 +127,30 @@ async def _stream_subprocess_stdout(
 async def _wait_and_finalize(
     process: asyncio.subprocess.Process, jsonl_path: Path, worktree: str, story_id: str
 ) -> None:
-    """Wait for subprocess exit; append final worker_completed event."""
-    rc = await process.wait()
+    """Wait for subprocess exit; append final worker_completed event.
+
+    FS3 H15: hard upper bound on the wait (configurable via BMAD_WORKER_TIMEOUT_SEC,
+    default 24h) so a deadlocked worker can't pin the background task forever.
+    On timeout: SIGKILL + emit subprocess_timeout audit + emit
+    worker_completed with status=failure.
+    """
+    timeout = _worker_timeout_sec()
+    try:
+        rc = await asyncio.wait_for(process.wait(), timeout=timeout)
+    except TimeoutError:
+        process.kill()
+        rc = await process.wait()
+        _emit(
+            jsonl_path,
+            {
+                "event_type": "subprocess_timeout",
+                "worktree": worktree,
+                "story_id": story_id,
+                "command": "claude -p (worker)",
+                "pid": process.pid,
+                "timeout_sec": timeout,
+            },
+        )
     _emit(
         jsonl_path,
         {

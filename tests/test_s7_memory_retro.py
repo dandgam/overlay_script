@@ -102,10 +102,19 @@ def test_is_retro_done_false_for_empty_file() -> None:
     assert is_retro_done(RetroId(RetroLevel.WAVE, "1a")) is False
 
 
+def _valid_retro_body(wave: str) -> str:
+    """FS3 H11: retro must have full frontmatter + body >= 200 chars."""
+    return (
+        f"---\nwave: {wave}\nlevel: wave\ncreated: 2026-05-16\n---\n\n"
+        f"# Wave {wave} retro\n\n"
+        + ("Lesson learned about parallelism patterns. " * 10)
+    )
+
+
 def test_is_retro_done_true_after_write() -> None:
     path = retro_artifact_path(RetroId(RetroLevel.WAVE, "1a"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# retro\n", encoding="utf-8")
+    path.write_text(_valid_retro_body("1a"), encoding="utf-8")
     assert is_retro_done(RetroId(RetroLevel.WAVE, "1a")) is True
 
 
@@ -119,7 +128,7 @@ def test_can_promote_wave_blocks_without_previous_retro() -> None:
 def test_can_promote_wave_passes_when_retro_done() -> None:
     path = retro_artifact_path(RetroId(RetroLevel.WAVE, "1a"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# retro 1a\n", encoding="utf-8")
+    path.write_text(_valid_retro_body("1a"), encoding="utf-8")
     can_promote_wave("1a", "1b")  # no raise
 
 
@@ -143,7 +152,7 @@ def test_missing_retros_initially_lists_all_nine() -> None:
 def test_missing_retros_shrinks_as_retros_complete() -> None:
     target = retro_artifact_path(RetroId(RetroLevel.WAVE, "0a"))
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("# retro 0a\n", encoding="utf-8")
+    target.write_text(_valid_retro_body("0a"), encoding="utf-8")
     miss = missing_retros()
     assert len(miss) == 8
     assert RetroId(RetroLevel.WAVE, "0a") not in miss
@@ -226,7 +235,7 @@ def test_build_proposals_reads_policy_deltas() -> None:
     retro_id = RetroId(RetroLevel.WAVE, "1a")
     retro_path = retro_artifact_path(retro_id)
     retro_path.parent.mkdir(parents=True, exist_ok=True)
-    retro_path.write_text("# retro 1a\n", encoding="utf-8")
+    retro_path.write_text(_valid_retro_body("1a"), encoding="utf-8")
 
     deltas_path = memory_dir() / "per-wave" / "1a-policy-deltas.yaml"
     deltas_path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,6 +354,10 @@ async def test_end_to_end_lesson_to_retro_to_promote_unblocked() -> None:
     retro_path = Path(payload["retrospective_path"])
     assert retro_path.exists()
     assert payload["mock"] is True
+    # FS3 H11: mock seed is intentionally too small to pass the hard gate —
+    # the live agent must fill it in. Simulate that here.
+    assert not is_retro_done(RetroId(RetroLevel.WAVE, wave))
+    retro_path.write_text(_valid_retro_body(wave), encoding="utf-8")
     assert is_retro_done(RetroId(RetroLevel.WAVE, wave))
 
     # Step 3 — memory roll-up (per-story → per-wave).
@@ -419,5 +432,5 @@ def test_detect_wave_boundary_uses_canonical_retro_path(tmp_path: Path) -> None:
     # The canonical path for wave 1a:
     path = retro_artifact_path(RetroId(RetroLevel.WAVE, "1a"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# retro\n", encoding="utf-8")
+    path.write_text(_valid_retro_body("1a"), encoding="utf-8")
     assert is_retro_done(RetroId(RetroLevel.WAVE, "1a"))

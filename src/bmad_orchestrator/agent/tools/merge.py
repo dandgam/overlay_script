@@ -30,6 +30,11 @@ from bmad_orchestrator.agent.tools._common import (
     runs_dir,
 )
 
+# FS3 H15: hard timeout on subprocess waits so a hung child can't pin the
+# orchestrator forever. 300s covers worst-case git merge on a large repo
+# while still firing well before the worker budget cap times out.
+SUBPROCESS_TIMEOUT_SEC = 300
+
 
 def _merge_event(event_type: str, **payload: Any) -> None:
     append_jsonl(
@@ -165,7 +170,24 @@ async def git_merge(args: dict[str, Any]) -> dict[str, Any]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    out, err = await proc.communicate()
+    try:
+        out, err = await asyncio.wait_for(
+            proc.communicate(), timeout=SUBPROCESS_TIMEOUT_SEC
+        )
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        _merge_event(
+            "subprocess_timeout",
+            worktree=worktree,
+            target_branch=target,
+            command="git merge",
+            timeout_sec=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return error(
+            f"git merge timed out after {SUBPROCESS_TIMEOUT_SEC}s",
+            code="subprocess_timeout",
+        )
     if proc.returncode != 0:
         return error(
             f"git merge failed (rc={proc.returncode}): {err.decode('utf-8', errors='replace')[:400]}",
@@ -181,7 +203,24 @@ async def git_merge(args: dict[str, Any]) -> dict[str, Any]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    rev_out, _ = await rev.communicate()
+    try:
+        rev_out, _ = await asyncio.wait_for(
+            rev.communicate(), timeout=SUBPROCESS_TIMEOUT_SEC
+        )
+    except TimeoutError:
+        rev.kill()
+        await rev.wait()
+        _merge_event(
+            "subprocess_timeout",
+            worktree=worktree,
+            target_branch=target,
+            command="git rev-parse",
+            timeout_sec=SUBPROCESS_TIMEOUT_SEC,
+        )
+        return error(
+            f"git rev-parse timed out after {SUBPROCESS_TIMEOUT_SEC}s",
+            code="subprocess_timeout",
+        )
     commit_sha = rev_out.decode("utf-8").strip() or None
     _merge_event(
         "git_merge",

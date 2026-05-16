@@ -22,13 +22,20 @@ from typing import Any
 from claude_agent_sdk import tool
 
 from bmad_orchestrator.agent.tools._common import (
+    append_jsonl,
     artifacts_dir,
     error,
     get_settings,
     json_ok,
     now_iso,
     read_sprint_status_yaml,
+    runs_dir,
 )
+
+# FS3 H15: 300s upper bound on the retro subprocess so a stuck `claude -p`
+# child can't pin a background asyncio task forever. Retros are short-lived
+# (single skill invocation, a few minutes at worst).
+SUBPROCESS_TIMEOUT_SEC = 300
 
 # Module-level set keeps background subprocess watchers from being GC'd
 # (RUF006). spawn_worker.py uses the same pattern.
@@ -145,7 +152,23 @@ async def spawn_retro_worktree(args: dict[str, Any]) -> dict[str, Any]:
     )
 
     async def _wait() -> None:
-        await proc.wait()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=SUBPROCESS_TIMEOUT_SEC)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            append_jsonl(
+                runs_dir() / "subprocess.events.jsonl",
+                {
+                    "event_type": "subprocess_timeout",
+                    "ts": now_iso(),
+                    "command": "claude -p /bmad-retrospective",
+                    "pid": proc.pid,
+                    "wave": wave,
+                    "level": level,
+                    "timeout_sec": SUBPROCESS_TIMEOUT_SEC,
+                },
+            )
 
     task = asyncio.create_task(_wait())
     _BACKGROUND_TASKS.add(task)

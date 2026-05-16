@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from bmad_orchestrator.agent.memory.levels import has_valid_retro_schema
 from bmad_orchestrator.agent.memory.schedule import (
     MANDATORY_RETROS,
     WAVE_SEQUENCE,
@@ -36,17 +37,18 @@ def retro_artifact_path(retro_id: RetroId) -> Path:
 
 
 def is_retro_done(retro_id: RetroId) -> bool:
-    """True if the artifact file для данного retro существует и не пустой.
+    """True if the artifact file для данного retro contains a complete retro.
 
-    Пустой файл не считается выполненным — это защита от случайного `touch`.
+    FS3 H11: tightened from `st_size > 0` to a content-schema check that
+    requires:
+      - YAML frontmatter declaring at least wave / level / created
+      - a body of >= RETRO_MIN_BODY_CHARS chars after the frontmatter
+
+    This rejects (a) accidental `touch` files (covered by old size check),
+    (b) seed stubs (e.g. spawn_retro_worktree's "_TODO_" skeleton ≈ 100
+    chars), (c) frontmatter-only files.
     """
-    path = retro_artifact_path(retro_id)
-    if not path.exists():
-        return False
-    try:
-        return path.stat().st_size > 0
-    except OSError:
-        return False
+    return has_valid_retro_schema(retro_artifact_path(retro_id))
 
 
 def can_promote_wave(current: str, next_wave: str) -> None:

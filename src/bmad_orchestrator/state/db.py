@@ -141,40 +141,102 @@ class StateDB:
         alarm_threshold: float,
         halt_threshold: float,
     ) -> None:
-        breached_alarm = 1 if spent_usd >= alarm_threshold else 0
-        breached_halt = 1 if spent_usd >= halt_threshold else 0
-        async with connect(self.db_path) as conn:
-            await conn.execute(
-                """
-                INSERT INTO budget_tracker
-                  (session_id, scope, scope_target_id,
-                   spent_usd, spent_tokens,
-                   alarm_threshold, halt_threshold,
-                   breached_alarm, breached_halt, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, scope, scope_target_id) DO UPDATE SET
-                  spent_usd       = excluded.spent_usd,
-                  spent_tokens    = excluded.spent_tokens,
-                  alarm_threshold = excluded.alarm_threshold,
-                  halt_threshold  = excluded.halt_threshold,
-                  breached_alarm  = excluded.breached_alarm,
-                  breached_halt   = excluded.breached_halt,
-                  updated_at      = excluded.updated_at
-                """,
-                (
-                    session_id,
-                    scope,
-                    scope_target_id,
-                    spent_usd,
-                    spent_tokens,
-                    alarm_threshold,
-                    halt_threshold,
-                    breached_alarm,
-                    breached_halt,
-                    _utc_now(),
-                ),
+        """Additive upsert: spent_usd/spent_tokens ACCUMULATE on conflict.
+
+        Wrapped in BEGIN IMMEDIATE so concurrent writers serialise on the
+        write lock — race-free for B5 budget aggregation. The breached_*
+        flags are recomputed from the post-update total inside the same
+        transaction (sub-select on excluded + existing).
+        """
+        from bmad_orchestrator.runtime.budget import is_finite_spend
+
+        if not is_finite_spend(spent_usd):
+            raise ValueError(
+                f"spent_usd must be finite and non-negative, got {spent_usd!r}"
             )
-            await conn.commit()
+        if not isinstance(spent_tokens, int) or isinstance(spent_tokens, bool):
+            raise TypeError("spent_tokens must be int")
+        if spent_tokens < 0:
+            raise ValueError(f"spent_tokens must be non-negative, got {spent_tokens}")
+
+        async with connect(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO budget_tracker
+                      (session_id, scope, scope_target_id,
+                       spent_usd, spent_tokens,
+                       alarm_threshold, halt_threshold,
+                       breached_alarm, breached_halt, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id, scope, scope_target_id) DO UPDATE SET
+                      spent_usd       = budget_tracker.spent_usd + excluded.spent_usd,
+                      spent_tokens    = budget_tracker.spent_tokens + excluded.spent_tokens,
+                      alarm_threshold = excluded.alarm_threshold,
+                      halt_threshold  = excluded.halt_threshold,
+                      updated_at      = excluded.updated_at
+                    """,
+                    (
+                        session_id,
+                        scope,
+                        scope_target_id,
+                        spent_usd,
+                        spent_tokens,
+                        alarm_threshold,
+                        halt_threshold,
+                        1 if spent_usd >= alarm_threshold else 0,
+                        1 if spent_usd >= halt_threshold else 0,
+                        _utc_now(),
+                    ),
+                )
+                await conn.execute(
+                    """
+                    UPDATE budget_tracker
+                       SET breached_alarm = CASE
+                               WHEN spent_usd >= alarm_threshold THEN 1 ELSE 0 END,
+                           breached_halt  = CASE
+                               WHEN spent_usd >= halt_threshold  THEN 1 ELSE 0 END
+                     WHERE session_id = ?
+                       AND scope = ?
+                       AND scope_target_id = ?
+                    """,
+                    (session_id, scope, scope_target_id),
+                )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+
+    async def get_budget(
+        self,
+        session_id: int,
+        scope: str,
+        scope_target_id: str,
+    ) -> dict[str, Any] | None:
+        """Snapshot read of one budget row (None if absent)."""
+        async with connect(self.db_path) as conn:
+            cur = await conn.execute(
+                """
+                SELECT spent_usd, spent_tokens, alarm_threshold, halt_threshold,
+                       breached_alarm, breached_halt, updated_at
+                  FROM budget_tracker
+                 WHERE session_id = ? AND scope = ? AND scope_target_id = ?
+                """,
+                (session_id, scope, scope_target_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "spent_usd": row["spent_usd"],
+                "spent_tokens": row["spent_tokens"],
+                "alarm_threshold": row["alarm_threshold"],
+                "halt_threshold": row["halt_threshold"],
+                "breached_alarm": bool(row["breached_alarm"]),
+                "breached_halt": bool(row["breached_halt"]),
+                "updated_at": row["updated_at"],
+            }
 
     async def enqueue_event(
         self,
@@ -201,30 +263,39 @@ class StateDB:
             return cur.lastrowid
 
     async def claim_next_event(self, session_id: int) -> dict[str, Any] | None:
-        """Mark oldest unconsumed event as consumed, return its dict.
+        """Atomically claim the oldest unconsumed event, return its dict.
 
-        Single-writer guarantee — race-free под предположением одного
-        orchestrator-процесса на DB (см. spec §6).
+        Race-free across concurrent callers — uses `UPDATE … WHERE id = (SELECT MIN(id)
+        … AND consumed_at IS NULL) AND consumed_at IS NULL RETURNING …` so the
+        WHERE clause re-checks the predicate at update time (SQLite 3.35+).
+        The whole statement is one atomic write; two concurrent callers cannot
+        both claim the same row.
         """
         async with connect(self.db_path) as conn:
-            cur = await conn.execute(
-                """
-                SELECT id, event_type, payload_json, emitted_at
-                  FROM event_queue
-                 WHERE session_id = ? AND consumed_at IS NULL
-                 ORDER BY id ASC
-                 LIMIT 1
-                """,
-                (session_id,),
-            )
-            row = await cur.fetchone()
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = await conn.execute(
+                    """
+                    UPDATE event_queue
+                       SET consumed_at = ?
+                     WHERE id = (
+                         SELECT id FROM event_queue
+                          WHERE session_id = ? AND consumed_at IS NULL
+                          ORDER BY id ASC
+                          LIMIT 1
+                       )
+                       AND consumed_at IS NULL
+                    RETURNING id, event_type, payload_json, emitted_at
+                    """,
+                    (_utc_now(), session_id),
+                )
+                row = await cur.fetchone()
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
             if row is None:
                 return None
-            await conn.execute(
-                "UPDATE event_queue SET consumed_at = ? WHERE id = ?",
-                (_utc_now(), row["id"]),
-            )
-            await conn.commit()
             return {
                 "id": row["id"],
                 "event_type": row["event_type"],

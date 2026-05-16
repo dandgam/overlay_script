@@ -20,16 +20,22 @@ from typing import Any
 from claude_agent_sdk import tool
 
 from bmad_orchestrator.agent.tools._common import (
+    append_jsonl,
     error,
     get_settings,
     is_pid_alive,
     json_ok,
     jsonl_tail,
+    now_iso,
     read_sprint_status_yaml,
+    runs_dir,
     worker_jsonl_path,
     worktree_root,
 )
 from bmad_orchestrator.state import StateDB, connect
+
+# FS3 H15 — same timeout policy as merge.py.
+SUBPROCESS_TIMEOUT_SEC = 300
 
 
 @tool(
@@ -65,7 +71,26 @@ async def list_worktrees(args: dict[str, Any]) -> dict[str, Any]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=SUBPROCESS_TIMEOUT_SEC
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            append_jsonl(
+                runs_dir() / "subprocess.events.jsonl",
+                {
+                    "event_type": "subprocess_timeout",
+                    "ts": now_iso(),
+                    "command": "git worktree list",
+                    "timeout_sec": SUBPROCESS_TIMEOUT_SEC,
+                },
+            )
+            return error(
+                f"git worktree list timed out after {SUBPROCESS_TIMEOUT_SEC}s",
+                code="subprocess_timeout",
+            )
         worktrees.extend(_parse_git_worktree_porcelain(stdout.decode("utf-8")))
     else:
         root = worktree_root(settings)
