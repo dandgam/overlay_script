@@ -39,25 +39,6 @@
 
 ### Pending
 
-- **id:** FS1
-  **title:** Secret hygiene — audit redaction, worker env allowlist, PII gaps
-  **surface:** backend-python
-  **spec_section:** 95-180
-  **depends_on:** []
-  **acceptance:**
-    - audit.events.jsonl: secrets scrubbed (sk-ant-*, ghp_*, AKIA*, Bearer, URL creds), file 0600
-    - telegram.jsonl: убрать original=raw field (или opt-in env + HMAC + 0600)
-    - worker subprocess env: allowlist {PATH, HOME, USER, LANG, LC_ALL, TZ, PWD, SHELL, TERM}; strip *_TOKEN, *_SECRET, *_API_KEY, ANTHROPIC_*, TELEGRAM_*, OPENAI_*, YANDEX_*, GOOGLE_*, GH_*, GITHUB_*
-    - gh_client.py: token через urllib headers (не argv-видимый curl)
-    - os.umask(0o077) в cli/main.py + bot/main.py entrypoints
-    - PII detector: PHONE_RU `:`-prefix + 8-prefix; PATH_LIKE negative lookahead email
-    - tests/test_fs1_secret_hygiene.py 15+ tests PASS
-  **safety_gates:**
-    - L1 secret pattern filter — wired into all audit writes
-  **destructive_actions:** []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** FS2
   **title:** Safety hooks hardening (shlex parse) + merge gate wiring + main-merge signed token + callback whitelist (CHECKPOINT)
   **surface:** backend-python
@@ -127,7 +108,29 @@
   **estimated_retries_allowed:** 3
 
 ### Current
-(none — next wake promotes FS1 from Pending)
+
+- **id:** FS1
+  **title:** Secret hygiene — audit redaction, worker env allowlist, PII gaps
+  **surface:** backend-python
+  **spec_section:** 56-75
+  **depends_on:** []
+  **acceptance:**
+    - audit.events.jsonl: secrets scrubbed (sk-ant-*, ghp_*, AKIA*, Bearer, URL creds), file 0600
+    - telegram.jsonl: убрать original=raw field (или opt-in env + HMAC + 0600)
+    - worker subprocess env: allowlist {PATH, HOME, USER, LANG, LC_ALL, TZ, PWD, SHELL, TERM}; strip *_TOKEN, *_SECRET, *_API_KEY, ANTHROPIC_*, TELEGRAM_*, OPENAI_*, YANDEX_*, GOOGLE_*, GH_*, GITHUB_*
+    - gh_client.py: token через urllib headers (не argv-видимый curl)
+    - os.umask(0o077) в cli/main.py + bot/main.py entrypoints
+    - PII detector: PHONE_RU `:`-prefix + 8-prefix; PATH_LIKE negative lookahead email
+    - tests/test_fs1_secret_hygiene.py 15+ tests PASS
+  **safety_gates:**
+    - L1 secret pattern filter — wired into all audit writes
+  **destructive_actions:** []
+  **checkpoint:** false
+  **estimated_retries_allowed:** 3
+  **started:** 2026-05-16 16:30 UTC
+  **workflow:** .claude/skills/auto-loop-spec/workflows/backend-python.md
+  **retry_count:** 0
+  **worker_branches:** []
 
 ### Completed
 (empty — initiative not yet started)
@@ -149,6 +152,8 @@
 ## Journal
 
 [2026-05-16 04:30 UTC] bootstrap: manual создание tracker + integration/orchestrator_agent_security_fixes FROM integration/orchestrator_agent + backup/orchestrator_agent_security_fixes-pre-2026-05-16. 4 fix-сессии запланировано (все surface=backend-python). Runtime=loop_wrapper, Delay=600s, Auto merge=false. Spec: spec/spec_orchestrator_agent_security_fixes.md v0.1.
+
+[2026-05-16 16:30 UTC] FS1 promoted to Current — workflow=backend-python (adapted: stdlib edits, no new gateway). Targets: agent/safety/audit.py, bot/audit.py, runtime/worker_spawn.py, imports/from_bad/gh_client.py, cli/main.py, bot/main.py, bot/pii_detector.py + tests/test_fs1_secret_hygiene.py.
 
 ## Final Report
 (empty — last session not yet completed)
