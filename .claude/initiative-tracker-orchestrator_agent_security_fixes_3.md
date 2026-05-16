@@ -32,6 +32,9 @@
 ## Sessions
 
 ### Pending
+(empty)
+
+### Current
 
 - **id:** FS8
   **title:** NH1 shared session model + NH2 StateDB binding в _run_mock_pilot (CHECKPOINT)
@@ -47,7 +50,7 @@
     - _run_mock_pilot до enforce_and_reserve_*: budget.attach_state_db(state_db, session_id)
     - Regression test: после run_orchestrator(mock=True) → budget.state_db is not None AND budget.session_id is not None
     - tests/conftest.py: sandbox_available fixture + tmp_state_db_session fixture
-    - Все 541 + 25 FS7 + ~10 FS8 = ~575 tests PASS
+    - Все 541 + 32 FS7 + ~10 FS8 = ~583 tests PASS
     - ruff + mypy --strict зелёные
     - grep TODO|FIXME только в imports/from_bad/ или v1 follow-up
   **safety_gates:**
@@ -55,38 +58,36 @@
   **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
-
-### Current
-
-- **id:** FS7
-  **title:** Worker subprocess sandbox via bwrap + demote _scan_bash до defence-in-depth (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 60-180
-  **depends_on:** []
-  **acceptance:**
-    - runtime/sandbox.py — Sandbox Protocol + BwrapSandbox + NoSandbox + detect_sandbox() factory
-    - BwrapSandbox: --ro-bind / /, --bind worktree worktree, --proc, --dev, --tmpfs /tmp, --unshare-pid/uts/ipc/net (default), --die-with-parent, --new-session, --setenv allowlist
-    - Wire в runtime/worker_spawn.py spawn_worker (use_sandbox=True по default)
-    - Wire в agent/tools/retro.py spawn_retro_worktree
-    - Audit event: sandbox_used + sandbox_kind
-    - agent/safety/hooks.py: docstring обновить «defence-in-depth, не primary»; severity scanner deny = info если sandbox активен
-    - Spec §22.7 Sandbox layer documentation
-    - tests/test_fs7_sandbox.py ~25 tests: real bwrap PoC restrictions (worker не пишет в /etc, не читает /home/server/crm/.env, нет network); abstraction unit tests; bypass attempts блокируются на FS уровне
-    - Все 541 + ~25 tests PASS
-    - ruff + mypy --strict зелёные
-  **safety_gates:**
-    - L4 (NEW): OS-level sandbox primary
-    - L1: scanner defence-in-depth
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **started:** 2026-05-16 21:10 UTC
+  **started:** 2026-05-16 22:30 UTC
   **workflow:** workflows/backend-python.md (adapted for bmad-orchestrator project)
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
-(empty)
+
+- **id:** FS7
+  **title:** Worker subprocess sandbox via bwrap + demote _scan_bash до defence-in-depth (CHECKPOINT)
+  **commit:** 3053031
+  **files_changed:** 7
+  **completed:** 2026-05-16 22:30 UTC
+  **tests_passed:**
+    - 32 new FS7 tests (test_fs7_sandbox.py — Protocol/flag/factory unit + real-bwrap PoC: blocks /etc write, blocks /dev/tcp net, blocks bash <<<, blocks (...) subshell, blocks xargs, env isolation drops ANTHROPIC_API_KEY)
+    - 541 baseline preserved
+    - Total: 573 PASS in 9.43s
+  **quality_gates:**
+    - ruff check — All checks passed!
+    - mypy --strict (FS7-touched modules: sandbox.py, worker_spawn.py, retro.py, hooks.py) — Success: no issues found in 4 source files
+  **decisions:**
+    - bwrap requires `--clearenv` ДО `--setenv` — без него host env (incl. ANTHROPIC_API_KEY) leak'ает в sandbox. Caught by test_real_sandbox_environment_isolation на первой попытке.
+    - Sandbox.kind в Protocol → `@property` (read-only) вместо `kind: str` — frozen dataclass slot non-mutable; mypy --strict без property бьёт «expected settable variable».
+    - `--tmpfs /tmp` помечен `# noqa: S108` — bwrap mount point внутри namespace, не host path.
+    - Network policy default для workers: `github_only` (treated as `full` пока nftables whitelist deferred per spec §5); для retro: `none` (local aggregation only).
+    - Severity scanner deny → `info` если sandbox активен (defence-in-depth catches не должны давать warning-grade alerts на user dashboard'е).
+    - Pre-existing mypy error `main_merge_token.py:40 Returning Any from function declared to return "dict[str, Any] | None"` — verified pre-existing via git stash; unrelated к FS7. **DEFERRED** — open standalone fix.
+  **deferred_items:**
+    - FS7-A..FS7-E fast-follows из round 3 reviewer — wire при wave 1a pilot run
+    - nftables `github_only` whitelist — defer (current behaviour = `--share-net` for non-none policies)
+    - main_merge_token.py mypy fix — separate one-liner commit, не блокирует initiative
 
 ## Safety Gates Triggered
 (none)
@@ -102,10 +103,23 @@
   **rationale:** 3 round'а blacklist-based scanner показали pattern recursion (5+5+5 P0 bypasses). bwrap verified установленным (0.9.0), unprivileged userns enabled — переход возможен без новых system deps.
   **impact:** L4 added (sandbox); L1 scanner roleshift с primary на defence-in-depth. FS7-A..FS7-E fast-follows из round 3 reviewer — deferred к wave 1a wiring.
 
+- **date:** 2026-05-16 22:30 UTC
+  **session:** FS7
+  **decision:** `--clearenv` обязателен ДО `--setenv` в bwrap argv.
+  **rationale:** bwrap по default inherits parent env. Без `--clearenv` allow-list контракт нарушается — host secrets (ANTHROPIC_API_KEY и т.д.) попадают в sandboxed worker. Caught real-bwrap test'ом первой итерации.
+  **impact:** BwrapSandbox.wrap_command всегда эмитит `--clearenv` перед `--setenv` блоком. Тест test_real_sandbox_environment_isolation закрепляет инвариант.
+
+- **date:** 2026-05-16 22:30 UTC
+  **session:** FS7
+  **decision:** Pre-existing mypy error в main_merge_token.py:40 — deferred за scope FS7.
+  **rationale:** verified via git stash что ошибка существовала ДО FS7; unrelated к sandbox wiring. Включать в FS7 commit → scope creep.
+  **impact:** standalone fix отдельным коммитом после initiative merge; добавлен в deferred_items FS7.
+
 ## Journal
 
 [2026-05-16 20:30 UTC] bootstrap: manual tracker + integration/orchestrator_agent_security_fixes_3 FROM integration/orchestrator_agent_security_fixes_2 (cumulative base). 2 сессии (FS7 bwrap sandbox, FS8 wiring). Spec: spec/spec_orchestrator_agent_security_fixes_3.md v0.1. Anti-pattern-recursion approach: OS-level isolation > pattern matching.
 [2026-05-16 21:10 UTC] FS7 promoted to Current. bwrap 0.9.0 verified; unprivileged_userns_clone=1; kernel 6.17. Starting implementation: runtime/sandbox.py + wiring + tests + docs.
+[2026-05-16 22:30 UTC] FS7 completed (commit 3053031). 7 files: runtime/sandbox.py (NEW, ~245 lines), runtime/worker_spawn.py (sandbox wire + WorkerHandle.sandbox_kind), agent/tools/retro.py (sandbox wire), agent/safety/hooks.py (defence-in-depth docstring + info severity when sandbox active), tests/test_fs7_sandbox.py (NEW, 32 tests incl. real-bwrap PoC), spec/§22.7 (full Sandbox layer doc), CLAUDE.md (boundary #5). Tests: 573 PASS in 9.43s. Ruff + mypy --strict зелёные на FS7 modules. Decisions: --clearenv обязателен; Sandbox.kind через @property; pre-existing main_merge_token mypy deferred. FS8 promoted to Current. Runtime=loop_wrapper → no ScheduleWakeup. Auto merge=false → no main merge; ждём FS8.
 
 ## Final Report
 (empty)
