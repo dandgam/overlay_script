@@ -44,6 +44,7 @@ class EventType(StrEnum):
     HUMAN_QUERY = "human_query"
     HUMAN_RESPONSE = "human_response"
     SCHEDULED_WAKEUP = "scheduled_wakeup_5min"
+    CODE_REVIEW_VERDICT = "code_review_verdict"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)

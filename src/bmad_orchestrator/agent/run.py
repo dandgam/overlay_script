@@ -41,8 +41,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -72,6 +74,7 @@ from bmad_orchestrator.runtime.worker_spawn import (
 from bmad_orchestrator.runtime.worker_spawn import (
     spawn_worker as runtime_spawn_worker,
 )
+from bmad_orchestrator.runtime.worktree import cleanup_worktree
 from bmad_orchestrator.state.db import StateDB
 
 SESSION_ENV_VAR = "BMAD_ORCHESTRATOR_SESSION_ID"
@@ -562,6 +565,16 @@ async def _run_real_pilot(
     settings = load_settings()
     worktree_root = settings.target_project / ".worktrees"
     worktree_root.mkdir(parents=True, exist_ok=True)
+
+    # W4 — share the gate context with code_review / merge subscribers so they
+    # know which target project + wave to merge into. Subscribers are wired to
+    # the bus by caller-side startup code; configure_code_review_gate keeps the
+    # module-level config in sync per pilot run.
+    configure_code_review_gate(
+        target_project=settings.target_project,
+        wave=wave,
+        escalation_chat_id=getattr(getattr(settings, "bot", None), "escalation_chat_id", None),
+    )
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []
@@ -1221,6 +1234,312 @@ async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
         budget=budget,
         models=models,
     )
+
+
+# ── CODE_REVIEW gate + auto-merge subscribers (W4) ───────────────────────────
+
+CODE_REVIEW_SKILL_INVOCATION: str = "/bmad-code-review"
+CODE_REVIEW_VERDICTS: frozenset[str] = frozenset({"approve", "request_changes", "reject"})
+_VERDICT_LINE_RE = re.compile(
+    r"verdict\s*[:=]\s*(approve|request_changes|reject)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(slots=True)
+class CodeReviewGateConfig:
+    """Caller context shared between the two W4 subscribers."""
+
+    target_project: Path
+    wave: str
+    escalation_chat_id: int | None = None
+
+
+_CODE_REVIEW_GATE: CodeReviewGateConfig | None = None
+
+
+def configure_code_review_gate(
+    *,
+    target_project: Path | None,
+    wave: str | None,
+    escalation_chat_id: int | None = None,
+) -> None:
+    """Wire the W4 gate to a target project + wave.
+
+    Called once from ``_run_real_pilot`` so both subscribers share the live
+    project root, wave name and escalation chat id. Passing ``None`` for either
+    required field clears the gate (tests use this to assert the unconfigured
+    branch).
+    """
+    global _CODE_REVIEW_GATE
+    if target_project is None or wave is None:
+        _CODE_REVIEW_GATE = None
+        return
+    _CODE_REVIEW_GATE = CodeReviewGateConfig(
+        target_project=target_project,
+        wave=wave,
+        escalation_chat_id=escalation_chat_id,
+    )
+
+
+def _verdict_from_text(text: str) -> str | None:
+    """Return ``approve|request_changes|reject`` if a verdict line is present."""
+    if not text:
+        return None
+    m = _VERDICT_LINE_RE.search(text)
+    if m is None:
+        return None
+    return m.group(1).lower()
+
+
+def _extract_verdict_from_event(ev: dict[str, Any]) -> tuple[str, str] | None:
+    """Return ``(verdict, summary)`` if event carries verdict info; else None.
+
+    Supports two shapes emitted by the ``/bmad-code-review`` skill:
+      * Explicit JSON key: ``{"verdict": "approve", "summary": "…"}``.
+      * Text body (``text`` / ``summary`` field) matching
+        ``verdict: <approve|request_changes|reject>``.
+    """
+    if not isinstance(ev, dict):
+        return None
+    explicit = ev.get("verdict")
+    if isinstance(explicit, str) and explicit.lower() in CODE_REVIEW_VERDICTS:
+        return explicit.lower(), str(ev.get("summary") or ev.get("text") or "")
+    for key in ("summary", "text", "content"):
+        val = ev.get(key)
+        if isinstance(val, str):
+            v = _verdict_from_text(val)
+            if v is not None:
+                return v, val
+    return None
+
+
+async def _spawn_code_review_worker(
+    *,
+    worktree: str,
+    story_id: str,
+    wave: str,
+) -> WorkerHandle:
+    """Spawn ``claude -p /bmad-code-review`` in ``worktree`` with a distinct JSONL.
+
+    The JSONL path is derived from ``BMAD_CURRENT_WAVE`` inside
+    :func:`worker_jsonl_path`. We pivot the env var to a wave-scoped review
+    namespace so the review stream lands at
+    ``runs_dir / <wave>__review_<story_id> / <basename>.events.jsonl`` instead
+    of clobbering (and being clobbered by) the dev worker's terminal event.
+    """
+    original_wave = os.environ.get("BMAD_CURRENT_WAVE")
+    os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__review_{story_id}"
+    try:
+        handle = await runtime_spawn_worker(
+            worktree=worktree,
+            story_id=story_id,
+            branch=f"feature/{story_id}",
+            skill_invocation=CODE_REVIEW_SKILL_INVOCATION,
+            sandbox_network="none",
+        )
+    finally:
+        if original_wave is None:
+            os.environ.pop("BMAD_CURRENT_WAVE", None)
+        else:
+            os.environ["BMAD_CURRENT_WAVE"] = original_wave
+    return handle
+
+
+async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
+    """On ``WORKER_COMPLETED(success)`` → spawn ``/bmad-code-review``, emit verdict.
+
+    Filtering: anything other than ``WORKER_COMPLETED`` with
+    ``payload['status'] == 'success'`` is a no-op (failures bypass review and
+    flow straight to W5 escalation). The verdict is extracted from the LAST
+    matching ``claude_event`` block in the review JSONL — supports both an
+    explicit ``verdict`` JSON key and a ``verdict: <X>`` text pattern.
+    """
+    if event.type != EventType.WORKER_COMPLETED:
+        return
+    payload = event.payload or {}
+    if payload.get("status") != "success":
+        return
+
+    story_id = str(payload.get("story_id") or "")
+    worktree = str(payload.get("worktree") or "")
+    if not story_id or not worktree:
+        log.warning("code_review_skip_missing_fields", payload=payload)
+        return
+
+    cfg = _CODE_REVIEW_GATE
+    wave = (cfg.wave if cfg is not None else None) or os.environ.get(
+        "BMAD_CURRENT_WAVE", "default"
+    )
+
+    try:
+        handle = await _spawn_code_review_worker(
+            worktree=worktree, story_id=story_id, wave=wave
+        )
+    except Exception as exc:  # spawn / sandbox failure → escalate
+        log.exception(
+            "code_review_spawn_failed", story_id=story_id, worktree=worktree
+        )
+        await bus.emit(
+            EventType.CODE_REVIEW_VERDICT,
+            story_id=story_id,
+            verdict="error",
+            summary=f"spawn failed: {type(exc).__name__}: {exc}",
+            worktree=worktree,
+        )
+        return
+
+    verdict = "error"
+    summary = ""
+    async for ev in tail_jsonl_events(handle.jsonl_path):
+        extracted = _extract_verdict_from_event(ev)
+        if extracted is not None:
+            verdict, summary = extracted
+
+    log.info(
+        "code_review_dispatched",
+        story_id=story_id,
+        verdict=verdict,
+        worktree=worktree,
+        review_jsonl=str(handle.jsonl_path),
+    )
+    await bus.emit(
+        EventType.CODE_REVIEW_VERDICT,
+        story_id=story_id,
+        verdict=verdict,
+        summary=summary,
+        worktree=worktree,
+        review_jsonl=str(handle.jsonl_path),
+    )
+
+
+async def _ff_merge_to_integration(
+    *,
+    target_project: Path,
+    integration_branch: str,
+    feature_branch: str,
+) -> str:
+    """Fast-forward merge ``feature_branch`` → ``integration_branch``.
+
+    Returns the commit hash that integration now points at. Raises whatever
+    gitpython raises on conflict / non-ff / missing branch — caller wraps the
+    error into a ``HUMAN_QUERY`` escalation.
+
+    Hard rules per CLAUDE.md + spec §W4: this helper is restricted to ff-only
+    plus signoff. Disabling pre-commit hooks, forcing the ref forward, or
+    rewriting history with destructive resets are all out of scope.
+    """
+    from git import Repo
+
+    repo = Repo(str(target_project))
+
+    existing = {b.name for b in repo.branches}
+    if integration_branch not in existing:
+        base = "main" if "main" in existing else repo.active_branch.name
+        repo.git.branch(integration_branch, base)
+
+    repo.git.checkout(integration_branch)
+    repo.git.merge(feature_branch, "--ff-only", "--signoff")
+    head_sha: str = repo.head.commit.hexsha
+    return head_sha
+
+
+async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
+    """On ``CODE_REVIEW_VERDICT`` → fast-forward merge OR escalate.
+
+    Behaviour matrix:
+
+    * ``verdict == "approve"``  → ``git merge --ff-only --signoff`` of
+      ``feature/<story>`` into ``integration/<wave>`` in the target project.
+      On success: emit a ``story_merged`` audit log + cleanup worktree under
+      the project's ``.worktrees/`` root. On failure (conflict, non-ff, missing
+      branch): emit ``HUMAN_QUERY`` with the diagnostic payload.
+    * ``verdict in {"request_changes", "reject", "error"}`` → emit
+      ``HUMAN_QUERY`` with the review summary; worktree stays put for human
+      inspection.
+    """
+    if event.type != EventType.CODE_REVIEW_VERDICT:
+        return
+
+    cfg = _CODE_REVIEW_GATE
+    if cfg is None:
+        log.warning("merge_subscriber_unconfigured")
+        return
+
+    payload = event.payload or {}
+    story_id = str(payload.get("story_id") or "")
+    verdict = str(payload.get("verdict") or "")
+    summary = str(payload.get("summary") or "")
+    worktree = str(payload.get("worktree") or "")
+
+    if not story_id:
+        log.warning("merge_subscriber_missing_story_id", payload=payload)
+        return
+
+    if verdict != "approve":
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id,
+            text=(
+                f"Code-review {verdict} для {story_id}:\n\n"
+                f"{summary}\n\nWorktree: {worktree}"
+            ),
+            story_id=story_id,
+            verdict=verdict,
+            worktree=worktree,
+            actions=["approve_override", "abandon", "edit_in_human_loop"],
+        )
+        return
+
+    integration_branch = f"integration/{cfg.wave}"
+    feature_branch = f"feature/{story_id}"
+    try:
+        merge_sha = await _ff_merge_to_integration(
+            target_project=cfg.target_project,
+            integration_branch=integration_branch,
+            feature_branch=feature_branch,
+        )
+    except Exception as exc:
+        log.exception(
+            "merge_to_integration_failed",
+            story_id=story_id,
+            feature=feature_branch,
+            integration=integration_branch,
+        )
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id,
+            text=(
+                f"Merge conflict для {story_id}:\n\n"
+                f"{type(exc).__name__}: {exc}\n\nWorktree: {worktree}"
+            ),
+            story_id=story_id,
+            verdict="merge_conflict",
+            worktree=worktree,
+            actions=["manual_resolve", "abandon"],
+        )
+        return
+
+    log.info(
+        "story_merged",
+        story_id=story_id,
+        feature=feature_branch,
+        integration=integration_branch,
+        sha=merge_sha,
+    )
+
+    if worktree:
+        try:
+            cleanup_worktree(
+                Path(worktree), root=cfg.target_project / ".worktrees"
+            )
+        except Exception as exc:  # cleanup failure must not block the merge
+            log.warning(
+                "worktree_cleanup_failed",
+                story_id=story_id,
+                worktree=worktree,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
