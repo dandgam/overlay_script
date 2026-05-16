@@ -55,7 +55,7 @@ class WhisperLocalSTT(STTProvider):
 
             self._model = whisper.load_model(self.model_size)
         # whisper.transcribe is sync — run in executor in real implementation
-        result = self._model.transcribe(str(audio_path), language=language)  # type: ignore[union-attr]
+        result = self._model.transcribe(str(audio_path), language=language)  # type: ignore[attr-defined]
         return result["text"].strip()  # type: ignore[no-any-return]
 
     def estimate_cost_usd(self, duration_seconds: float) -> float:

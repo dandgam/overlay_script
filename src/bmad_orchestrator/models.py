@@ -7,19 +7,19 @@ Status enum совместим с BMad-Method canonical sprint-status.yaml (v6.6
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 
-class Risk(str, Enum):
+class Risk(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
 
-class StoryStatus(str, Enum):
+class StoryStatus(StrEnum):
     """BMad-canonical 5 states (см. BMAD-METHOD/src/bmm-skills/4-implementation/bmad-sprint-planning).
 
     Transitions: backlog → ready-for-dev → in-progress → review → done
@@ -32,7 +32,7 @@ class StoryStatus(str, Enum):
     DONE = "done"
 
 
-class EpicStatus(str, Enum):
+class EpicStatus(StrEnum):
     """BMad-canonical epic states."""
 
     BACKLOG = "backlog"
@@ -40,7 +40,7 @@ class EpicStatus(str, Enum):
     DONE = "done"
 
 
-class RetroStatus(str, Enum):
+class RetroStatus(StrEnum):
     """Retrospective status per epic."""
 
     OPTIONAL = "optional"

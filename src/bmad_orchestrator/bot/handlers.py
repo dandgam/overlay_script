@@ -5,8 +5,6 @@ Whitelist check + PII detector + forward to agent.
 
 from __future__ import annotations
 
-from typing import Any
-
 import structlog
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -82,7 +80,7 @@ async def free_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     scrubbed, pii_found = scrub_input(raw)
     if pii_found:
         # TODO: ask user to confirm via inline button
-        log.info("pii_detected_in_input", chat=update.effective_chat.id)
+        log.info("pii_detected_in_input", chat=update.effective_chat.id, scrubbed=scrubbed)
 
     # TODO: push to agent's chat queue, await response
     response = "TODO: forward to agent"

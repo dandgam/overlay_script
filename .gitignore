@@ -42,7 +42,9 @@ env/
 .worktrees/
 *.queue
 *.lock
-state/
+/state/
+state.db
+state.db-journal
 logs/
 
 # OS

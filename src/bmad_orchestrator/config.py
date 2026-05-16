@@ -12,6 +12,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from bmad_orchestrator.agent.betas import ANTHROPIC_BETA_HEADERS
+
 
 class ModelConfig(BaseModel):
     """Per-role model routing. См. spec §16.3."""
@@ -86,7 +88,7 @@ class VoiceConfig(BaseModel):
 
     # Storage policy (152-ФЗ — skip для личного проекта, но pattern сохраняем)
     delete_audio_after_transcription: bool = True
-    audio_temp_dir: str = "/tmp/bmad_voice"
+    audio_temp_dir: str = "/tmp/bmad_voice"  # noqa: S108 — short-lived audio chunks, overridable via env
 
 
 class Settings(BaseSettings):
@@ -113,7 +115,7 @@ class Settings(BaseSettings):
 
     # Worktree layout (BAD default = .worktrees inside repo;
     # ours по handoff §6.2 = sibling /home/server/<proj>-wt-N)
-    worktree_layout: Literal["sibling", "nested"] = "sibling"  # type: ignore[name-defined]
+    worktree_layout: Literal["sibling", "nested"] = "sibling"
 
     max_parallel_workers: int = 3  # matches BAD MAX_PARALLEL_STORIES default
     anthropic_api_key: str | None = None
@@ -123,14 +125,8 @@ class Settings(BaseSettings):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
 
-    # Anthropic beta headers (§11.1, all mandatory)
-    beta_headers: list[str] = Field(
-        default_factory=lambda: [
-            "tool-search-tool-2025-10-19",
-            "advanced-tool-use-2025-11-20",
-            "context-management-2025-06-27",
-        ]
-    )
+    # Anthropic beta headers (§11.1, all mandatory) — canonical в agent/betas.py
+    beta_headers: list[str] = Field(default_factory=lambda: list(ANTHROPIC_BETA_HEADERS))
 
     locale: str = "ru"
 

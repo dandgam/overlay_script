@@ -12,11 +12,10 @@ Flow:
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import structlog
 
-from bmad_orchestrator.config import Settings, load_settings
+from bmad_orchestrator.config import load_settings
 
 log = structlog.get_logger(__name__)
 
@@ -35,7 +34,13 @@ async def run_orchestrator(
     4. Main loop: await queue.get() → agent.query(event) → process
     """
     settings = load_settings()
-    log.info("orchestrator_starting", project=project, wave=wave, max_parallel=max_parallel)
+    log.info(
+        "orchestrator_starting",
+        project=project,
+        wave=wave,
+        max_parallel=max_parallel,
+        target=str(settings.target_project),
+    )
     # TODO: implement
     await asyncio.sleep(0)
     log.info("orchestrator_exited")
