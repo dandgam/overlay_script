@@ -39,29 +39,6 @@
 
 ### Pending
 
-- **id:** S6
-  **title:** Telegram bot + voice (Whisper) + PII (Presidio) (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 404-588
-  **depends_on:** [S5]
-  **acceptance:**
-    - bot/main.py — python-telegram-bot v22+, async, Conversation+CallbackQuery handlers
-    - chat_id whitelist (TELEGRAM_ALLOWED_CHAT_IDS env var), deny остальные
-    - Slash: /start /help /status /stop /model /budget /projects /cancel
-    - Inline buttons для destructive ops
-    - bot/voice_handler.py — .ogg → STT → text routing
-    - bot/voice_providers.py — STTProvider ABC + 5 concrete (WhisperLocal default + WhisperAPI + ClaudeAudio + YandexSpeechKit + GoogleSTT) + factory
-    - bot/pii_detector.py — Presidio + spaCy ru_core_news_lg + custom RU patterns (паспорт, СНИЛС, ИНН)
-    - PII redaction: input check + output scrubbing; safelist для technical IDs
-    - audit/telegram.jsonl append-only (original + redacted)
-    - Smoke: bot stub /start, voice transcribes sample .ogg, PII tests на 20-30 RU sample-фразах PASS
-  **safety_gates:**
-    - L1 PII redaction (deterministic) — output scrubbing prevents PII leak в Telegram
-    - L1 chat_id whitelist (deterministic deny)
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-
 - **id:** S7
   **title:** Memory + Retrospective + 9 mandatory retros + reflexion
   **surface:** backend-python
@@ -104,24 +81,29 @@
 
 ### Current
 
-- **id:** S5
-  **title:** 12 specialized internal skills (progressive disclosure)
+- **id:** S6
+  **title:** Telegram bot + voice (Whisper) + PII (Presidio) (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 844-993
-  **depends_on:** [S4]
+  **spec_section:** 404-588
+  **depends_on:** [S5]
   **acceptance:**
-    - 12 skills × src/bmad_orchestrator/agent/skills/<name>/SKILL.md с frontmatter
-    - Names: dag-planner, worker-dispatcher, merge-gate, elicitation-router, retrospective-writer, intent-router, cost-watchdog, failure-analyst, reflexion-learner, wave-coordinator, proactive-improver, story-splitter
-    - Three-level disclosure: metadata (~100 tokens always-loaded) / body / references
-    - Skill dispatcher logic — выбор skill по event type
-    - Reflexion loop в reflexion-learner (Actor / Evaluator / Self-Reflection per §19.3)
-    - Tests: skill metadata loads <1.5K tokens total; full body loads только при match
+    - bot/main.py — python-telegram-bot v22+, async, Conversation+CallbackQuery handlers
+    - chat_id whitelist (TELEGRAM_ALLOWED_CHAT_IDS env var), deny остальные
+    - Slash: /start /help /status /stop /model /budget /projects /cancel
+    - Inline buttons для destructive ops
+    - bot/voice_handler.py — .ogg → STT → text routing
+    - bot/voice_providers.py — STTProvider ABC + 5 concrete (WhisperLocal default + WhisperAPI + ClaudeAudio + YandexSpeechKit + GoogleSTT) + factory
+    - bot/pii_detector.py — Presidio + spaCy ru_core_news_lg + custom RU patterns (паспорт, СНИЛС, ИНН)
+    - PII redaction: input check + output scrubbing; safelist для technical IDs
+    - audit/telegram.jsonl append-only (original + redacted)
+    - Smoke: bot stub /start, voice transcribes sample .ogg, PII tests на 20-30 RU sample-фразах PASS
   **safety_gates:**
-    - L1 PreToolUse — sanity check что skill body load не пытается выйти за `agent/skills/`
+    - L1 PII redaction (deterministic) — output scrubbing prevents PII leak в Telegram
+    - L1 chat_id whitelist (deterministic deny)
   **destructive_actions:** []
-  **checkpoint:** false
+  **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-16 11:30 UTC
+  **started:** 2026-05-16 02:37 UTC
   **workflow:** .claude/skills/auto-loop-spec/workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
@@ -226,6 +208,30 @@
     - Budget aggregator из state.db (token_usage таблица) — нужен для `enforce_*` чтобы получать актуальный `spent_usd` без передачи извне. Реализация в S8 (CLI/TUI budget command).
     - PostToolUse hook сейчас просто пишет факт вызова в audit; tool_result body summarization (`message_preview` for chat) — отдельный enhancement в S6 (telegram bot).
 
+- **id:** S5
+  **title:** 12 specialized internal skills (progressive disclosure registry + dispatcher)
+  **completed:** 2026-05-16 02:37 UTC
+  **commit:** 1b54232
+  **files_changed:** 7
+  **tests_passed:**
+    - ruff check src tests — PASS (all checks)
+    - mypy --strict src — PASS (53 source files)
+    - pytest — 139 passed (29 новых S5 + 110 prior)
+  **decisions_made:**
+    - SKILL.md frontmatter — минимальный (только `name` + `description`) per Anthropic Skills standard. Triggers (event types которые активируют skill) определены в коде через `TRIGGER_MAP: dict[str, frozenset[EventType]]` в `agent/skills/__init__.py`, а не в markdown — детерминированный routing, никакого parsing «Когда активируется» секций.
+    - Three-level disclosure реализован: Level 1 metadata (`iter_metadata()` + `metadata_block()` для system prompt block, lru_cache, ~1.5K tokens на все 12); Level 2 body (`load_body(name)` on dispatch match); Level 3 references (`load_reference(name, filename)` on demand).
+    - Token budget enforcement в коде: `MAX_METADATA_TOKENS_TOTAL=1500`, per-skill=120. `metadata_block()` raises `SkillError` если bloat. Эвристика 1 token ≈ 4 chars — достаточно для guard'а; не требуется tiktoken dep.
+    - WORKER_COMPLETED → ОБА merge-gate + failure-analyst (skill body внутри читает status в payload). Fan-out routing — нормальная семантика per spec §19 (dag-planner fires on wave_start AND epic_boundary одновременно).
+    - References (Level 3): добавлены только для 3 skills которые spec §19.2 явно перечисляет — `dag-planner/networkx-patterns.md` + `conflict-detection.md`, `merge-gate/review-criteria.md`, `proactive-improver/proposal-templates.md`. Остальные skills остаются SKILL.md-only до тех пор пока не понадобятся подробности — anti-bloat.
+    - `load_reference` валидирует filename: запрещены `/`, `\\`, leading `.`; resolved path должен лежать под `<skill>/references/`. Защита от path traversal `../SKILL.md` или `/etc/passwd`.
+    - `system_prompt._tool_and_skill_metadata`: TODO(S5) убран — `metadata_block()` теперь embed'ится в cache_control блок (ttl=1h). Per spec §17.4 каталог skill'ов часть стабильной части prompt'а.
+    - Reflexion 3-role loop (Actor / Evaluator / Self-Reflection) — уже описан в `reflexion-learner/SKILL.md` body (с момента S0 scaffold v0.7). Test `test_reflexion_learner_body_contains_three_role_loop` фиксирует наличие.
+    - `EXPECTED_SKILL_NAMES = frozenset(TRIGGER_MAP.keys())` — single source of truth. Если кто-то добавит skill dir без триггера → `iter_metadata()` всё равно его прочитает (skill может быть triggered только chat'ом, без events); но `dispatch()` его никогда не вернёт пока в TRIGGER_MAP не появится запись.
+  **deferred_items:**
+    - Wiring `metadata_block()` + `dispatch()` в `agent/loop.py` event handler — S8 (когда реальный оркестратор-агент впервые запускается на mock pilot). Сейчас metadata уже embed'ится в system prompt; live dispatch ловится в loop'е.
+    - `security_check_hook` + `audit_tool_output` финальный wiring в `agent/run.py` — отложен из S4 в S8 (вместе с loop integration).
+    - Реализация skill bodies для tools они используют (e.g. `run_code_review`, `spawn_fixer` для merge-gate) — частично уже в agent/tools/* (mock-mode), реальные — по мере implementation в S7-S8.
+
 ## Safety Gates Triggered
 (none)
 
@@ -243,10 +249,12 @@
 [2026-05-16 01:10 UTC] S1 completed (commit dcaadfb). S2 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration.
 [2026-05-16 08:30 UTC] S2 execution: 34 tools реализованы по §17 (5 state + 3 DAG + 4 spawn + 4 control + 3 merge + 3 memory + 3 retro + 5 operational + 2 splitter + 2 escalate). Mock-mode by default — destructive ops (spawn_worker, signals, git_merge на non-repo) emit intent в JSONL + state.db без реального side-effect. Path-traversal защита в memory tools. Catalog auto-generated через ALL_TOOLS + tool_names()/tool_descriptions(). bmad_orchestrator.agent.tools.* убран из mypy override — полная типизация. ASYNC230/240 в ruff ignore (asyncio + stdlib pathlib).  Все gate'ы green: ruff PASS, mypy --strict PASS (46 files), pytest 48/48 PASS (35 новых S2).
 [2026-05-16 08:30 UTC] S2 completed (commit a1762c0). S3 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration.
-[2026-05-16 10:00 UTC] S3 execution: runtime/event_loop.py (EventLoop с 13 StrEnum event types из §4, asyncio.PriorityQueue FIFO с monotonic seq, subscriber dispatch in registration order, 5-min backstop polling task для SCHEDULED_WAKEUP). runtime/ratelimit.py (TokenBucket refill-on-demand + RateLimiter с per-key TPM+RPM, default 50000/50, async acquire loop). runtime/liveness.py (psutil + os.kill(0) fallback для is_alive; safe_to_kill rejects sentinel/self/dead; stalled-detection через last_event_age на JSONL). runtime/dag_planner.py (DagPlanner @dataclass cached state + build_graph cycle-check + filter_wave + ready_stories с shared-files mutex + detect_conflicts; networkx 3.x). runtime/worker_spawn.py (spawn_worker auto-detect mock/real по shutil.which("claude"); mock=synthetic events, real=asyncio create_subprocess_exec claude -p /bmad-auto-dev + stdout-stream → JSONL background task; _BACKGROUND_TASKS module-level set предотвращает GC orphan; tail_jsonl_events async generator terminates на worker_completed). agent/tools/spawn.py: spawn_worker tool с real=False default (preserves S2 contract), real=True делегирует в runtime_spawn_worker. pyproject.toml: ASYNC109 в ruff ignore (timeout kwarg convention). tests/test_s3_runtime.py: 20 тестов (13-event assertion, FIFO, subscriber dispatch, backstop tick, TokenBucket refill, RateLimiter acquire, liveness sentinel/self/stall, DagPlanner mutex/cycle, worker_spawn mock, tail termination, mock pilot E2E cascade с sprint-status writeback). Gates green: ruff PASS, mypy --strict PASS (50 files), pytest 68/68 PASS.
+[2026-05-16 10:00 UTC] S3 execution: runtime/event_loop.py (EventLoop с 13 StrEnum event types из §4, asyncio.PriorityQueue FIFO с monotonic seq, subscriber dispatch in registration order, 5-min backstop polling task для SCHEDULED_WAKEUP). runtime/ratelimit.py (TokenBucket refill-on-demand + RateLimiter с per-key TPM+RPM, default 50000/50, async acquire loop). runtime/liveness.py (psutil + os.kill(0) fallback для is_alive; safe_to_kill rejects sentinel/self/dead; stalled-detection через last_event_age на JSONL). runtime/dag_planner.py (DagPlanner @dataclass cached state + build_graph cycle-check + filter_wave + ready_stories с shared-files mutex + detect_conflicts; networkx 3.x). runtime/worker_spawn.py (spawn_worker auto-detect mock/real по shutil.which("claude"); mock=synthetic events, real=asyncio create_subprocess_exec claude -p /bmad-auto-dev + stdout-stream → JSONL background task; _BACKGROUND_TASKS module-level set предотвращает GC orphan; tail_jsonl_events async generator terminates на worker_completed). agent/tools/spawn.py: spawn_worker tool с real=False default (preserves S2 contract), real=True делегирует в runtime_spawn_worker (mock=None — auto-detect).  pyproject.toml: ASYNC109 в ruff ignore (timeout kwarg convention). tests/test_s3_runtime.py: 20 тестов (13-event assertion, FIFO, subscriber dispatch, backstop tick, TokenBucket refill, RateLimiter acquire, liveness sentinel/self/stall, DagPlanner mutex/cycle, worker_spawn mock, tail termination, mock pilot E2E cascade с sprint-status writeback). Gates green: ruff PASS, mypy --strict PASS (50 files), pytest 68/68 PASS.
 [2026-05-16 10:00 UTC] S3 completed (commit 7c18728). S4 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration. CHECKPOINT session — но Auto merge=false, поэтому merge на main выполнит пользователь по завершении инициативы.
 [2026-05-16 11:30 UTC] S4 execution: agent/safety/hooks.py — PreToolUse `security_check_hook` с regex+phrase scan (rm -rf whitespace-tolerant, push --force/-f/--force-with-lease, commit --no-verify/-n, clean -f/-fd/-df, reset --hard main/master/origin/* или bare, checkout/merge main без BMAD_ALLOW_MAIN_MERGE=1) + filesystem-escape check для Edit/Write/NotebookEdit/MultiEdit (absolute path должен лежать под target_project или orchestrator_home, resolved). PostToolUse hook логирует факт вызова. agent/safety/audit.py — sync record_audit append-only JSONL (BMAD_AUDIT_LOG env override для тестов). agent/safety/budget_guard.py — BudgetResult с level∈{ok,alarm,halt}, async enforce_story/enforce_batch emit'ит BUDGET_THRESHOLD_HIT в EventLoop + audit log; sync check_* для TUI. agent/safety/branch_isolation.py — добавлен validate_worker_write_path (Path.resolve() анти-traversal). agent/tools/audit.py — 35-й tool `audit_event` (event_type+summary+payload). tests/test_s4_safety.py — 42 теста (deny rm-rf/force-push/--no-verify/--reset-hard, allow benign, main-merge guard с/без флага, FS escape, budget thresholds story/batch, enforce emits event, ok не emit, halt пишется в audit, end-to-end mock workflow halt через subscriber, validate_merge_target с/без approval, worker_write_path inside/escape/traversal, audit_event tool reg + JSONL write, empty event_type reject, raw record_audit JSONL lines). test_s2_tools.py обновлён 34→35. Gates: ruff PASS, mypy --strict PASS (52 files), pytest 110/110 PASS.
 [2026-05-16 11:30 UTC] S4 completed (commit fcc3dd3). S5 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration.
+[2026-05-16 02:37 UTC] S5 execution: agent/skills/__init__.py — SkillMetadata dataclass + lru_cache iter_metadata() + dispatch(EventType) + load_body(name) + load_reference(name, filename) + list_references(name). TRIGGER_MAP static (12 skills → frozenset[EventType]) per spec §19 «Когда активируется» секций. Three-level disclosure: Level 1 (metadata, ~1.5K tokens total) в system_prompt cached block; Level 2 (body) on dispatch match; Level 3 (references/*.md) on demand. MAX_METADATA_TOKENS_TOTAL=1500, per-skill=120 — guard в metadata_block() raises SkillError. system_prompt._tool_and_skill_metadata: TODO(S5) убран — metadata_block() embed'ится. references/ subdirs created для dag-planner (networkx-patterns + conflict-detection), merge-gate (review-criteria), proactive-improver (proposal-templates) per spec §19.2. Path-traversal в load_reference() blocked (no `/`, `\\`, leading dot; resolved path под `<skill>/references/`). tests/test_s5_skills.py — 29 тестов (all 12 skills present, frontmatter valid, budget enforced, dispatch correctness для WORKER_COMPLETED/BUDGET_THRESHOLD_HIT/USER_CHAT_MESSAGE/WAVE_BOUNDARY_REACHED/PHASE4_COMPLETE/WORKER_ELICITATION/STORY_SPLIT_TRIGGERED/VOICE_MESSAGE_RECEIVED, HUMAN_RESPONSE returns empty, reflexion 3-role loop present, references discovery + traversal guard, system_prompt embed'ит skill catalog). Gates green: ruff PASS, mypy --strict PASS (53 files), pytest 139/139 PASS.
+[2026-05-16 02:37 UTC] S5 completed (commit 1b54232). S6 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration. CHECKPOINT session — но Auto merge=false, поэтому merge на main выполнит пользователь по завершении инициативы.
 
 ## Final Report
 (empty — last session not yet completed)
