@@ -33,29 +33,6 @@
 
 ### Pending
 
-- **id:** FS7
-  **title:** Worker subprocess sandbox via bwrap + demote _scan_bash до defence-in-depth (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 60-180
-  **depends_on:** []
-  **acceptance:**
-    - runtime/sandbox.py — Sandbox Protocol + BwrapSandbox + NoSandbox + detect_sandbox() factory
-    - BwrapSandbox: --ro-bind / /, --bind worktree worktree, --proc, --dev, --tmpfs /tmp, --unshare-pid/uts/ipc/net (default), --die-with-parent, --new-session, --setenv allowlist
-    - Wire в runtime/worker_spawn.py spawn_worker (use_sandbox=True по default)
-    - Wire в agent/tools/retro.py spawn_retro_worktree
-    - Audit event: sandbox_used + sandbox_kind
-    - agent/safety/hooks.py: docstring обновить «defence-in-depth, не primary»; severity scanner deny = info если sandbox активен
-    - Spec §22.7 Sandbox layer documentation
-    - tests/test_fs7_sandbox.py ~25 tests: real bwrap PoC restrictions (worker не пишет в /etc, не читает /home/server/crm/.env, нет network); abstraction unit tests; bypass attempts блокируются на FS уровне
-    - Все 541 + ~25 tests PASS
-    - ruff + mypy --strict зелёные
-  **safety_gates:**
-    - L4 (NEW): OS-level sandbox primary
-    - L1: scanner defence-in-depth
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-
 - **id:** FS8
   **title:** NH1 shared session model + NH2 StateDB binding в _run_mock_pilot (CHECKPOINT)
   **surface:** backend-python
@@ -80,7 +57,33 @@
   **estimated_retries_allowed:** 3
 
 ### Current
-(none — next wake promotes FS7)
+
+- **id:** FS7
+  **title:** Worker subprocess sandbox via bwrap + demote _scan_bash до defence-in-depth (CHECKPOINT)
+  **surface:** backend-python
+  **spec_section:** 60-180
+  **depends_on:** []
+  **acceptance:**
+    - runtime/sandbox.py — Sandbox Protocol + BwrapSandbox + NoSandbox + detect_sandbox() factory
+    - BwrapSandbox: --ro-bind / /, --bind worktree worktree, --proc, --dev, --tmpfs /tmp, --unshare-pid/uts/ipc/net (default), --die-with-parent, --new-session, --setenv allowlist
+    - Wire в runtime/worker_spawn.py spawn_worker (use_sandbox=True по default)
+    - Wire в agent/tools/retro.py spawn_retro_worktree
+    - Audit event: sandbox_used + sandbox_kind
+    - agent/safety/hooks.py: docstring обновить «defence-in-depth, не primary»; severity scanner deny = info если sandbox активен
+    - Spec §22.7 Sandbox layer documentation
+    - tests/test_fs7_sandbox.py ~25 tests: real bwrap PoC restrictions (worker не пишет в /etc, не читает /home/server/crm/.env, нет network); abstraction unit tests; bypass attempts блокируются на FS уровне
+    - Все 541 + ~25 tests PASS
+    - ruff + mypy --strict зелёные
+  **safety_gates:**
+    - L4 (NEW): OS-level sandbox primary
+    - L1: scanner defence-in-depth
+  **destructive_actions:** []
+  **checkpoint:** true
+  **estimated_retries_allowed:** 3
+  **started:** 2026-05-16 21:10 UTC
+  **workflow:** workflows/backend-python.md (adapted for bmad-orchestrator project)
+  **retry_count:** 0
+  **worker_branches:** []
 
 ### Completed
 (empty)
@@ -102,6 +105,7 @@
 ## Journal
 
 [2026-05-16 20:30 UTC] bootstrap: manual tracker + integration/orchestrator_agent_security_fixes_3 FROM integration/orchestrator_agent_security_fixes_2 (cumulative base). 2 сессии (FS7 bwrap sandbox, FS8 wiring). Spec: spec/spec_orchestrator_agent_security_fixes_3.md v0.1. Anti-pattern-recursion approach: OS-level isolation > pattern matching.
+[2026-05-16 21:10 UTC] FS7 promoted to Current. bwrap 0.9.0 verified; unprivileged_userns_clone=1; kernel 6.17. Starting implementation: runtime/sandbox.py + wiring + tests + docs.
 
 ## Final Report
 (empty)
