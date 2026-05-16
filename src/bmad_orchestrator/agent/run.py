@@ -42,7 +42,9 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -58,6 +60,7 @@ from bmad_orchestrator.agent.skills import load_body as load_skill_body
 from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
 from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
 from bmad_orchestrator.runtime.sandbox import detect_sandbox
@@ -741,16 +744,385 @@ async def _tail_and_emit_completion(handle: WorkerHandle, bus: EventLoop) -> Non
             return
 
 
-# ── HUMAN_QUERY / HUMAN_RESPONSE subscriber (FS4 B9 stub) ────────────────────
+# ── HUMAN_QUERY / HUMAN_RESPONSE subscriber (W2 — intent-router dispatch) ────
+
+INTENT_ROUTER_SYSTEM_PROMPT: str = (
+    "You are the bmad-orchestrator intent router. Parse the user's free-text "
+    "request (Russian or English) and decide whether to: (a) call exactly one "
+    "tool to fulfil it, or (b) reply with a plain-text clarification when the "
+    "request is ambiguous or out-of-scope. Read-only intents → call the matching "
+    "tool directly. Destructive intents (stop, kill, delete, rollback) → reply "
+    "with text asking the user to confirm via the bot's inline buttons rather "
+    "than calling the tool. Unknown intents → reply with 'не знаю' plus the "
+    "closest valid options."
+)
+
+INTENT_ROUTER_TOOL_WHITELIST: frozenset[str] = frozenset({
+    "start_wave",
+    "stop_orchestrator",
+    "escalate_to_human",
+    "read_sprint_status",
+})
+
+# Module-level injection points so unit tests can configure dispatch without
+# touching env / load_settings(). Production code calls
+# ``configure_intent_router(budget=…, models=…)`` once during orchestrator
+# start-up; tests monkeypatch ``_intent_router_client_factory`` to return a
+# stub AsyncAnthropic.
+_INTENT_ROUTER_BUDGET: BudgetGuard | None = None
+_INTENT_ROUTER_MODELS: ModelConfig | None = None
+_intent_router_client_factory: Callable[[], Any] | None = None
+
+
+def configure_intent_router(
+    *,
+    budget: BudgetGuard | None,
+    models: ModelConfig | None,
+    client_factory: Callable[[], Any] | None = None,
+) -> None:
+    """Wire the intent-router subscriber to a budget guard + model selection.
+
+    Called once from ``run_orchestrator`` (real-mode) so subsequent
+    ``human_query_subscriber`` invocations have access to the live
+    :class:`BudgetGuard` and active :class:`ModelConfig`. Tests pass a custom
+    ``client_factory`` returning a stub AsyncAnthropic.
+    """
+    global _INTENT_ROUTER_BUDGET, _INTENT_ROUTER_MODELS, _intent_router_client_factory
+    _INTENT_ROUTER_BUDGET = budget
+    _INTENT_ROUTER_MODELS = models
+    _intent_router_client_factory = client_factory
+
+
+def _default_anthropic_client_factory() -> Any:
+    """Build a fresh ``AsyncAnthropic`` client picking up ``ANTHROPIC_API_KEY``.
+
+    Imported lazily so the test suite can run without ``anthropic`` installed
+    in any unusual env. Production hosts ship it via ``pyproject.toml``.
+    """
+    from anthropic import AsyncAnthropic
+
+    return AsyncAnthropic()
+
+
+def _intent_router_tools() -> list[dict[str, Any]]:
+    """Return the tool subset exposed to the intent router (Messages API schema).
+
+    Filters ``ALL_TOOLS`` down to ``INTENT_ROUTER_TOOL_WHITELIST`` so the router
+    cannot accidentally dispatch destructive tools (spawn / merge / control)
+    from a free-text user message. The schema follows the Anthropic Messages
+    API tool spec: ``{"name", "description", "input_schema": {…}}``.
+    """
+    tools: list[dict[str, Any]] = []
+    for t in ALL_TOOLS:
+        if t.name not in INTENT_ROUTER_TOOL_WHITELIST:
+            continue
+        schema = getattr(t, "input_schema", None) or {"type": "object", "properties": {}}
+        # SDK tools store input_schema either as the dict form already or as a
+        # callable producing it; tolerate both.
+        if callable(schema):
+            schema = schema()
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            schema = {"type": "object", "properties": dict(schema or {})}
+        tools.append({
+            "name": t.name,
+            "description": t.description,
+            "input_schema": schema,
+        })
+    return tools
+
+
+def _tool_by_name(name: str) -> Any:
+    """Return the registered ``@tool`` for ``name`` (or None if absent)."""
+    for t in ALL_TOOLS:
+        if t.name == name:
+            return t
+    return None
+
+
+def _extract_usage(response: Any) -> TokenUsage:
+    """Build :class:`TokenUsage` from an Anthropic Messages response.
+
+    Tolerates dict-shaped and pydantic-shaped ``usage`` blocks so tests can
+    stub with plain dicts.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return TokenUsage()
+
+    def _get(field: str) -> int:
+        if isinstance(usage, dict):
+            return int(usage.get(field, 0) or 0)
+        return int(getattr(usage, field, 0) or 0)
+
+    return TokenUsage(
+        input_tokens=_get("input_tokens"),
+        cache_creation_input_tokens=_get("cache_creation_input_tokens"),
+        cache_read_input_tokens=_get("cache_read_input_tokens"),
+        output_tokens=_get("output_tokens"),
+    )
+
+
+def _iter_content_blocks(response: Any) -> list[Any]:
+    """Yield ``response.content`` blocks across SDK and dict-shaped responses."""
+    content = getattr(response, "content", None)
+    if content is None and isinstance(response, dict):
+        content = response.get("content")
+    return list(content or [])
+
+
+def _block_kind(block: Any) -> str:
+    if isinstance(block, dict):
+        return str(block.get("type") or "")
+    return str(getattr(block, "type", "") or "")
+
+
+def _block_text(block: Any) -> str:
+    if isinstance(block, dict):
+        return str(block.get("text") or "")
+    return str(getattr(block, "text", "") or "")
+
+
+def _tool_use_payload(block: Any) -> tuple[str, dict[str, Any]]:
+    if isinstance(block, dict):
+        return str(block.get("name") or ""), dict(block.get("input") or {})
+    return str(getattr(block, "name", "") or ""), dict(getattr(block, "input", {}) or {})
+
+
+async def _stub_human_response(
+    bus: EventLoop,
+    *,
+    chat_id: Any,
+    corr_id: str,
+    text: str,
+    reason: str,
+) -> None:
+    """Emit the legacy stub HUMAN_RESPONSE (no LLM call).
+
+    Triggered when (a) ``ANTHROPIC_API_KEY`` is unset, (b) the budget guard
+    halted dispatch, or (c) the Anthropic call raised — the bot's per-chat
+    FIFO future must still resolve, so we mirror the FS4 stub contract.
+    """
+    log.warning(
+        "human_query_stub_fallback",
+        reason=reason,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        text_preview=text[:80],
+    )
+    await bus.emit(
+        EventType.HUMAN_RESPONSE,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        text=f"(stub) принято: {text[:80]}",
+    )
+
+
+async def _dispatch_intent_router(
+    *,
+    bus: EventLoop,
+    chat_id: Any,
+    corr_id: str,
+    text: str,
+    budget: BudgetGuard,
+    models: ModelConfig,
+) -> None:
+    """Real LLM dispatch path — Anthropic Messages API + tool_use routing.
+
+    Layers:
+      1. Daily-cap pre-check via ``budget.attribute_usd`` snapshot — halt
+         before any call when cumulative is already over the daily limit.
+      2. Build cached system blocks (router prompt + intent-router skill body),
+         restrict tools to the whitelist, call ``messages.create``.
+      3. Attribute the post-call cost (via ``usd_cost`` + ``attribute_usd``);
+         emit BUDGET_THRESHOLD_HIT on the day cap automatically through
+         ``BudgetGuard._publish``.
+      4. Walk ``response.content`` — dispatch the first whitelisted ``tool_use``
+         block via its registered handler; concatenate text blocks for the
+         HUMAN_RESPONSE payload.
+    """
+    # Pre-check: cumulative intent-router spend may already exceed daily cap.
+    if budget.attributed_total() >= Decimal(str(budget.cfg.daily_limit_usd)):
+        log.warning(
+            "intent_router_daily_cap_blocked",
+            chat_id=chat_id,
+            corr_id=corr_id,
+            attributed_total=str(budget.attributed_total()),
+        )
+        await bus.emit(
+            EventType.BUDGET_THRESHOLD_HIT,
+            scope="day",
+            level="halt",
+            spent_usd=float(budget.attributed_total()),
+            alarm_threshold=budget.cfg.daily_limit_usd,
+            halt_threshold=budget.cfg.daily_limit_usd,
+            corrupted=False,
+            attribution_scope="intent_router",
+        )
+        await _stub_human_response(
+            bus,
+            chat_id=chat_id,
+            corr_id=corr_id,
+            text=text,
+            reason="daily_cap_halt",
+        )
+        return
+
+    factory = _intent_router_client_factory or _default_anthropic_client_factory
+    client = factory()
+
+    try:
+        body = load_skill_body("intent-router")
+    except Exception as exc:  #skill registry malformed → loud stub
+        log.error("intent_router_skill_load_failed", error=str(exc))
+        await _stub_human_response(
+            bus, chat_id=chat_id, corr_id=corr_id, text=text, reason="skill_load_failed"
+        )
+        return
+
+    system_blocks = [
+        {
+            "type": "text",
+            "text": INTENT_ROUTER_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": body,
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    messages = [{"role": "user", "content": text}]
+    tools = _intent_router_tools()
+
+    try:
+        response = await client.messages.create(
+            model=models.routine,
+            max_tokens=512,
+            system=system_blocks,
+            tools=tools,
+            messages=messages,
+        )
+    except Exception as exc:  #network / API errors → stub
+        log.error(
+            "intent_router_api_error",
+            error_type=type(exc).__name__,
+            error=str(exc)[:200],
+            chat_id=chat_id,
+            corr_id=corr_id,
+        )
+        await _stub_human_response(
+            bus, chat_id=chat_id, corr_id=corr_id, text=text, reason="api_error"
+        )
+        return
+
+    usage = _extract_usage(response)
+    try:
+        cost = usd_cost(models.routine, usage)
+    except ValueError:
+        # Unknown model — log loud, attribute 0, continue with dispatch so the
+        # user still receives a response. Production deploys pin
+        # ``models.routine`` to a known model so this branch never trips.
+        log.error(
+            "intent_router_unknown_model_pricing",
+            model=models.routine,
+        )
+        cost = Decimal("0")
+
+    cap_result = await budget.attribute_usd(scope="intent_router", spent=cost)
+
+    total = usage.input_tokens + usage.cache_read_input_tokens
+    cache_hit_ratio = (
+        float(usage.cache_read_input_tokens) / float(total) if total > 0 else 0.0
+    )
+    log.info(
+        "intent_router_dispatched",
+        model=models.routine,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        input_tokens=usage.input_tokens,
+        cache_read_tokens=usage.cache_read_input_tokens,
+        cache_write_tokens=usage.cache_creation_input_tokens,
+        output_tokens=usage.output_tokens,
+        cost_usd=str(cost),
+        cache_hit_ratio=round(cache_hit_ratio, 4),
+        daily_attributed_total=str(budget.attributed_total()),
+        daily_level=cap_result.level,
+    )
+
+    # Walk response.content — dispatch first whitelisted tool_use; collect text.
+    text_parts: list[str] = []
+    tool_results: list[str] = []
+    for block in _iter_content_blocks(response):
+        kind = _block_kind(block)
+        if kind == "tool_use":
+            tool_name, tool_input = _tool_use_payload(block)
+            if tool_name not in INTENT_ROUTER_TOOL_WHITELIST:
+                log.warning(
+                    "intent_router_tool_outside_whitelist",
+                    tool=tool_name,
+                    chat_id=chat_id,
+                )
+                continue
+            handler_tool = _tool_by_name(tool_name)
+            if handler_tool is None:
+                continue
+            try:
+                result = await handler_tool.handler(tool_input)
+            except Exception as exc:  #tool failure → loud, but emit response
+                log.error(
+                    "intent_router_tool_dispatch_error",
+                    tool=tool_name,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
+                tool_results.append(f"(tool {tool_name} failed: {type(exc).__name__})")
+                continue
+            tool_results.append(f"tool:{tool_name} → {_summarise_tool_result(result)}")
+        elif kind == "text":
+            text_parts.append(_block_text(block))
+
+    if tool_results:
+        reply = "; ".join(tool_results)
+    elif text_parts:
+        reply = "\n".join(t.strip() for t in text_parts if t).strip()
+    else:
+        reply = "(no response)"
+
+    await bus.emit(
+        EventType.HUMAN_RESPONSE,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        text=reply or "(empty)",
+    )
+
+
+def _summarise_tool_result(result: Any) -> str:
+    """Compact one-line summary of an SDK tool envelope for HUMAN_RESPONSE."""
+    if isinstance(result, dict):
+        if result.get("isError"):
+            content = result.get("content")
+            if isinstance(content, list) and content:
+                first = content[0]
+                if isinstance(first, dict):
+                    return f"error:{first.get('text', '')[:120]}"
+            return "error"
+        content = result.get("content")
+        if isinstance(content, list) and content:
+            first = content[0]
+            if isinstance(first, dict):
+                return str(first.get("text", "ok"))[:120]
+        return "ok"
+    return str(result)[:120]
 
 
 async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
-    """Stub subscriber: on USER_CHAT_MESSAGE / HUMAN_QUERY → emit HUMAN_RESPONSE.
+    """Route USER_CHAT_MESSAGE / HUMAN_QUERY through the intent-router skill.
 
-    Full LLM dispatch through the intent-router skill body is deferred to the
-    Wave 1a pilot (loud `log.warning` here). For now this echoes a placeholder
-    response carrying the same `corr_id` so the bot's per-chat FIFO can
-    resolve its pending future end-to-end in tests.
+    Real-mode dispatch when ``ANTHROPIC_API_KEY`` is set and
+    :func:`configure_intent_router` has wired a :class:`BudgetGuard` +
+    :class:`ModelConfig`. Otherwise falls back to the legacy stub
+    (FS4 B9 contract) so the bot's per-chat FIFO future can still resolve in
+    tests / CI without secrets.
     """
     if event.type not in (EventType.USER_CHAT_MESSAGE, EventType.HUMAN_QUERY):
         return
@@ -760,24 +1132,34 @@ async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
     corr_id = payload.get("corr_id") or secrets.token_hex(8)
     text = payload.get("text", "")
 
+    # Touch skill metadata so dispatcher trigger graph stays asserted at
+    # runtime (and unknown event-types fail loud before hitting Anthropic).
     skills = dispatch_skills(event.type)
     for skill in skills:
         body = load_skill_body(skill)
         log.debug("skill_body_loaded", skill=skill, body_chars=len(body))
 
-    log.warning(
-        "human_query_intent_router_deferred",
-        hint="Wave 1a pilot will wire intent-router skill body to LLM dispatch",
-        chat_id=chat_id,
-        corr_id=corr_id,
-        text_preview=text[:80],
-    )
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    budget = _INTENT_ROUTER_BUDGET
+    models = _INTENT_ROUTER_MODELS
 
-    await bus.emit(
-        EventType.HUMAN_RESPONSE,
+    if not api_key or budget is None or models is None:
+        await _stub_human_response(
+            bus,
+            chat_id=chat_id,
+            corr_id=corr_id,
+            text=text,
+            reason="no_api_key" if not api_key else "intent_router_unconfigured",
+        )
+        return
+
+    await _dispatch_intent_router(
+        bus=bus,
         chat_id=chat_id,
         corr_id=corr_id,
-        text=f"(stub) принято: {text[:80]}",
+        text=text,
+        budget=budget,
+        models=models,
     )
 
 
@@ -796,9 +1178,12 @@ def main() -> None:
 
 __all__ = [
     "ALWAYS_ON_TOOLS",
+    "INTENT_ROUTER_SYSTEM_PROMPT",
+    "INTENT_ROUTER_TOOL_WHITELIST",
     "MCP_SERVER_NAME",
     "SESSION_ENV_VAR",
     "build_agent_options",
+    "configure_intent_router",
     "human_query_subscriber",
     "main",
     "run_orchestrator",

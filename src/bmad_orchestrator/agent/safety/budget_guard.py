@@ -108,6 +108,13 @@ class BudgetGuard:
         # ``_evaluate`` (unit tests and pre-pilot stages).
         self.state_db = state_db
         self.session_id = session_id
+        # W2 / W3 — non-tiered attribution of ad-hoc LLM spend (intent_router,
+        # worker:<story>, …) toward the daily cap. In-memory aggregate only;
+        # StateDB still owns the durable day rollup, but ``attribute_usd``
+        # surfaces an immediate halt signal so dispatch can short-circuit
+        # before issuing the next API call.
+        self._attributed_per_scope: dict[str, Decimal] = {}
+        self._attributed_total: Decimal = Decimal("0")
 
     def attach_state_db(self, state_db: StateDB, session_id: int) -> None:
         """Late-binding helper — wire the guard to a shared StateDB after init."""
@@ -255,6 +262,57 @@ class BudgetGuard:
                     corrupted=False,
                 )
         return result
+
+    # ── ad-hoc attribution (W2/W3 — intent_router, worker JSONL cost) ─────────
+
+    async def attribute_usd(
+        self, *, scope: str, spent: float | Decimal
+    ) -> BudgetResult:
+        """Attribute a non-tiered LLM spend toward the day cap.
+
+        Used by W2 (``scope="intent_router"``) and W3 (``scope=f"worker:{story_id}"``)
+        to bridge per-call usage into the day-level budget. Maintains an
+        in-memory cumulative total so dispatch can short-circuit before the
+        next API call when the daily limit is breached. Returns a
+        ``BudgetResult`` whose ``level`` reflects the day cap after this
+        attribution. NaN / inf / negative → safe-default ``halt`` + audit
+        critical (mirrors ``_evaluate`` behaviour).
+        """
+        if not is_finite_spend(spent):
+            record_audit(
+                "budget_corruption",
+                scope=scope,
+                spent_usd_repr=repr(spent),
+                origin="attribute_usd",
+                severity="critical",
+            )
+            return _corruption_result(
+                float(spent) if isinstance(spent, (int, float)) else 0.0,
+                self.cfg.daily_limit_usd,
+                self.cfg.daily_limit_usd,
+                "day",
+            )
+        delta = Decimal(str(spent))
+        self._attributed_per_scope[scope] = (
+            self._attributed_per_scope.get(scope, Decimal("0")) + delta
+        )
+        self._attributed_total += delta
+        result = self._evaluate(
+            self._attributed_total,
+            self.cfg.daily_limit_usd,
+            self.cfg.daily_limit_usd,
+            scope="day",
+        )
+        await self._publish(result, attribution_scope=scope)
+        return result
+
+    def attributed_total(self) -> Decimal:
+        """Snapshot — cumulative ``attribute_usd`` spend across all scopes."""
+        return self._attributed_total
+
+    def attributed_for(self, scope: str) -> Decimal:
+        """Snapshot — cumulative ``attribute_usd`` spend for one scope."""
+        return self._attributed_per_scope.get(scope, Decimal("0"))
 
     # Sync probes для unit-тестов / TUI dashboard.
     def check_story(self, spent_usd: float) -> BudgetResult:
