@@ -39,26 +39,6 @@
 
 ### Pending
 
-- **id:** FS2
-  **title:** Safety hooks hardening (shlex parse) + merge gate wiring + main-merge signed token + callback whitelist (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 185-280
-  **depends_on:** [FS1]
-  **acceptance:**
-    - _scan_filesystem_write: relative paths resolve против cwd/worktree; wire validate_worker_write_path
-    - _scan_bash: shlex.split + canonical flag parser + split составных команд (;/&&/||/|)
-    - Deny matrix: rm -r+-f (вкл. долгие флаги), git push -f/+refspec, git commit --no-verify (вкл. -n combined + env GIT_COMMIT_NO_VERIFY=*), git reset --hard на protected, $(...)/backticks/bash -c/eval/exec/source, git merge → main/master
-    - git_merge tool: вызвать validate_merge_target; refuse target=main без signed token
-    - BMAD_ALLOW_MAIN_MERGE → one-shot signed token .claude/main-merge-token.json (TTL 300s + used flag)
-    - bot callback whitelist {stop:, proposal:, merge:, confirm:, cancel:}; unknown → ignored
-    - tests/test_fs2_safety_hardening.py 30+ PoC bypass tests PASS (all → deny)
-  **safety_gates:**
-    - L1 hardened PreToolUse (token-based, not substring) — full activation
-    - L3 branch isolation wired into git_merge tool
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-
 - **id:** FS3
   **title:** Budget aggregator + atomic concurrency + retro overwrite protection + subprocess timeouts
   **surface:** backend-python
@@ -109,31 +89,37 @@
 
 ### Current
 
-- **id:** FS1
-  **title:** Secret hygiene — audit redaction, worker env allowlist, PII gaps
+- **id:** FS2
+  **title:** Safety hooks hardening (shlex parse) + merge gate wiring + main-merge signed token + callback whitelist (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 56-75
-  **depends_on:** []
+  **spec_section:** 185-280
+  **depends_on:** [FS1]
   **acceptance:**
-    - audit.events.jsonl: secrets scrubbed (sk-ant-*, ghp_*, AKIA*, Bearer, URL creds), file 0600
-    - telegram.jsonl: убрать original=raw field (или opt-in env + HMAC + 0600)
-    - worker subprocess env: allowlist {PATH, HOME, USER, LANG, LC_ALL, TZ, PWD, SHELL, TERM}; strip *_TOKEN, *_SECRET, *_API_KEY, ANTHROPIC_*, TELEGRAM_*, OPENAI_*, YANDEX_*, GOOGLE_*, GH_*, GITHUB_*
-    - gh_client.py: token через urllib headers (не argv-видимый curl)
-    - os.umask(0o077) в cli/main.py + bot/main.py entrypoints
-    - PII detector: PHONE_RU `:`-prefix + 8-prefix; PATH_LIKE negative lookahead email
-    - tests/test_fs1_secret_hygiene.py 15+ tests PASS
+    - _scan_filesystem_write: relative paths resolve против cwd/worktree; wire validate_worker_write_path
+    - _scan_bash: shlex.split + canonical flag parser + split составных команд (;/&&/||/|)
+    - Deny matrix: rm -r+-f (вкл. долгие флаги), git push -f/+refspec, git commit --no-verify (вкл. -n combined + env GIT_COMMIT_NO_VERIFY=*), git reset --hard на protected, $(...)/backticks/bash -c/eval/exec/source, git merge → main/master
+    - git_merge tool: вызвать validate_merge_target; refuse target=main без signed token
+    - BMAD_ALLOW_MAIN_MERGE → one-shot signed token .claude/main-merge-token.json (TTL 300s + used flag)
+    - bot callback whitelist {stop:, proposal:, merge:, confirm:, cancel:}; unknown → ignored
+    - tests/test_fs2_safety_hardening.py 30+ PoC bypass tests PASS (all → deny)
   **safety_gates:**
-    - L1 secret pattern filter — wired into all audit writes
+    - L1 hardened PreToolUse (token-based, not substring) — full activation
+    - L3 branch isolation wired into git_merge tool
   **destructive_actions:** []
-  **checkpoint:** false
+  **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-16 16:30 UTC
-  **workflow:** .claude/skills/auto-loop-spec/workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
-(empty — initiative not yet started)
+
+- **id:** FS1
+  **completed:** 2026-05-16 17:05 UTC
+  **commit:** 5d2bef9
+  **files_changed:** 9 (+554 -51)
+  **tests:** 28 new (test_fs1_secret_hygiene.py) — 275 total PASS, 0 fail
+  **closed_blockers:** B6, B7, B8, H5, M10, H13
+  **summary:** Secret hygiene baseline: agent.safety.audit scrubs sk-ant-/telegram-token/ghp_/AKIA/Bearer/URL-creds before write + 0o600. bot.audit drops `original` by default; opt-in HMAC-SHA256 forensics log via BMAD_AUDIT_KEEP_ORIGINAL=1+BMAD_AUDIT_HMAC_KEY. runtime.worker_spawn ALLOWED_WORKER_ENV strips API_KEY/TOKEN/SECRET/AWS_*/etc. gh_client uses urllib (token in headers, not curl argv). bot/main.py + cli/main.py call os.umask(0o077). pii_detector PHONE_RU lookbehind extended (`:;,/`) + 8\d{10} format; PATH_LIKE start-of-pattern lookahead (?!\S*@) so `/var/lib/foo@host.com` doesn't suppress EMAIL detection.
 
 ## Safety Gates Triggered
 (none)
@@ -149,11 +135,27 @@
   **rationale:** Нам нужен код S1-S8 чтобы фиксить P0 blockers. Auto-loop-spec bootstrap создаёт integration от main, что бы removed S1-S8 целиком.
   **impact:** После завершения security_fixes — manual merge ОБЕИХ integration branches на main (сначала integration/orchestrator_agent, затем integration/orchestrator_agent_security_fixes; ИЛИ только security_fixes если он включает scaffold base).
 
+- **date:** 2026-05-16 17:00 UTC
+  **session:** FS1
+  **decision:** Lazy import `from bmad_orchestrator.agent.tools._common import runs_dir` внутри `audit_log_path()` и `telegram_audit_path()`.
+  **rationale:** Pre-existing circular dep (`agent.safety.audit ↔ agent.tools._common`) blocked test collection. Discovered when first attempting to run FS1 tests; verified on parent branch — same failure (S4 commit fcc3dd3 introduced the cycle but tests were never actually executed).
+  **impact:** Cycle broken; 247 prior tests + 28 new FS1 tests collect & pass. No behavioral change.
+
+- **date:** 2026-05-16 17:00 UTC
+  **session:** FS1
+  **decision:** PATH_LIKE использует start-of-pattern lookahead `(?!\S*@)` вместо post-match `(?![^/]*@)` из спеки.
+  **rationale:** Spec wording позволял regex backtrack: ` /var/lib/foo@host.com` → backtracks to ` /var/lib`, post-match position has `/` next, `[^/]*` matches empty, `@` ≠ `/` → lookahead succeeds → PATH_LIKE matches → EMAIL detection inside the path span gets suppressed by safelist mask. Start-of-pattern `(?!\S*@)` rejects the entire token whenever `@` exists later in the same non-whitespace sequence.
+  **impact:** EMAIL detection no longer suppressed by email-bearing path tokens. Pure paths (`/var/lib/foo`) still match.
+
 ## Journal
 
 [2026-05-16 04:30 UTC] bootstrap: manual создание tracker + integration/orchestrator_agent_security_fixes FROM integration/orchestrator_agent + backup/orchestrator_agent_security_fixes-pre-2026-05-16. 4 fix-сессии запланировано (все surface=backend-python). Runtime=loop_wrapper, Delay=600s, Auto merge=false. Spec: spec/spec_orchestrator_agent_security_fixes.md v0.1.
 
 [2026-05-16 16:30 UTC] FS1 promoted to Current — workflow=backend-python (adapted: stdlib edits, no new gateway). Targets: agent/safety/audit.py, bot/audit.py, runtime/worker_spawn.py, imports/from_bad/gh_client.py, cli/main.py, bot/main.py, bot/pii_detector.py + tests/test_fs1_secret_hygiene.py.
+
+[2026-05-16 17:05 UTC] FS1 completed (commit 5d2bef9): B6/B7/B8/H5/M10/H13 closed. 28 new tests + 247 prior → 275 PASS. Ruff clean. 9 files changed (+554 -51). Side-effect: fixed pre-existing circular import (agent.safety.audit ↔ agent.tools._common) via lazy import — added to Decisions Log. Auto merge=false → no main merge. Runtime=loop_wrapper → exit cleanly, wrapper handles next iteration.
+
+[2026-05-16 17:05 UTC] FS2 promoted to Current — workflow=backend-python. Targets: agent/safety/hooks.py (shlex/token parse), agent/tools/merge.py + branch_validator.py (signed-token main-merge gate), bot/handlers.py (callback whitelist) + tests/test_fs2_safety_hardening.py 30+ PoC bypass tests.
 
 ## Final Report
 (empty — last session not yet completed)
