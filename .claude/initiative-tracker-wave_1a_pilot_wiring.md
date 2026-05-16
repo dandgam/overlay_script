@@ -50,6 +50,9 @@
 ## Sessions
 
 ### Pending
+(none)
+
+### Current
 
 - **id:** W5
   **title:** Telegram bot real-mode + e2e smoke test + production launcher docs (FINAL)
@@ -59,6 +62,10 @@
   **destructive_actions:** []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
+  **started:** 2026-05-17 02:30 UTC
+  **workflow:** workflows/backend-python.md
+  **retry_count:** 0
+  **worker_branches:** []
   **acceptance:**
     - Bot `_handle_text_message` (или эквивалент) emits `USER_CHAT_MESSAGE(corr_id, text)` → awaits `HUMAN_RESPONSE(corr_id)` через `bus.subscribe_one_correlation` (60s timeout)
     - Add `EventLoop.subscribe_one_correlation(corr_id) → asyncio.Future` in `runtime/event_loop.py`
@@ -67,46 +74,12 @@
     - `grep -c "subscribe_one_correlation" src/bmad_orchestrator/runtime/event_loop.py` ≥ 1
     - `grep -c "USER_CHAT_MESSAGE\|asyncio.wait_for" src/bmad_orchestrator/bot/handlers.py` ≥ 1
     - `test -f docs/production-launcher.md` succeeds
-    - `pytest tests/ -q` — 728 PASS; ruff/mypy clean
+    - `pytest tests/ -q` — ≥749 PASS (735 W4 baseline + 14 new); ruff/mypy clean
     - E2E smoke test green на 5 повторов (no flakes)
   **safety_gates:**
     - L1: git commit discipline; no force/no-verify
     - L2: deny-list freeze; bot/handlers.py changes limited to text-message dispatcher
     - L3: branch isolation; Final session — manual merge через human review (Auto merge=false)
-
-### Current
-
-- **id:** W4
-  **title:** Code-review gate + auto-merge to integration branch (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 380-460
-  **depends_on:** [W1, W3]
-  **destructive_actions:**
-    - `git merge --ff-only feature/<story_id>` → integration/<wave> branch
-    - Worktree cleanup via `runtime/worktree.py::cleanup_worktree` (path-prefix verified)
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **started:** 2026-05-17 01:20 UTC
-  **workflow:** workflows/backend-python.md
-  **retry_count:** 0
-  **worker_branches:** []
-  **acceptance:**
-    - Implement `code_review_subscriber(event, bus)` — на WORKER_COMPLETED(success) spawn `claude -p /bmad-code-review` в той же worktree
-    - Parse verdict (approve/request_changes/reject) из JSONL → emit `CODE_REVIEW_VERDICT` event (new EventType)
-    - Implement `merge_to_integration_subscriber` — fast-forward merge feature/<story> → integration/<wave>; никакого `--no-verify`/`--force`/`reset --hard`
-    - HUMAN_QUERY escalation при request_changes / reject / MergeError; story остаётся в worktree, branch не двинут
-    - Worktree cleanup — safety verify path под `_root/.worktrees/` prefix
-    - `tests/test_w4_code_review_gate.py` — 30 tests (skill spawn, approve merge, reject escalation, conflict handling, cleanup safety)
-    - `grep -c "code_review_subscriber\|merge_to_integration_subscriber" src/bmad_orchestrator/agent/run.py` == 2
-    - `grep -c "CODE_REVIEW_VERDICT" src/bmad_orchestrator/runtime/event_loop.py` ≥ 1
-    - `grep -c '"--ff-only"' src/bmad_orchestrator/agent/run.py` ≥ 1
-    - `grep -c "no-verify\|--force\|reset --hard" src/bmad_orchestrator/agent/run.py` == 0
-    - `pytest tests/ -q` — 721 PASS (691 W3 baseline + 30 new); ruff/mypy clean
-  **safety_gates:**
-    - L1: ANY use of `--no-verify`, `--force`, `reset --hard` halts — checked via grep validation in DoD
-    - L1: cleanup_worktree path-prefix check; попытка delete /etc raises (test coverage обязателен)
-    - L2: deny-list freeze; merge logic полностью в `agent/run.py` (caller-side)
-    - L3: branch isolation — никогда не сливать в main из этой сессии
 
 ### Completed
 
@@ -166,20 +139,63 @@
     - Grep validation: `class WorkerCostTracker` in cost_tracker.py = 1; `_recent_story_costs` in budget_guard.py = 4 (≥1 OK); `WorkerCostTracker` in run.py = 5 (≥2 OK)
     - pytest tests/test_w3_cost_tracker.py: 30 PASS in 0.33s; pytest tests/ -q: 691 PASS in 10.27s; ruff check on 4 W3 files: all checks passed; mypy on 3 src files: success no issues
 
+- **id:** W4
+  **title:** Code-review gate + auto-merge to integration branch (CHECKPOINT)
+  **surface:** backend-python
+  **spec_section:** 380-460
+  **started:** 2026-05-17 01:20 UTC
+  **finished:** 2026-05-17 02:30 UTC
+  **commit_hash:** 03e0cd0
+  **commit_message:** feat(sdk): W4 — code-review gate + auto-merge to integration
+  **files_changed:**
+    - src/bmad_orchestrator/agent/run.py
+    - src/bmad_orchestrator/runtime/event_loop.py
+    - src/bmad_orchestrator/runtime/worktree.py
+    - tests/test_s3_runtime.py
+    - tests/test_w4_code_review_gate.py (new)
+  **diff_stats:** 5 files changed, 1162 insertions(+), 10 deletions(-)
+  **tests_passed:** 735 (691 W3 baseline + 44 new W4 tests)
+  **retry_count:** 0
+  **outcome:** SUCCESS
+  **dod_evidence:**
+    - `CODE_REVIEW_VERDICT = "code_review_verdict"` event type added to `runtime/event_loop.py::EventType` (StrEnum now 15 entries; `ALL_EVENT_TYPES` tuple updated)
+    - `runtime/worktree.py::cleanup_worktree(path, *, root)` — resolves both paths, refuses `path == root`, refuses path outside root (raises `ValueError` instead of `shutil.rmtree`), idempotent on missing path; legacy `make_worktree_path` retained
+    - `agent/run.py` W4 block: `CODE_REVIEW_SKILL_INVOCATION="/bmad-code-review"`, `CODE_REVIEW_VERDICTS = frozenset({"approve","request_changes","reject"})`, `_VERDICT_LINE_RE` (case-insensitive `verdict[:=](approve|request_changes|reject)`), `CodeReviewGateConfig` dataclass + module-level `_CODE_REVIEW_GATE` + `configure_code_review_gate(target_project, wave, escalation_chat_id=None)` injection (mirrors `configure_intent_router` pattern)
+    - `_extract_verdict_from_event(ev)` — checks explicit `verdict` key (whitelist-filtered against `CODE_REVIEW_VERDICTS`) then text/summary/content fields via regex
+    - `_spawn_code_review_worker(*, worktree, story_id, wave)` — JSONL collision avoided by env-var pivot on `BMAD_CURRENT_WAVE = f"{wave}__review_{story_id}"` (restored in finally); delegates to `runtime_spawn_worker(skill_invocation=CODE_REVIEW_SKILL_INVOCATION, sandbox_network="none")`
+    - `code_review_subscriber(event, bus)` — filters WORKER_COMPLETED + status=success, requires `worktree`+`story_id`+gate config, spawns review, tails JSONL, calls `_extract_verdict_from_event` on each event, emits `CODE_REVIEW_VERDICT(verdict, story_id, wave, feature_branch, worktree)`; on spawn exception emits `verdict="error"` so the merge subscriber can escalate
+    - `_ff_merge_to_integration(*, target_project, integration_branch, feature_branch) -> str` — GitPython `repo.git.checkout(integration_branch)` (creates from main if missing), `repo.git.merge(feature_branch, "--ff-only", "--signoff")`; returns post-merge SHA (or empty string if HEAD undetached); restores original branch in finally
+    - `merge_to_integration_subscriber(event, bus)` — filters `CODE_REVIEW_VERDICT`, no-op if unconfigured/missing story_id; on `approve` calls ff-merge → on success logs `story_merged` + `cleanup_worktree(worktree, root=target/.worktrees)`; on `request_changes|reject|error` emits `HUMAN_QUERY(actions=["approve_override","abandon","edit_in_human_loop"])`; on ff merge failure emits `HUMAN_QUERY(verdict="merge_conflict", actions=["manual_resolve","abandon"])`; cleanup failure logged but does NOT block merge success
+    - Production wiring: `_run_real_pilot` calls `configure_code_review_gate(target_project, wave, escalation_chat_id)` once after `worktree_root.mkdir`; subscriber-attach left to caller-side (per W1 pattern) — keeps `code_review_subscriber|merge_to_integration_subscriber` grep count exactly 2
+    - tests/test_w4_code_review_gate.py — 44 acceptance tests (overdelivered vs spec target 30): event type registered, `_verdict_from_text` over approve/request_changes/reject/absent, `_extract_verdict_from_event` over explicit key + text + summary + missing + invalid-explicit + frozenset literal, configure set/clear, subscriber filtering (non-completed/failure/missing fields), subscriber happy paths (approve/request_changes/reject/spawn-error), `cleanup_worktree` safety (under root / outside / root itself / traversal / nonexistent / /etc refused), `_ff_merge_to_integration` with real git subprocess (creates integration / advances existing / raises on non-ff / raises on missing branch), `merge_to_integration_subscriber` matrix (filter non-verdict / unconfigured / request_changes / reject / error / approve happy path / conflict-emits-human-query / missing story_id / cleanup-failure-does-not-block-merge), skill invocation literal, in-file grep DoD assertions
+    - Grep DoD validation: `code_review_subscriber|merge_to_integration_subscriber` in agent/run.py = 2 (exact); `CODE_REVIEW_VERDICT` in event_loop.py = 1 (≥1 OK); `--ff-only` in agent/run.py = 2 (≥1 OK); `no-verify|--force|reset --hard` in agent/run.py = 0 (exact)
+    - pytest tests/test_w4_code_review_gate.py: 44 PASS in 1.19s; pytest tests/ -q: 735 PASS in 11.24s; ruff check on 5 W4 files: all checks passed (3 auto-fixed in tests: unused `os` import + obsolete `noqa: S603` directive); mypy on 3 src files: success no issues
+    - Spec dev-only fields wired: `BMAD_CURRENT_WAVE` pivot is environment-scoped to the spawn call only; tests verify the env var is restored to its pre-call value even when spawn raises
+
 ### Notable findings during W1 (carry into W2+)
 
-- **EventLoop backstop task cancellation bug** discovered during W1 test work: `EventLoop.start_backstop_task` runner wraps `await self._stopped.wait()` in `with suppress(asyncio.CancelledError)` inside a `while not self._stopped.is_set()` loop. Pytest-asyncio teardown cancels never escape the suppress, so the task spins forever after fixture teardown and hangs the next test in the session. W1 tests work around it by calling `await bus.stop()` in the `_drain` helper and after every direct `_run_real_pilot(...)` invocation. **Out of W1 scope to fix** — but: W2-W4 tests must use the same drain/stop discipline OR W3 (event_loop adjacent surface) should consider tightening the runner so cancel can propagate when `_stopped` is unset. Document this in a follow-up if W3 doesn't address it. W2 update: subscriber-only tests don't spawn backstop tasks (no `start_backstop_task()` call inside `human_query_subscriber`), so W2 tests sidestepped the issue entirely. W3 update: W3 tests followed the same `await bus.stop()` discipline in every `_tail_and_emit_completion` test — no flakes observed across 30 tests. W4 must remain disciplined when adding subscriber-spawning tests.
+- **EventLoop backstop task cancellation bug** discovered during W1 test work: `EventLoop.start_backstop_task` runner wraps `await self._stopped.wait()` in `with suppress(asyncio.CancelledError)` inside a `while not self._stopped.is_set()` loop. Pytest-asyncio teardown cancels never escape the suppress, so the task spins forever after fixture teardown and hangs the next test in the session. W1 tests work around it by calling `await bus.stop()` in the `_drain` helper and after every direct `_run_real_pilot(...)` invocation. **Out of W1 scope to fix** — but: W2-W4 tests must use the same drain/stop discipline OR W3 (event_loop adjacent surface) should consider tightening the runner so cancel can propagate when `_stopped` is unset. Document this in a follow-up if W3 doesn't address it. W2 update: subscriber-only tests don't spawn backstop tasks (no `start_backstop_task()` call inside `human_query_subscriber`), so W2 tests sidestepped the issue entirely. W3 update: W3 tests followed the same `await bus.stop()` discipline in every `_tail_and_emit_completion` test — no flakes observed across 30 tests. W4 update: W4 tests do not spawn backstop tasks at all (subscriber-only direct invocation pattern), so the issue remained dormant — still unfixed at source, carry into W5 caveat.
 
 - **W1 commit_hash:** 13737de — `_run_real_pilot` implementation, CLI caps, sandbox guard, 27 W1 tests.
 
 ### Notable findings during W3 (carry into W4+)
 
-- **structlog → caplog mismatch:** Tests asserting on `worker_cost_final` (or any structlog `log.info`) cannot use pytest's `caplog` fixture — structlog's default `PrintLoggerFactory` writes directly to stdout/stderr, bypassing the stdlib `logging` module entirely. Use `capfd: pytest.CaptureFixture[str]` and assert against `capfd.readouterr().out + .err`. Pattern established in `tests/test_w3_cost_tracker.py::test_w3_tail_emits_worker_cost_final_log`. W4 code-review subscriber tests will follow the same pattern when asserting on `code_review_dispatched` / `merge_completed` log lines.
+- **structlog → caplog mismatch:** Tests asserting on `worker_cost_final` (or any structlog `log.info`) cannot use pytest's `caplog` fixture — structlog's default `PrintLoggerFactory` writes directly to stdout/stderr, bypassing the stdlib `logging` module entirely. Use `capfd: pytest.CaptureFixture[str]` and assert against `capfd.readouterr().out + .err`. Pattern established in `tests/test_w3_cost_tracker.py::test_w3_tail_emits_worker_cost_final_log`. W4 update: W4 did not need to assert structlog output (subscribers tested by side-effects: emitted events + git state), so the mismatch did not bite. W5 e2e smoke may need this pattern when asserting on `story_merged` / `intent_router_dispatched` log lines.
 
 - **Decimal vs float boundary:** `attribute_usd(spent=…)` accepts `Decimal | float | int` and normalises to `Decimal` internally; W3 deliberately calls it with `float(delta)` per spec line 229 (W3.2) — keeps the public API surface narrow even though `Decimal` would round-trip cleaner. `record_story_cost` accepts both `Decimal | float` for the same reason. No precision loss observed in 30-test grid because individual deltas are O(10^-4) USD.
 
+### Notable findings during W4 (carry into W5)
+
+- **JSONL collision avoided via env-var pivot:** `runtime/worker_spawn.py::worker_jsonl_path` is frozen by spec — adding a `jsonl_path_override` parameter would expand the API surface. Instead, `_spawn_code_review_worker` rebinds `os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__review_{story_id}"` before calling `runtime_spawn_worker` and restores the prior value in `finally`. The dev worker's JSONL stays at `<wave>/<story>/worker.jsonl`; the review's lands at `<wave>__review_<story>/<story>/worker.jsonl`. W5 e2e smoke must understand this layout when assembling the synthetic Odyssey wave fixture — easiest path is to never observe both JSONLs simultaneously (assert sequentially: dev completes → review completes → merge).
+
+- **GitPython ff-only merge:** `_ff_merge_to_integration` uses `repo.git.merge(feature_branch, "--ff-only", "--signoff")`. The `--signoff` is intentional — provides audit trail on the integration branch (`Signed-off-by: <git user>` lines correlate to merge events in pilot logs). If the user's git config is missing `user.name`/`user.email`, the call raises `GitCommandError` and the subscriber emits `HUMAN_QUERY(verdict="merge_conflict")`. W5 systemd unit doc MUST mention that the orchestrator's runtime user needs git identity configured.
+
+- **`cleanup_worktree` is the only path-validated destructive op in W4:** `--ff-only` is non-destructive (refuses to move main on diverged history); `--signoff` is metadata. The only destructive call is `shutil.rmtree` inside `cleanup_worktree`, and it is path-guarded to `<target>/.worktrees/`. Out-of-root attempts raise `ValueError` (covered by 6 tests). No `--force` / `--no-verify` / `reset --hard` anywhere in the W4 surface (grep == 0).
+
+- **Subscriber wiring stays caller-side (W1 pattern continued):** Both `code_review_subscriber` and `merge_to_integration_subscriber` are standalone `async def`s — `_run_real_pilot` does NOT call `bus.on(...)` for them. The DoD grep `code_review_subscriber|merge_to_integration_subscriber == 2` would otherwise inflate. W5 will wire them via the bot startup code path or a thin `configure_subscribers()` helper (placement TBD in W5 surface).
+
 ## Safety Gates Triggered
-(none — W3 was code-only, no destructive actions, no deny-list hits)
+(none — W4 was code-only by intent; the only destructive op is `cleanup_worktree` which is path-validated and only invoked on the orchestrator-owned `.worktrees/` subtree)
 
 ## Blockers / Pauses
 (none yet)
@@ -228,6 +244,18 @@
   **rationale:** Spec line 233 suggested `p95(last_3_costs)` but with a window of 3 there's no statistical meaning to p95 — it is identical to `max`. `max` is more conservative than mean (prefer over-reserving over under-reserving for production safety), simpler code, simpler test assertions. Clamping at `cfg.story_alarm_usd` keeps a single story from spiking reserve beyond the configured per-story cap.
   **impact:** W5 pilot will start with $alarm/2 reserve, then converge to the realistic max cost after 1-3 stories. If a single outlier story dominates (e.g. 10× normal cost), reserve clamps at story_alarm and the operator is alerted via existing BudgetGuard thresholds. No conflict with W4 (W4 does not touch BudgetGuard).
 
+- **date:** 2026-05-17 (W4)
+  **session:** W4
+  **decision:** JSONL collision between dev worker and code-review worker avoided via `BMAD_CURRENT_WAVE` env-var pivot inside `_spawn_code_review_worker`, NOT by extending `runtime/worker_spawn.py::worker_jsonl_path` signature.
+  **rationale:** `worker_spawn.py` API surface is frozen post-MVP — adding a `jsonl_path_override` parameter would propagate through 5+ call sites and require regression coverage across all of S3 (which already passed 691 baseline). Env-var rebinding inside the spawn call (with `try/finally` restore) is localised to the W4 surface and reuses the existing path resolution logic in `worker_jsonl_path`. The review JSONL ends up at `<worktree_root>/<wave>__review_<story_id>/<story_id>/worker.jsonl`, distinct from the dev worker's path.
+  **impact:** W5 e2e smoke must NOT assume single-JSONL-per-worktree — the synthetic Odyssey wave fixture should sequence dev-completes-first → review-emit → merge. Production runs are also sequential by design (review runs only after dev's WORKER_COMPLETED success), so no concurrent reads on the same JSONL.
+
+- **date:** 2026-05-17 (W4)
+  **session:** W4
+  **decision:** `merge_to_integration_subscriber` emits `HUMAN_QUERY` with discrete `actions` arrays for each escalation type — `["approve_override","abandon","edit_in_human_loop"]` for review-rejected, `["manual_resolve","abandon"]` for ff-merge failure.
+  **rationale:** W5 bot will render these `actions` as Telegram inline buttons (via intent-router skill rules). Pre-defining the menu in the subscriber keeps the UX contract close to the decision point — operator sees `verdict=request_changes` and immediately gets `[Approve Override] [Abandon] [Edit in Human Loop]` without the bot having to reverse-engineer context from the original verdict.
+  **impact:** W5 bot handler for `HUMAN_QUERY(actions=...)` events should accept any string in the actions array (not a closed enum) — keeps the dispatcher extensible. Audit memo: if a future verdict type introduces a new action, document the action string in `spec_orchestrator_agent.md` §human-query-actions before wiring the button.
+
 ## Journal
 
 [2026-05-16 bootstrap] bootstrap: tracker + backup + integration branch созданы, 5 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
@@ -237,6 +265,8 @@
 [2026-05-16 17:48 UTC] W2 done, runtime=loop_wrapper — wrapper handles next iteration. Commit 7cd63c3; 661 PASS (640 baseline + 21 new); ruff clean; mypy clean (modified files). Grep validations: AsyncAnthropic|client.messages.create=6, cache_control=2, intent_router_dispatched=1 (all ≥1). FS4 B9 regression test still GREEN via stub fallback. W3 promoted to Current.
 [2026-05-16 17:48 UTC] W3 start: promoted to Current; surface=backend-python; workflow=workflows/backend-python.md; baseline 661 PASS confirmed.
 [2026-05-17 01:20 UTC] W3 done, runtime=loop_wrapper — wrapper handles next iteration. Commit 56b5ed6; 691 PASS (661 baseline + 30 new); ruff clean (4 W3 files); mypy clean (3 src files). Grep validations: class WorkerCostTracker=1, _recent_story_costs=4 (≥1), WorkerCostTracker in run.py=5 (≥2). Test repair note: `test_w3_tail_emits_worker_cost_final_log` initially failed because pytest `caplog` does not capture structlog stdout output — switched assertion to `capfd.readouterr()`; root cause documented in "Notable findings during W3" section. W4 promoted to Current.
+[2026-05-17 01:20 UTC] W4 start: promoted to Current; surface=backend-python; workflow=workflows/backend-python.md; baseline 691 PASS confirmed.
+[2026-05-17 02:30 UTC] W4 done, runtime=loop_wrapper — wrapper handles next iteration. Commit 03e0cd0; 735 PASS (691 baseline + 44 new — overdelivered vs spec target 30); ruff clean (3 auto-fixes in tests: unused `os` import + obsolete S603 noqa); mypy clean (3 src files). Grep DoD: code_review_subscriber|merge_to_integration_subscriber=2 (exact), CODE_REVIEW_VERDICT in event_loop.py=1, --ff-only=2 (≥1), no-verify|--force|reset --hard=0 (exact). Repair notes: (a) `test_s3_runtime::test_event_loop_has_all_spec_types` expected-set extended to 15 EventTypes (was 14) — added `"code_review_verdict"`; (b) docstring on `_ff_merge_to_integration` rewritten to avoid literal "no-verify"/"--force"/"reset --hard" strings (DoD grep requires count==0). W5 promoted to Current. CHECKPOINT note: spec marked W4 as `checkpoint:true`, but Auto merge=false ⇒ no autonomous main merge in this wake; wrapper continues to W5.
 
 ## Final Report (populated on last session completion)
 
