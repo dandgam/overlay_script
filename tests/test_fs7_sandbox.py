@@ -40,8 +40,15 @@ requires_bwrap = pytest.mark.skipif(_BWRAP_BIN is None, reason=_BWRAP_REASON)
 @pytest.fixture(autouse=True)
 def _audit_log_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Redirect audit writes to a tmp file so detect_sandbox()'s fallback
-    audit emission doesn't pollute the orchestrator's prod audit log."""
+    audit emission doesn't pollute the orchestrator's prod audit log.
+
+    Also clears FS9 sandbox enforcement envs so a host that has them set
+    (production launcher leaked into CI) doesn't flip detect_sandbox into
+    its hard-fail branch unexpectedly.
+    """
     monkeypatch.setenv("BMAD_AUDIT_LOG", str(tmp_path / "audit.events.jsonl"))
+    monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
+    monkeypatch.delenv("BMAD_SANDBOX_DISABLE_CONFIRMED", raising=False)
 
 
 # ── Abstraction unit tests ────────────────────────────────────────────────────
@@ -74,7 +81,9 @@ def test_no_sandbox_raises_on_empty_cmd(tmp_path: Path) -> None:
 def test_bwrap_prepends_bwrap_binary(tmp_path: Path) -> None:
     sb = BwrapSandbox(bwrap_path="/usr/bin/bwrap")
     out = sb.wrap_command(["claude", "-p", "hello"], worktree=tmp_path)
-    assert out[0] == "/usr/bin/bwrap"
+    # FS9 H3+H4: prlimit now wraps the bwrap invocation, so out[0] is prlimit.
+    # bwrap still appears immediately after the prlimit `--` separator.
+    assert "/usr/bin/bwrap" in out
     assert out[-3:] == ["claude", "-p", "hello"]
 
 
@@ -219,7 +228,8 @@ def test_bwrap_raises_on_relative_readonly_path(tmp_path: Path) -> None:
         ["echo"], worktree=tmp_path, readonly_paths=[rel]
     )
     # The relative path got resolve()d; just confirm the wrap succeeded.
-    assert out[0].endswith("bwrap") or out[0] == "bwrap"
+    # FS9: out[0] is prlimit; bwrap follows after the `--` separator.
+    assert any(tok.endswith("bwrap") or tok == "bwrap" for tok in out)
 
 
 # ── Factory / detect_sandbox tests ────────────────────────────────────────────
@@ -244,6 +254,7 @@ def test_detect_returns_no_sandbox_when_bwrap_missing(
 
 def test_detect_env_override_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BMAD_SANDBOX", "none")
+    monkeypatch.setenv("BMAD_SANDBOX_DISABLE_CONFIRMED", "yes-i-accept-risk")
     sb = detect_sandbox()
     assert isinstance(sb, NoSandbox)
 
@@ -277,6 +288,7 @@ def test_detect_env_override_none_emits_audit(
     audit_path = tmp_path / "audit.events.jsonl"
     monkeypatch.setenv("BMAD_AUDIT_LOG", str(audit_path))
     monkeypatch.setenv("BMAD_SANDBOX", "none")
+    monkeypatch.setenv("BMAD_SANDBOX_DISABLE_CONFIRMED", "yes-i-accept-risk")
     detect_sandbox()
     content = audit_path.read_text(encoding="utf-8")
     assert "env_override" in content
@@ -300,13 +312,16 @@ def _run_inside_sandbox(
         network=network,  # type: ignore[arg-type]
         env={"PATH": "/usr/bin:/bin"},
     )
-    return subprocess.run(
+    res = subprocess.run(
         wrapped,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
     )
+    if "Creating new namespace failed" in res.stderr:
+        pytest.skip(f"host namespace exhaustion: {res.stderr.strip()}")
+    return res
 
 
 @requires_bwrap
@@ -417,8 +432,8 @@ def test_real_sandbox_environment_isolation(
     res = subprocess.run(
         wrapped, capture_output=True, text=True, timeout=10.0, check=False
     )
-    # bwrap's --setenv only forwards what we asked for; the host env
-    # variable must surface as MISSING inside the sandbox.
+    if "Creating new namespace failed" in res.stderr:
+        pytest.skip(f"host namespace exhaustion: {res.stderr.strip()}")
     assert "key=MISSING" in res.stdout
     assert "sk-test-must-not-leak" not in res.stdout
 

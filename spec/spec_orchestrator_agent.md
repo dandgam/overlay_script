@@ -1329,16 +1329,18 @@ NC5 pipe-to-interpreter…). Blacklist на bash text фундаментальн
 ### Default bwrap policy
 
 ```text
-bwrap \
-  --die-with-parent --new-session \
-  --ro-bind / / \            # entire host FS read-only
-  --proc /proc --dev /dev \  # minimal proc/dev
-  --tmpfs /tmp \             # fresh empty /tmp per worker
-  --bind {worktree} {worktree} --chdir {worktree} \  # writable: worktree only
-  --unshare-pid --unshare-uts --unshare-ipc --unshare-cgroup-try \
-  --unshare-net \            # network="none" (default) — drops netns
-  --clearenv \               # NO host env inheritance
-  --setenv K V ...           # only allow-listed env vars forwarded
+prlimit --nproc=512 --as=8GB --fsize=10GB --nofile=4096 -- \  # FS9 H3+H4 rlimits
+  bwrap \
+    --die-with-parent --new-session \
+    --ro-bind / / \            # entire host FS read-only
+    --proc /proc --dev /dev \  # minimal proc/dev
+    --tmpfs /tmp \             # fresh empty /tmp per worker
+    --tmpfs /sys \             # FS9 H1 — hide kernel info (LSM, dmi, network)
+    --bind {worktree} {worktree} --chdir {worktree} \  # writable: worktree only
+    --unshare-pid --unshare-uts --unshare-ipc --unshare-cgroup-try \
+    --unshare-net \            # network="none" (default) — drops netns
+    --clearenv \               # NO host env inheritance
+    --setenv K V ...           # only allow-listed env vars forwarded
 ```
 
 Allow-list для `--setenv`: `PATH HOME USER LANG LC_ALL TZ PWD SHELL TERM` +
@@ -1347,7 +1349,7 @@ caller-supplied (e.g. `ORCHESTRATOR_WORKER_STORY_ID`). Никаких
 
 ### Wiring points
 
-- `runtime/worker_spawn.py::spawn_worker(use_sandbox=True, sandbox_network="github_only")` — wraps `claude -p /bmad-auto-dev`. Audit event записывает `sandbox_used` + `sandbox_kind`.
+- `runtime/worker_spawn.py::spawn_worker(use_sandbox=True, sandbox_network="none")` — wraps `claude -p /bmad-auto-dev`. Default network policy `"none"` since FS9 H2 (was `"github_only"` ≡ silently `"full"` because nftables whitelist deferred); pilot caller must pass `sandbox_network="full"` explicitly if git clone needed. Audit event записывает `sandbox_used` + `sandbox_kind`.
 - `agent/tools/retro.py::spawn_retro_worktree` — wraps `claude -p /bmad-retrospective`. Default `network="none"` (retro работает с локальными артефактами).
 
 ### Network policy
@@ -1377,8 +1379,82 @@ caller-supplied (e.g. `ORCHESTRATOR_WORKER_STORY_ID`). Никаких
 
 ### Override
 
-`BMAD_SANDBOX=none` — force disable (для CI без bwrap или для отладки).
+`BMAD_SANDBOX=none` — force disable (для CI без bwrap или для отладки). С FS9 H6
+требует двухключевого подтверждения: одновременно с `BMAD_SANDBOX=none` должен
+быть установлен `BMAD_SANDBOX_DISABLE_CONFIRMED=yes-i-accept-risk`. Иначе
+`detect_sandbox()` raises `RuntimeError`. Защищает от случайного отключения
+sandbox через unset/typo в systemd drop-in или child-process env.
+
 `BMAD_SANDBOX=bwrap` — force bwrap (fails-soft к NoSandbox если binary missing + audit).
+
+### Sandbox configuration defaults (FS9 — 2026-05-16)
+
+После FS9 round 4 защита sandbox многослойна, и поведение каждого слоя
+конфигурируется env vars. Default policy безопасна сама по себе; production
+launcher должен дополнительно вынуждать строгий режим через `BMAD_REQUIRE_*`
+env vars.
+
+#### Env vars
+
+| Env var | Default | Behaviour |
+|---|---|---|
+| `BMAD_SANDBOX` | _(unset)_ | `bwrap` if available, else NoSandbox+audit. Override: `bwrap` (force), `none` (disable, requires confirmation token). |
+| `BMAD_SANDBOX_DISABLE_CONFIRMED` | _(unset)_ | Must equal `yes-i-accept-risk` to actually enact `BMAD_SANDBOX=none`. Two-key confirmation guard. |
+| `BMAD_REQUIRE_SANDBOX` | _(unset)_ | `1`/`true`/`yes` → `detect_sandbox()` raises `RuntimeError` if resolved backend is not a real sandbox (i.e. NoSandbox). **Production REQUIRED**. |
+| `BMAD_SANDBOX_MAX_NPROC` | `512` | prlimit `--nproc=` cap (fork-bomb defence). Positive int. |
+| `BMAD_SANDBOX_MAX_AS_BYTES` | `8589934592` (8 GiB) | prlimit `--as=` cap (virtual memory). Positive int (bytes). |
+| `BMAD_SANDBOX_MAX_FSIZE_BYTES` | `10737418240` (10 GiB) | prlimit `--fsize=` cap (max single-file size). Positive int (bytes). |
+| `BMAD_SANDBOX_MAX_NOFILE` | `4096` | prlimit `--nofile=` cap (max open fds). Positive int. |
+| `BMAD_REQUIRE_DB_BRIDGE` | _(unset)_ | `1`/`true`/`yes` → bot `_attach_bridge()` raises `RuntimeError` on DB failure (no silent stub-mode fallback). **Production REQUIRED**. |
+
+#### Production launcher recommendations
+
+Systemd unit / launcher script для orchestrator + bot MUST set:
+
+```ini
+[Service]
+Environment="BMAD_REQUIRE_SANDBOX=1"
+Environment="BMAD_REQUIRE_DB_BRIDGE=1"
+# rlimits — only override if profiling shows defaults too tight
+# Environment="BMAD_SANDBOX_MAX_NPROC=512"
+# Environment="BMAD_SANDBOX_MAX_AS_BYTES=8589934592"
+```
+
+Pre-deployment checklist:
+
+- [ ] `apt install bubblewrap util-linux` (`bwrap` + `prlimit`).
+- [ ] `BMAD_REQUIRE_SANDBOX=1` in launcher env.
+- [ ] `BMAD_REQUIRE_DB_BRIDGE=1` in launcher env.
+- [ ] `BMAD_SANDBOX_DISABLE_CONFIRMED` NOT set anywhere unless deliberately disabling.
+- [ ] StateDB initialised + writable from both orchestrator and bot UIDs (shared session id propagation requires it).
+
+#### Threat model addendum (read isolation)
+
+Sandbox = **WRITE isolation**, не read isolation. Host FS читается worker'ом
+полностью через `--ro-bind / /`. Это by design: worker'у нужно читать
+codebase, configs, planning artefacts, BMad memory. Перед pilot run:
+
+- Strip host of mode-0644 secrets in worker-readable locations (`.env`, API
+  keys, SSH host keys not behind mode-0600).
+- Worker сам shielded от leaks через `--clearenv` + setenv allow-list — он
+  не унаследует `ANTHROPIC_API_KEY` / `TELEGRAM_*` host env vars.
+- Read-leak через `--ro-bind / /` остаётся как known architectural decision;
+  workaround would require explicit mount allow-list (deferred as W1).
+
+#### Resource limits rationale
+
+bwrap не имеет native rlimit flags. Без prlimit wrapper'а worker может:
+
+- Fork-bomb host (no `RLIMIT_NPROC` from sandbox).
+- Allocate untracked memory (no `RLIMIT_AS`).
+- Заполнить tmpfs (no `RLIMIT_FSIZE`, и `/tmp` tmpfs default ≈ 50% RAM на typical Linux).
+- Exhaust fd table (no `RLIMIT_NOFILE`).
+
+`prlimit(1)` устанавливает rlimits через `setrlimit()` перед `execve()`,
+flags наследуются всем процесс-tree (bwrap → bash → child commands).
+Defaults подобраны консервативно: 512 nproc (фактически не лимитирует
+legitimate worker, blocks fork bomb); 8 GiB AS / 10 GiB fsize / 4096 nofile —
+generous для legit workload, hard cap на runaway.
 
 ### Limitations / deferred (FS7-A..FS7-E fast-follows)
 
@@ -1396,8 +1472,9 @@ caller-supplied (e.g. `ORCHESTRATOR_WORKER_STORY_ID`). Никаких
 
 ---
 
-**End of consolidated spec v0.9** — Источник истины для scaffold'а.
+**End of consolidated spec v0.10** — Источник истины для scaffold'а.
 **Changelog:**
+- **v0.10 (2026-05-16, FS9):** §22.7 + Sandbox configuration defaults subsection — H2 sandbox_network default `none`; H3+H4 prlimit rlimits wrapper (nproc=512, AS=8GB, fsize=10GB, nofile=4096) overridable via `BMAD_SANDBOX_MAX_*`; H5 `BMAD_REQUIRE_SANDBOX=1` hard-fail; H6 `BMAD_SANDBOX=none` requires `BMAD_SANDBOX_DISABLE_CONFIRMED=yes-i-accept-risk`; H1 `--tmpfs /sys` kernel info hide; H8 stale `BMAD_ORCHESTRATOR_SESSION_ID` cleanup; H9 `BMAD_REQUIRE_DB_BRIDGE=1` for bot. +18 tests, all 602 PASS. Production launcher MUST set `BMAD_REQUIRE_SANDBOX=1` + `BMAD_REQUIRE_DB_BRIDGE=1`.
 - **v0.9 (2026-05-16, FS7):** §22.7 Sandbox layer — `runtime/sandbox.py` (bwrap-backed) primary safety для worker subprocess. `_scan_bash` demoted до defence-in-depth. 32 new sandbox tests, all 573 PASS.
 - **v0.8 (2026-05-16):** §22 Session Plan — 8 сессий для /auto-loop-spec-long bootstrap.
 - **v0.7 (2026-05-16):** §21 Story Splitting (Stage 3.6 pre-split check) — +40pp first-try PASS, 2-4× wall-clock. §15.8 Voice control через Whisper local. §3 capabilities 14→16. §19 12-й skill `story-splitter`. §4 events `+voice_message_received`, `+story_split_triggered`. Pipeline 11→12 stages. §11 stack +openai-whisper. §10 MVP scope IN: voice + splitting heuristic. §17 +2 tools (`check_should_split`, `split_story`).

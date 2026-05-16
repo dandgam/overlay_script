@@ -256,11 +256,15 @@ async def _resolve_session(
         try:
             session_id = int(env_value)
         except ValueError:
+            # FS9 H8: malformed env value cannot reference any real session;
+            # strip it so subsequent processes (or re-entry) don't trip on it.
+            os.environ.pop(SESSION_ENV_VAR, None)
             log.warning(
                 "session_env_var_invalid",
                 env_var=SESSION_ENV_VAR,
                 value=env_value,
                 fallback="resolve_or_create",
+                cleared=True,
             )
         else:
             try:
@@ -273,19 +277,29 @@ async def _resolve_session(
                         session_id=session_id,
                     )
                     return db, session_id
+                # FS9 H8: env points at a session this DB doesn't know about
+                # (cross-DB / stale launcher state). Strip before re-resolve
+                # to prevent a downstream consumer re-using the bogus id.
+                os.environ.pop(SESSION_ENV_VAR, None)
                 log.warning(
                     "session_env_var_stale",
                     env_var=SESSION_ENV_VAR,
                     value=env_value,
                     db_path=str(db_path),
                     fallback="resolve_or_create",
+                    cleared=True,
                 )
             except Exception as exc:
+                # FS9 H8: cross-DB failure leaves env pointing at an
+                # unverifiable id. Clear so the next attempt starts clean
+                # rather than re-trusting the stale value.
+                os.environ.pop(SESSION_ENV_VAR, None)
                 log.warning(
                     "state_db_unavailable",
                     db_path=str(db_path),
                     error=str(exc),
                     fallback="unbound_budget",
+                    cleared=True,
                 )
                 return None, None
 
@@ -306,11 +320,16 @@ async def _resolve_session(
         )
         return db, session_id
     except Exception as exc:
+        # FS9 H8: DB unavailable on the resolve_or_create path leaves no
+        # valid session id; ensure env doesn't survive holding a stale value
+        # from an earlier successful run.
+        os.environ.pop(SESSION_ENV_VAR, None)
         log.warning(
             "state_db_unavailable",
             db_path=str(db_path),
             error=str(exc),
             fallback="unbound_budget",
+            cleared=True,
         )
         return None, None
 

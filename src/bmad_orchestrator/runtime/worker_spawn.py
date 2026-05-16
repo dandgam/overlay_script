@@ -183,7 +183,7 @@ async def spawn_worker(
     mock: bool | None = None,
     env: dict[str, str] | None = None,
     use_sandbox: bool = True,
-    sandbox_network: NetworkPolicy = "github_only",
+    sandbox_network: NetworkPolicy = "none",
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 

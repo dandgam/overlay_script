@@ -119,7 +119,19 @@ async def _attach_bridge() -> None:
             db_path=str(settings.state_db),
             session_id=session_id,
         )
-    except Exception as exc:  # degrade to stub on any DB error
+    except Exception as exc:
+        # FS9 H9: production launchers MUST set BMAD_REQUIRE_DB_BRIDGE=1 so a
+        # broken DB bridge halts startup loudly instead of degrading to stub
+        # mode (where cross-process state is silently desynced).
+        require = os.environ.get("BMAD_REQUIRE_DB_BRIDGE", "").strip().lower() in {
+            "1", "true", "yes",
+        }
+        if require:
+            raise RuntimeError(
+                f"BMAD_REQUIRE_DB_BRIDGE=1 but bot DB bridge failed "
+                f"(db_path={settings.state_db}): {exc}. Refusing to start in "
+                "stub mode."
+            ) from exc
         log.warning(
             "bot_state_db_unavailable",
             db_path=str(settings.state_db),
