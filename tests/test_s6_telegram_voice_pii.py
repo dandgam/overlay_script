@@ -343,7 +343,10 @@ def test_record_telegram_event_writes_line() -> None:
     assert len(lines) == 1
     parsed = json.loads(lines[0])
     assert parsed["message_type"] == "text"
-    assert parsed["original"] == "привет"
+    # FS1 B7: `original` is dropped by default (PII protection); `redacted` is
+    # always written. Opt-in storage covered in test_fs1_secret_hygiene.
+    assert "original" not in parsed
+    assert parsed["redacted"] == "привет"
 
 
 def test_record_telegram_event_appends() -> None:

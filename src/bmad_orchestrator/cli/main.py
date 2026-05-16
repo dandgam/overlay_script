@@ -420,8 +420,10 @@ def bot_stop() -> None:
 
 def main() -> None:
     """Console-script entry point — mirrors ``bmad_orchestrator.cli:app``."""
+    os.umask(0o077)
     app()
 
 
 if __name__ == "__main__":
+    os.umask(0o077)
     app()

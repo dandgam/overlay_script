@@ -41,6 +41,25 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_BUDGET_CAP_USD = 30.0
 DEFAULT_SKILL_INVOCATION = "/bmad-auto-dev"
 
+# FS1 B8: workers do NOT call LLMs (per spec §16.3 dev role isolation), so the
+# only env vars they need are the bare-minimum runtime ones. Everything else —
+# *_TOKEN, *_SECRET, *_API_KEY, ANTHROPIC_*, TELEGRAM_*, OPENAI_*, YANDEX_*,
+# GOOGLE_*, GH_*, GITHUB_* — gets stripped automatically by the allowlist.
+ALLOWED_WORKER_ENV: frozenset[str] = frozenset({
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "PWD", "SHELL", "TERM",
+})
+
+
+def _build_worker_env(extra: dict[str, str] | None) -> dict[str, str]:
+    """Build subprocess env from allow-list only. Caller-passed `extra` is trusted
+    (intended for ORCHESTRATOR_WORKER_* context vars)."""
+    env: dict[str, str] = {
+        k: os.environ[k] for k in ALLOWED_WORKER_ENV if k in os.environ
+    }
+    if extra:
+        env.update(extra)
+    return env
+
 # Module-level pool — predotvrachaet GC.collect() unblocking subprocess watcher
 # tasks before they finalize the JSONL stream. Callers obtain handles back from
 # `spawn_worker`; this set just prevents asyncio orphaning.
@@ -181,9 +200,7 @@ async def spawn_worker(
     if extra_args:
         args.extend(extra_args)
 
-    merged_env = dict(os.environ)
-    if env:
-        merged_env.update(env)
+    merged_env = _build_worker_env(env)
     merged_env.setdefault("ORCHESTRATOR_WORKER_STORY_ID", story_id)
     merged_env.setdefault("ORCHESTRATOR_WORKER_BRANCH", branch)
     merged_env.setdefault("ORCHESTRATOR_WORKER_MODEL", model)
@@ -272,6 +289,7 @@ async def tail_jsonl_events(
 
 
 __all__ = [
+    "ALLOWED_WORKER_ENV",
     "CLAUDE_BIN_DEFAULT",
     "DEFAULT_BUDGET_CAP_USD",
     "DEFAULT_MODEL",

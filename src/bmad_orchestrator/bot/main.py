@@ -12,6 +12,7 @@ Smoke-проверка конфига без подключения к Telegram 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 import structlog
@@ -50,6 +51,7 @@ def _check_config() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    os.umask(0o077)
     parser = argparse.ArgumentParser(prog="bmad-bot")
     parser.add_argument("--check-config", action="store_true", help="validate settings and exit")
     args = parser.parse_args(argv)

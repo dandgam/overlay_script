@@ -22,9 +22,12 @@ from typing import Any
 # ── Regex patterns (always-on baseline) ─────────────────────────────────────────
 
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+# H13 fix: extended lookbehind to include `:`, `;`, `,`, `/` (so that prefixes
+# like `tel:`, `phone;`, csv `,`, URL path `/` don't suppress detection) +
+# alternative `8\d{10}` for the legacy 8-prefix Russian phone format.
 PHONE_RU = re.compile(
-    r"(?:(?<=\s)|(?<=^)|(?<=[(\[]))"
-    r"\+?7[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}\b"
+    r"(?:(?<=\s)|(?<=^)|(?<=[(\[:;,/]))"
+    r"(?:\+?7[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}|8\d{10})\b"
 )
 RU_PASSPORT = re.compile(r"\b\d{4}\s\d{6}\b")
 RU_SNILS = re.compile(r"\b\d{3}-\d{3}-\d{3}\s?\d{2}\b")
@@ -35,7 +38,13 @@ RU_INN_12 = re.compile(r"(?<![\d-])\d{12}(?![\d-])")
 # GIT_SHA: must contain ≥1 hex letter — иначе pure-digit строка может быть INN/account.
 GIT_SHA = re.compile(r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
 UUID_LIKE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
-PATH_LIKE = re.compile(r"(?:^|\s)(?:/[\w.\-]+){2,}")
+# H13 fix: lookahead-at-start `(?!\S*@)` rejects the entire token if it
+# contains an `@` before the next whitespace — `/var/lib/user@host.com` is
+# treated as an email-bearing token, not a pure path, so EMAIL detection on
+# the inner span isn't suppressed by the safelist mask. (Spec §15.5 wording
+# `[^/]*@` doesn't work because the regex would backtrack to a shorter path
+# match and the post-match lookahead would then succeed.)
+PATH_LIKE = re.compile(r"(?:^|\s)(?!\S*@)(?:/[\w.\-]+){2,}")
 PID_LIKE = re.compile(r"\bpid[=:\s]+\d+\b", re.IGNORECASE)
 
 _INN_10_WEIGHTS = (2, 4, 10, 3, 5, 9, 4, 6, 8, 0)
