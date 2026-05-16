@@ -62,6 +62,9 @@ from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
 from bmad_orchestrator.runtime.worker_spawn import spawn_worker as runtime_spawn_worker
+from bmad_orchestrator.state.db import StateDB
+
+SESSION_ENV_VAR = "BMAD_ORCHESTRATOR_SESSION_ID"
 
 log = structlog.get_logger(__name__)
 
@@ -119,7 +122,13 @@ async def run_orchestrator(
         mock=mock,
     )
 
+    state_db, session_id = await _resolve_session(
+        target_project=project, wave=wave, max_parallel=max_parallel, db_path=settings.state_db
+    )
+
     budget = BudgetGuard(settings.budget, event_loop=bus)
+    if state_db is not None and session_id is not None:
+        budget.attach_state_db(state_db, session_id)
 
     if mock:
         await _run_mock_pilot(bus, wave=wave, max_parallel=max_parallel, budget=budget)
@@ -197,6 +206,113 @@ def build_agent_options(
             ],
         },
     }
+
+
+async def _session_exists(db: StateDB, session_id: int) -> bool:
+    """Probe ``agent_session`` for ``session_id`` (running OR stopped).
+
+    FS8: the env-supplied id may reference a DB the current process can't
+    see (test isolation, distinct deployments). Validate before trusting it
+    to avoid FK constraint failures when ``budget_tracker`` later inserts.
+    """
+    from bmad_orchestrator.state.db import connect
+
+    async with connect(db.db_path) as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM agent_session WHERE id = ? LIMIT 1",
+            (session_id,),
+        )
+        row = await cur.fetchone()
+        return row is not None
+
+
+async def _resolve_session(
+    *,
+    target_project: str,
+    wave: str,
+    max_parallel: int,
+    db_path: Path,
+) -> tuple[StateDB | None, int | None]:
+    """FS8 NH1 — pick a shared cross-process session id.
+
+    Resolution priority (highest wins):
+    1. Env ``BMAD_ORCHESTRATOR_SESSION_ID`` set to an integer → use it. Lets a
+       parent process (launcher script, systemd unit) hand the bot + agent
+       the same id without either touching StateDB during startup race.
+    2. ``StateDB.resolve_or_create_session(target_project, wave)`` — find
+       existing running session for this project+wave, or create one. Atomic
+       under SQLite write lock.
+
+    Side effect: on success, exports ``BMAD_ORCHESTRATOR_SESSION_ID`` into
+    ``os.environ`` so any child subprocesses (workers, bot if spawned from
+    same shell) inherit it cheaply.
+
+    Returns ``(state_db, session_id)`` on success, ``(None, None)`` if
+    DB binding failed — caller falls back to unbound BudgetGuard (mock /
+    CI path).
+    """
+    env_value = os.environ.get(SESSION_ENV_VAR)
+    if env_value:
+        try:
+            session_id = int(env_value)
+        except ValueError:
+            log.warning(
+                "session_env_var_invalid",
+                env_var=SESSION_ENV_VAR,
+                value=env_value,
+                fallback="resolve_or_create",
+            )
+        else:
+            try:
+                db = StateDB(db_path=db_path)
+                await db.init()
+                if await _session_exists(db, session_id):
+                    log.info(
+                        "session_from_env",
+                        env_var=SESSION_ENV_VAR,
+                        session_id=session_id,
+                    )
+                    return db, session_id
+                log.warning(
+                    "session_env_var_stale",
+                    env_var=SESSION_ENV_VAR,
+                    value=env_value,
+                    db_path=str(db_path),
+                    fallback="resolve_or_create",
+                )
+            except Exception as exc:
+                log.warning(
+                    "state_db_unavailable",
+                    db_path=str(db_path),
+                    error=str(exc),
+                    fallback="unbound_budget",
+                )
+                return None, None
+
+    try:
+        db = StateDB(db_path=db_path)
+        await db.init()
+        session_id = await db.resolve_or_create_session(
+            target_project=target_project,
+            wave=wave,
+            max_parallel=max_parallel,
+        )
+        os.environ[SESSION_ENV_VAR] = str(session_id)
+        log.info(
+            "session_resolved",
+            target_project=target_project,
+            wave=wave,
+            session_id=session_id,
+        )
+        return db, session_id
+    except Exception as exc:
+        log.warning(
+            "state_db_unavailable",
+            db_path=str(db_path),
+            error=str(exc),
+            fallback="unbound_budget",
+        )
+        return None, None
 
 
 def _validate_sdk_options(options: dict[str, Any]) -> None:
@@ -418,6 +534,7 @@ def main() -> None:
 __all__ = [
     "ALWAYS_ON_TOOLS",
     "MCP_SERVER_NAME",
+    "SESSION_ENV_VAR",
     "build_agent_options",
     "human_query_subscriber",
     "main",

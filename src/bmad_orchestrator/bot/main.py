@@ -18,6 +18,7 @@ import sys
 
 import structlog
 
+from bmad_orchestrator.agent.run import SESSION_ENV_VAR
 from bmad_orchestrator.bot.handlers import attach_state_db
 from bmad_orchestrator.bot.telegram_bot import build_application, run_bot
 from bmad_orchestrator.config import load_settings
@@ -54,23 +55,64 @@ def _check_config() -> int:
 
 
 async def _attach_bridge() -> None:
-    """N6 (FS6) — wire cross-process StateDB bridge before bot polling starts.
+    """FS8 NH1 — wire cross-process StateDB bridge using shared session.
 
-    Tries to open the configured ``state_db`` path; on any failure logs a
-    warning and falls back to stub mode (handlers' default in-process
-    behaviour) so the bot still boots when the DB is unreachable. The bridge
-    enables ``forward_to_agent`` to write ``human_query`` rows for the
-    orchestrator process to consume (see ``handlers.attach_state_db``).
+    Resolution priority (mirrors ``agent.run._resolve_session``):
+    1. Env ``BMAD_ORCHESTRATOR_SESSION_ID`` (orchestrator already created /
+       exported one) → use it.
+    2. ``StateDB.resolve_or_create_session(target_project=settings.target_project)``
+       with ``wave=None`` so the bot picks up an orchestrator-created session
+       regardless of the wave label. Falls through to INSERT only when the
+       orchestrator has not started yet.
+
+    On any DB error the bridge degrades to stub mode (handlers' default
+    in-process behaviour) so the bot still boots.
     """
     settings = load_settings()
+    target_project = str(settings.target_project)
     try:
         db = StateDB(db_path=settings.state_db)
         await db.init()
-        session_id = await db.create_session(
-            target_project=str(settings.target_project),
-            wave="bot",
-            max_parallel=settings.max_parallel_workers,
-        )
+
+        env_value = os.environ.get(SESSION_ENV_VAR)
+        session_id: int | None = None
+        if env_value:
+            try:
+                candidate = int(env_value)
+            except ValueError:
+                log.warning(
+                    "bot_session_env_invalid",
+                    env_var=SESSION_ENV_VAR,
+                    value=env_value,
+                    fallback="resolve_or_create",
+                )
+            else:
+                from bmad_orchestrator.agent.run import _session_exists
+
+                if await _session_exists(db, candidate):
+                    session_id = candidate
+                    log.info(
+                        "bot_session_from_env",
+                        env_var=SESSION_ENV_VAR,
+                        session_id=session_id,
+                    )
+                else:
+                    log.warning(
+                        "bot_session_env_stale",
+                        env_var=SESSION_ENV_VAR,
+                        value=env_value,
+                        db_path=str(settings.state_db),
+                        fallback="resolve_or_create",
+                    )
+
+        if session_id is None:
+            session_id = await db.resolve_or_create_session(
+                target_project=target_project,
+                wave=None,
+                max_parallel=settings.max_parallel_workers,
+            )
+            os.environ[SESSION_ENV_VAR] = str(session_id)
+
         attach_state_db(db, session_id)
         log.info(
             "bot_state_db_attached",

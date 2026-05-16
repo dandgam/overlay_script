@@ -143,6 +143,79 @@ class StateDB:
             assert cur.lastrowid is not None
             return cur.lastrowid
 
+    async def resolve_or_create_session(
+        self,
+        target_project: str,
+        wave: str | None = None,
+        max_parallel: int = 2,
+    ) -> int:
+        """FS8 NH1 — atomic find-or-create for a shared cross-process session.
+
+        Multiple processes (orchestrator daemon, telegram bot, future helpers)
+        running against the same ``target_project`` must converge on a single
+        ``agent_session`` row so they can exchange events through
+        ``event_queue`` (bot inserts ``human_query``, orchestrator claims it).
+
+        Protocol:
+        1. ``BEGIN IMMEDIATE`` — acquire the SQLite write lock so two callers
+           racing for the same project cannot both insert.
+        2. SELECT the most recent ``running`` session matching the project.
+           When ``wave`` is provided, narrow to that wave; when ``None``, match
+           any wave so callers without wave context (bot daemon) still find an
+           orchestrator-created session.
+        3. If a row exists → return its id; commit/no-op.
+        4. Else INSERT a new session (``wave`` defaults to ``"default"`` when
+           the caller passed ``None``) and return ``lastrowid``.
+
+        Returns the integer session_id. Callers serialise it to str when
+        exporting via ``BMAD_ORCHESTRATOR_SESSION_ID``.
+        """
+        insert_wave = wave if wave is not None else "default"
+        async with connect(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                if wave is None:
+                    cur = await conn.execute(
+                        """
+                        SELECT id FROM agent_session
+                         WHERE target_project = ?
+                           AND status = 'running'
+                         ORDER BY started_at DESC
+                         LIMIT 1
+                        """,
+                        (target_project,),
+                    )
+                else:
+                    cur = await conn.execute(
+                        """
+                        SELECT id FROM agent_session
+                         WHERE target_project = ?
+                           AND wave = ?
+                           AND status = 'running'
+                         ORDER BY started_at DESC
+                         LIMIT 1
+                        """,
+                        (target_project, wave),
+                    )
+                row = await cur.fetchone()
+                if row is not None:
+                    await conn.commit()
+                    return int(row["id"])
+                cur = await conn.execute(
+                    """
+                    INSERT INTO agent_session
+                      (target_project, wave, max_parallel, status, started_at)
+                    VALUES (?, ?, ?, 'running', ?)
+                    """,
+                    (target_project, insert_wave, max_parallel, _utc_now()),
+                )
+                await conn.commit()
+                assert cur.lastrowid is not None
+                return cur.lastrowid
+            except Exception:
+                await conn.rollback()
+                raise
+
     async def end_session(self, session_id: int, status: str = "stopped") -> None:
         async with connect(self.db_path) as conn:
             await conn.execute(
