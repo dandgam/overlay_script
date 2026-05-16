@@ -28,7 +28,7 @@ BACKSTOP_INTERVAL_SECONDS_DEFAULT = 300
 
 
 class EventType(StrEnum):
-    """Spec §4 — все 13 типов."""
+    """Spec §4 — все 13 типов + FS4 HUMAN_QUERY."""
 
     WORKER_COMPLETED = "worker_completed"
     WORKER_HALT_FILE = "worker_halt_file"
@@ -41,6 +41,7 @@ class EventType(StrEnum):
     VOICE_MESSAGE_RECEIVED = "voice_message_received"
     STORY_SPLIT_TRIGGERED = "story_split_triggered"
     PHASE4_COMPLETE = "phase4_complete"
+    HUMAN_QUERY = "human_query"
     HUMAN_RESPONSE = "human_response"
     SCHEDULED_WAKEUP = "scheduled_wakeup_5min"
 

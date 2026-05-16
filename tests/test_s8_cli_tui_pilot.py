@@ -277,30 +277,36 @@ async def test_mock_pilot_runs_to_completion() -> None:
     assert len(spawned_ids) >= 3, f"expected ≥3 stories spawned, got {spawned_ids}"
 
 
-def test_build_agent_options_includes_memory_tool_and_hooks() -> None:
-    """Spec §22 — финальная wiring memory_tool + hooks в ClaudeAgentOptions."""
-    from bmad_orchestrator.agent.memory.memory_tool import MEMORY_TOOL_NAME
-    from bmad_orchestrator.agent.run import build_agent_options
-    from bmad_orchestrator.agent.tools import ALL_TOOLS
+def test_build_agent_options_matches_sdk_contract() -> None:
+    """Spec §22 + FS4 B1: build_agent_options returns SDK-compatible kwargs.
+
+    Field renames since S8:
+      - `system` (list[block]) → `system_prompt` (str)
+      - `tools` (list[@tool|tool_block]) → `mcp_servers` (dict[name, McpSdkServer])
+      - `beta_headers` → `betas`
+      - `hooks` callables wrapped in `HookMatcher`
+    Memory tool block is server-managed and no longer flows through SDK options
+    (see agent/run.py docstring for the rationale).
+    """
+    from claude_agent_sdk import HookMatcher
+
+    from bmad_orchestrator.agent.run import MCP_SERVER_NAME, build_agent_options
 
     opts = build_agent_options(
         project_root=Path("/tmp/fake-project"),
         wave="1a",
         models=ModelConfig(),
     )
-    assert "system" in opts
-    assert isinstance(opts["system"], list)
+    assert "system_prompt" in opts
+    assert isinstance(opts["system_prompt"], str)
     assert opts["model"] == "claude-sonnet-4-6"  # dev default
-    tools = opts["tools"]
-    assert any(
-        isinstance(t, dict) and t.get("name") == MEMORY_TOOL_NAME for t in tools
-    ), "memory_tool_definition() must be in tools list"
-    # ALL_TOOLS still present
-    assert len(tools) == len(ALL_TOOLS) + 1
-    # Hooks wired
+    assert MCP_SERVER_NAME in opts["mcp_servers"]
+    assert "betas" in opts
+    assert "beta_headers" not in opts
     pre = opts["hooks"]["PreToolUse"]
     post = opts["hooks"]["PostToolUse"]
-    assert len(pre) >= 1 and len(post) >= 1
+    assert all(isinstance(h, HookMatcher) for h in pre)
+    assert all(isinstance(h, HookMatcher) for h in post)
 
 
 # ── forward_to_agent EventLoop bridge (S6 deferred) ──────────────────────────
@@ -319,8 +325,8 @@ async def test_forward_to_agent_stub_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forward_to_agent_real_eventloop_emits_user_chat_message() -> None:
-    """С attached bus — emit USER_CHAT_MESSAGE + await HUMAN_RESPONSE."""
+async def test_forward_to_agent_real_eventloop_emits_human_query() -> None:
+    """С attached bus — emit HUMAN_QUERY (FS4 B9) + await corr_id-matched response."""
     import asyncio
 
     from bmad_orchestrator.bot import handlers as bot_handlers
@@ -328,16 +334,17 @@ async def test_forward_to_agent_real_eventloop_emits_user_chat_message() -> None
 
     bus = EventLoop()
     bot_handlers.attach_event_loop(bus)
+    bot_handlers.attach_state_db(None, None)
+    bot_handlers._HUMAN_RESPONSES.clear()
     try:
-        # Background consumer simulates orchestrator response.
         async def _responder() -> None:
             ev = await bus.next(timeout=2.0)
             assert ev is not None
-            assert ev.type == EventType.USER_CHAT_MESSAGE
+            assert ev.type == EventType.HUMAN_QUERY
             assert ev.payload["chat_id"] == 999
             assert ev.payload["text"] == "статус"
-            # Simulate agent's reply path:
-            bot_handlers.deliver_human_response(999, "wave 1a: 2/5 done")
+            corr_id = ev.payload["corr_id"]
+            bot_handlers.deliver_human_response(999, corr_id, "wave 1a: 2/5 done")
 
         responder = asyncio.create_task(_responder())
         reply = await bot_handlers.forward_to_agent(
@@ -347,6 +354,7 @@ async def test_forward_to_agent_real_eventloop_emits_user_chat_message() -> None
         assert reply == "wave 1a: 2/5 done"
     finally:
         bot_handlers.attach_event_loop(None)
+        bot_handlers._HUMAN_RESPONSES.clear()
 
 
 @pytest.mark.asyncio
@@ -356,6 +364,8 @@ async def test_forward_to_agent_timeout_returns_fallback() -> None:
 
     bus = EventLoop()
     bot_handlers.attach_event_loop(bus)
+    bot_handlers.attach_state_db(None, None)
+    bot_handlers._HUMAN_RESPONSES.clear()
     try:
         reply = await bot_handlers.forward_to_agent(
             "no-response", chat_id=42, source="text", timeout=0.05
@@ -363,6 +373,7 @@ async def test_forward_to_agent_timeout_returns_fallback() -> None:
         assert "не ответил" in reply
     finally:
         bot_handlers.attach_event_loop(None)
+        bot_handlers._HUMAN_RESPONSES.clear()
 
 
 # ── system_prompt embeds skill catalog + tool catalog (S5 regression) ────────

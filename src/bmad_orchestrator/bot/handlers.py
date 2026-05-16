@@ -1,15 +1,36 @@
-"""Telegram handlers (spec §15.2, §15.3, §15.4).
+"""Telegram handlers (spec §15.2, §15.3, §15.4 + FS4 B9 cross-process bridge).
 
 Whitelist check + PII detection + forward to agent + inline confirmation.
 
 Bot — прокси без LLM. Free-text → orchestrator agent's chat queue (через
 `forward_to_agent`). Slash commands — local shortcuts. Inline buttons —
 confirmation для destructive ops (§15.4).
+
+FS4 B9 — Bridge modes (priority order, first-match wins):
+
+1. **State-DB bridge** (cross-process — bot + agent в разных процессах) —
+   `attach_state_db(db, session_id)`. `forward_to_agent` пишет
+   `human_query` row, polls `human_response` rows by corr_id. Latency ~poll
+   interval (~50ms by default).
+2. **In-process EventLoop bridge** — `attach_event_loop(bus)`. Bot и agent
+   в одном asyncio loop'е. Synchronous future-resolve через `deliver_human_response`.
+3. **Stub-mode** — neither wired. Echo placeholder. Tests can run without
+   either backend.
+
+Per-chat FIFO `_HUMAN_RESPONSES: dict[chat_id, list[(corr_id, Future)]]` —
+multiple concurrent requests на один chat матчатся по `corr_id`. Caps:
+- `_PER_CHAT_CAP = 5` — single chat нельзя залить (single-chat flood DoS).
+- `_INFLIGHT_CAP = 100` — global hard limit across all chats.
+
+Bridge-poisoning защита (SECURITY): `_poll_state_db_response` resolves ONLY
+its own `(chat_id, corr_id)` row. Foreign rows re-enqueued (FIFO preserved)
+with a 3-attempt cap per `row_corr` so an orphan can't ping-pong forever.
 """
 
 from __future__ import annotations
 
 import asyncio
+import secrets
 from typing import Any
 
 import structlog
@@ -20,19 +41,44 @@ from bmad_orchestrator.bot.audit import record_telegram_event
 from bmad_orchestrator.bot.pii_detector import scrub_input, scrub_output
 from bmad_orchestrator.config import load_settings
 from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
+from bmad_orchestrator.state.db import StateDB
 
 log = structlog.get_logger(__name__)
 
 
-# ── EventLoop bridge ───────────────────────────────────────────────────────
+# ── EventLoop / state-db bridge (FS4 B9) ──────────────────────────────────
 #
-# Bot — отдельный процесс; orchestrator agent — отдельный. Связка через
-# shared EventLoop (in-process) или JSONL-bridge (cross-process). При запуске
-# вместе (`bmad-orchestrator run --watch`) agent выставляет shared bus через
-# `attach_event_loop(bus)`. Stand-alone bot (`bmad-orchestrator bot start`)
-# работает в stub-режиме — пишет в audit JSONL, agent его читает.
+# Bot и orchestrator могут жить в:
+#   а) одном процессе — связка через in-memory EventLoop;
+#   б) разных процессах — связка через `state.db.event_queue` (см.
+#      StateDB.enqueue_human_query / claim_next_event_of_type).
+#
+# Bot никогда не вызывает LLM — это прокси с whitelist / PII / FIFO.
 _BUS: EventLoop | None = None
-_HUMAN_RESPONSES: dict[int, asyncio.Future[str]] = {}
+_STATE_DB: StateDB | None = None
+_SESSION_ID: int | None = None
+
+_HUMAN_RESPONSES: dict[int, list[tuple[str, asyncio.Future[str]]]] = {}
+_RESPONSES_LOCK: asyncio.Lock | None = None
+_INFLIGHT_CAP: int = 100
+_PER_CHAT_CAP: int = 5
+_POLL_INTERVAL_SEC: float = 0.05  # 50ms — keeps cross-process bridge under 500ms p99
+_MAX_REENQUEUE_ATTEMPTS: int = 3
+
+
+def _get_lock() -> asyncio.Lock:
+    """Lazy-init lock bound to running loop. Tests reset via reset_for_test()."""
+    global _RESPONSES_LOCK
+    if _RESPONSES_LOCK is None:
+        _RESPONSES_LOCK = asyncio.Lock()
+    return _RESPONSES_LOCK
+
+
+def reset_for_test() -> None:
+    """Test helper — clear in-flight state + lock binding between tests."""
+    global _RESPONSES_LOCK
+    _HUMAN_RESPONSES.clear()
+    _RESPONSES_LOCK = None
 
 
 def attach_event_loop(bus: EventLoop | None) -> None:
@@ -45,16 +91,42 @@ def attach_event_loop(bus: EventLoop | None) -> None:
     _BUS = bus
 
 
-def deliver_human_response(chat_id: int, text: str) -> bool:
-    """Resolve a pending `forward_to_agent` future. Returns True if matched.
+def attach_state_db(db: StateDB | None, session_id: int | None) -> None:
+    """Wire bot handlers to a shared SQLite state DB for cross-process bridge.
 
-    Orchestrator calls this when it receives `HUMAN_RESPONSE` event for a chat.
+    When set, ``forward_to_agent`` writes a ``human_query`` row instead of
+    emitting on the in-memory bus, and polls ``human_response`` rows by
+    corr_id. ``db=None`` resets state-db mode.
     """
-    fut = _HUMAN_RESPONSES.pop(chat_id, None)
-    if fut is None or fut.done():
+    global _STATE_DB, _SESSION_ID
+    _STATE_DB = db
+    _SESSION_ID = session_id
+
+
+def _inflight_count() -> int:
+    """Sum of pending futures across all chats."""
+    return sum(len(v) for v in _HUMAN_RESPONSES.values())
+
+
+def deliver_human_response(chat_id: int, corr_id: str, text: str) -> bool:
+    """Resolve a pending future identified by (chat_id, corr_id).
+
+    Synchronous — asyncio single-threadedness guarantees the mutation runs
+    atomically between awaits. Returns True iff a matching pending future
+    existed (and was just resolved).
+    """
+    pending = _HUMAN_RESPONSES.get(chat_id)
+    if not pending:
         return False
-    fut.set_result(text)
-    return True
+    for i, (cid, fut) in enumerate(pending):
+        if cid == corr_id:
+            del pending[i]
+            if not pending:
+                _HUMAN_RESPONSES.pop(chat_id, None)
+            if not fut.done():
+                fut.set_result(text)
+            return True
+    return False
 
 
 # ── Whitelist ──────────────────────────────────────────────────────────────
@@ -93,37 +165,156 @@ async def forward_to_agent(
     source: str,
     timeout: float = 30.0,
 ) -> str:
-    """Push user text into orchestrator's chat queue (S8 — real EventLoop wiring).
+    """Push user text into orchestrator's chat queue (FS4 B9 multi-bridge).
 
-    Bus mode (`attach_event_loop(bus)` was called): emit `USER_CHAT_MESSAGE`,
-    await `HUMAN_RESPONSE` future. Stub mode (bus is None): immediate echo so
-    the handlers stay testable without a running orchestrator.
+    Resolution order:
+        1. State-DB bridge (cross-process) if attached.
+        2. EventLoop bus (in-process) if attached.
+        3. Stub echo (neither attached).
+
+    A correlation id (`corr_id`, 16 hex chars) is generated per call and travels
+    with the request payload so the response can be matched even when multiple
+    requests for the same chat are in-flight concurrently.
+
+    Two caps guard against DoS:
+    - Per-chat cap (``_PER_CHAT_CAP``) — one chatty/compromised user can't
+      monopolise the queue.
+    - Global cap (``_INFLIGHT_CAP``) — total in-flight across all chats.
+    Either tripping returns ``"queue_full"`` synchronously.
     """
+    bridge: str
+    if _STATE_DB is not None and _SESSION_ID is not None and chat_id is not None:
+        bridge = "state_db"
+    elif _BUS is not None and chat_id is not None:
+        bridge = "bus"
+    else:
+        bridge = "stub"
+
     log.info(
         "telegram_forward_to_agent",
         source=source,
         chat_id=chat_id,
         text_len=len(text),
-        bus_attached=_BUS is not None,
+        bridge=bridge,
+        inflight=_inflight_count(),
     )
-    if _BUS is None or chat_id is None:
+
+    if bridge == "stub" or chat_id is None:
         return f"(оркестратор не подключён) принято: {text[:80]}"
 
+    lock = _get_lock()
     loop = asyncio.get_running_loop()
     future: asyncio.Future[str] = loop.create_future()
-    _HUMAN_RESPONSES[chat_id] = future
+    corr_id = secrets.token_hex(8)
 
-    await _BUS.emit(
-        EventType.USER_CHAT_MESSAGE,
-        chat_id=chat_id,
-        text=text,
-        source=source,
-    )
+    async with lock:
+        if _inflight_count() >= _INFLIGHT_CAP:
+            log.warning(
+                "telegram_inflight_cap_reached",
+                chat_id=chat_id,
+                cap=_INFLIGHT_CAP,
+                bridge=bridge,
+            )
+            return "queue_full"
+        per_chat = len(_HUMAN_RESPONSES.get(chat_id, []))
+        if per_chat >= _PER_CHAT_CAP:
+            log.warning(
+                "telegram_per_chat_cap_reached",
+                chat_id=chat_id,
+                cap=_PER_CHAT_CAP,
+                bridge=bridge,
+            )
+            return "queue_full"
+        _HUMAN_RESPONSES.setdefault(chat_id, []).append((corr_id, future))
+
     try:
-        return await asyncio.wait_for(future, timeout=timeout)
+        if bridge == "state_db":
+            assert _STATE_DB is not None and _SESSION_ID is not None
+            await _STATE_DB.enqueue_human_query(
+                _SESSION_ID, chat_id, text, corr_id
+            )
+            poll_task = asyncio.create_task(
+                _poll_state_db_response(chat_id, corr_id, timeout),
+                name=f"poll_human_response_{corr_id}",
+            )
+            try:
+                return await asyncio.wait_for(future, timeout=timeout)
+            finally:
+                poll_task.cancel()
+        else:
+            assert _BUS is not None
+            await _BUS.emit(
+                EventType.HUMAN_QUERY,
+                chat_id=chat_id,
+                corr_id=corr_id,
+                text=text,
+                source=source,
+            )
+            return await asyncio.wait_for(future, timeout=timeout)
     except TimeoutError:
-        _HUMAN_RESPONSES.pop(chat_id, None)
         return f"(агент не ответил за {timeout:.0f}s — повтори)"
+    finally:
+        async with lock:
+            _drop_pending(chat_id, corr_id)
+
+
+async def _poll_state_db_response(chat_id: int, corr_id: str, timeout: float) -> None:
+    """Drain ``human_response`` rows; resolve **only** our own (chat_id, corr_id).
+
+    SECURITY — bridge-poisoning guard: another chat's row MUST NOT be resolved
+    by this task. If a foreign row surfaces (claimed before its rightful
+    polling task wakes), it is re-enqueued with a per-corr attempt cap so an
+    orphan with no rightful owner can't ping-pong forever.
+
+    Cooperative: scheduled by ``forward_to_agent`` and cancelled in its
+    ``finally`` once the future resolves (success / timeout).
+    """
+    assert _STATE_DB is not None and _SESSION_ID is not None
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    re_enqueue_attempts: dict[str, int] = {}
+    while loop.time() < deadline:
+        row = await _STATE_DB.claim_next_event_of_type(_SESSION_ID, "human_response")
+        if row is None:
+            await asyncio.sleep(_POLL_INTERVAL_SEC)
+            continue
+        payload = row.get("payload") or {}
+        row_chat = payload.get("chat_id")
+        row_corr = payload.get("corr_id")
+        row_text = str(payload.get("text", ""))
+        if not isinstance(row_chat, int) or not isinstance(row_corr, str):
+            log.warning("human_response_malformed_payload")
+            continue
+        if row_chat == chat_id and row_corr == corr_id:
+            deliver_human_response(row_chat, row_corr, row_text)
+            return
+        attempts = re_enqueue_attempts.get(row_corr, 0)
+        if attempts >= _MAX_REENQUEUE_ATTEMPTS:
+            log.warning(
+                "human_response_orphan_dropped",
+                attempts=attempts,
+                row_chat=row_chat,
+            )
+            continue
+        re_enqueue_attempts[row_corr] = attempts + 1
+        await _STATE_DB.enqueue_human_response(
+            _SESSION_ID, row_chat, row_text, row_corr
+        )
+        await asyncio.sleep(_POLL_INTERVAL_SEC)
+
+
+def _drop_pending(chat_id: int, corr_id: str) -> None:
+    """Remove (corr_id, future) from the per-chat FIFO. No-op if already gone."""
+    pending = _HUMAN_RESPONSES.get(chat_id)
+    if not pending:
+        return
+    for i, (cid, _) in enumerate(pending):
+        if cid == corr_id:
+            del pending[i]
+            break
+    if not pending:
+        _HUMAN_RESPONSES.pop(chat_id, None)
 
 
 # ── Slash commands (spec §15.3) ────────────────────────────────────────────
@@ -364,12 +555,16 @@ async def _send_safe(
 
 
 __all__ = [
+    "attach_event_loop",
+    "attach_state_db",
     "budget",
     "callback",
+    "deliver_human_response",
     "forward_to_agent",
     "free_text",
     "help_cmd",
     "model",
+    "reset_for_test",
     "start",
     "status",
     "stop",

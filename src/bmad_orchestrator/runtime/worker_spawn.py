@@ -85,6 +85,8 @@ class WorkerHandle:
     jsonl_path: Path
     process: asyncio.subprocess.Process | None
     mock: bool
+    fallback_reason: str | None = None
+    real_requested: bool = False
 
 
 def _resolve_claude_bin() -> str | None:
@@ -188,6 +190,17 @@ async def spawn_worker(
     auto_mock = bin_path is None
     use_mock = auto_mock if mock is None else mock
 
+    # FS4 B12: track caller intent on the handle. `real_requested` is True
+    # only when the caller passed ``mock=False`` explicitly. When ``mock=None``
+    # the caller has no preference, so the auto-mock path is not a "fallback"
+    # from the runtime's perspective — yet ``fallback_reason`` is still set so
+    # the @tool wrapper can decide whether to surface a loud-error envelope
+    # (it knows it asked for real).
+    real_requested = mock is False
+    fallback_reason: str | None = None
+    if use_mock and auto_mock and mock is not True:
+        fallback_reason = "claude_binary_not_found"
+
     jsonl_path = worker_jsonl_path(worktree)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -203,6 +216,8 @@ async def spawn_worker(
                 "model": model,
                 "budget_cap_usd": budget_cap_usd,
                 "mock": True,
+                "fallback_reason": fallback_reason,
+                "real_requested": real_requested,
             },
         )
         _emit(
@@ -214,6 +229,7 @@ async def spawn_worker(
                 "exit_code": 0,
                 "status": "success",
                 "mock": True,
+                "fallback_reason": fallback_reason,
             },
         )
         return WorkerHandle(
@@ -224,6 +240,8 @@ async def spawn_worker(
             jsonl_path=jsonl_path,
             process=None,
             mock=True,
+            fallback_reason=fallback_reason,
+            real_requested=real_requested,
         )
 
     # Real-mode subprocess.

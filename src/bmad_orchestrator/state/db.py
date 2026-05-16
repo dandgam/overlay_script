@@ -262,6 +262,89 @@ class StateDB:
             assert cur.lastrowid is not None
             return cur.lastrowid
 
+    async def enqueue_human_query(
+        self,
+        session_id: int,
+        chat_id: int,
+        text: str,
+        corr_id: str,
+    ) -> int:
+        """FS4 B9 cross-process bridge: bot → agent message envelope.
+
+        Stored as ``event_queue`` row with ``event_type='human_query'`` and
+        payload carrying ``{chat_id, corr_id, text}``. Agent process polls
+        ``claim_next_event`` and matches by ``corr_id``.
+        """
+        return await self.enqueue_event(
+            session_id,
+            "human_query",
+            {"chat_id": chat_id, "corr_id": corr_id, "text": text},
+        )
+
+    async def enqueue_human_response(
+        self,
+        session_id: int,
+        chat_id: int,
+        text: str,
+        corr_id: str,
+    ) -> int:
+        """FS4 B9 cross-process bridge: agent → bot response envelope.
+
+        Bot process polls ``claim_next_event`` filtered by
+        ``event_type='human_response'`` and routes to the matching pending
+        future by ``corr_id``.
+        """
+        return await self.enqueue_event(
+            session_id,
+            "human_response",
+            {"chat_id": chat_id, "corr_id": corr_id, "text": text},
+        )
+
+    async def claim_next_event_of_type(
+        self,
+        session_id: int,
+        event_type: str,
+    ) -> dict[str, Any] | None:
+        """Atomically claim the oldest unconsumed event of a specific type.
+
+        FS4 B9: bot's response-polling loop needs to dequeue only
+        ``human_response`` rows without touching unrelated event_queue traffic.
+        Same atomic UPDATE-RETURNING contract as ``claim_next_event``.
+        """
+        async with connect(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = await conn.execute(
+                    """
+                    UPDATE event_queue
+                       SET consumed_at = ?
+                     WHERE id = (
+                         SELECT id FROM event_queue
+                          WHERE session_id = ?
+                            AND event_type = ?
+                            AND consumed_at IS NULL
+                          ORDER BY id ASC
+                          LIMIT 1
+                       )
+                       AND consumed_at IS NULL
+                    RETURNING id, event_type, payload_json, emitted_at
+                    """,
+                    (_utc_now(), session_id, event_type),
+                )
+                row = await cur.fetchone()
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+            if row is None:
+                return None
+            return {
+                "id": row["id"],
+                "event_type": row["event_type"],
+                "payload": json.loads(row["payload_json"]),
+                "emitted_at": row["emitted_at"],
+            }
+
     async def claim_next_event(self, session_id: int) -> dict[str, Any] | None:
         """Atomically claim the oldest unconsumed event, return its dict.
 

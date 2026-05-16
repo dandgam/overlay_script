@@ -1,32 +1,60 @@
-"""Master orchestrator entry point (spec §2 + §4 + §11).
+"""Master orchestrator entry point (spec §2 + §4 + §11 + FS4 B1/B11).
 
-S8 wiring: ClaudeSDKClient с тулзами (35) + memory_tool + hooks (security_check_hook,
-audit_tool_output) + system_prompt (cached, ttl=1h) + EventLoop (Bus между bot
-handlers и agent thinking).
+Builds an SDK-compatible ``ClaudeAgentOptions`` kwargs dict:
 
-Mock-mode (``mock=True``) — пропускает реальный ClaudeSDKClient (т.к. для CI без
-ANTHROPIC_API_KEY и для unit-тестов). Вместо этого прогоняет cascade DAG → workers
-до WAVE_BOUNDARY_REACHED → выходит. Это и есть E2E pilot per §22.
+- ``mcp_servers={"bmad_orchestrator": create_sdk_mcp_server(...all 34 tools...)}``
+- ``allowed_tools=[]`` (empty = no SDK-level whitelist; Tool Search Tool beta
+  handles defer-loading at API level — `@tool` decorator does not yet expose
+  `defer_loading=True` per-tool; verified via `inspect.signature(tool)` 2026-05).
+- ``ALWAYS_ON_TOOLS`` constant lists the 5 tools the spec considers preloaded:
+  start_wave, stop_orchestrator, escalate_to_human, read_memory,
+  read_sprint_status. Tests assert this matches the spec contract.
+- ``system_prompt`` — string (SDK type is ``str | SystemPromptPreset |
+  SystemPromptFile``); we concat the cached block list via ``blocks_to_string``.
+  Anthropic CLI subprocess re-applies prompt caching at the API boundary when
+  the system block crosses the size threshold.
+- ``hooks={"PreToolUse": [HookMatcher(...)], "PostToolUse": [HookMatcher(...)]}``
+  per SDK contract (raw callables in a list — not via the `HookMatcher`
+  wrapper — silently no-op).
+- ``betas=settings.beta_headers`` — 4 mandatory headers from agent/betas.py.
 
-Real-mode wiring до полного «one-call-per-event» loop'а deferred к pilot run на
-Odyssey Wave 1a (отдельная инициатива). Сейчас real-mode инициализирует client
-и эмитит SCHEDULED_WAKEUP — достаточно чтобы убедиться что options валидируются.
+Real-mode semantics (FS4 B1):
+
+- ``mock=True`` (default in CI / unit-tests) → DAG cascade pilot, no SDK.
+- ``mock=False`` →
+    1. Build options.
+    2. ``_validate_sdk_options`` — instantiate ``ClaudeAgentOptions(**opts)``,
+       raise ``RuntimeError`` on ``TypeError`` (NOT silent log-warning).
+    3. ``raise NotImplementedError("real mode requires Wave 1a pilot wiring;
+       use --mock for now")`` with ``log.error``. The full event-driven loop is
+       deferred to the Odyssey Wave 1a pilot run (separate initiative). Real-mode
+       returning silently was a security/correctness blocker (B1).
+
+Memory tool (``memory_20250818``) is server-managed via the
+``context-management-2025-06-27`` beta and is NOT a `@tool`-decorated function.
+It cannot live in ``mcp_servers`` (those carry user-defined SDK MCP tools). It
+would need to flow as a raw tool-block via direct Messages API. For the SDK
+path we omit it — the orchestrator's local ``read_memory``/``write_memory``
+tools cover the workflow until SDK exposes server-managed tool blocks.
 """
 
 from __future__ import annotations
 
 import asyncio
+import secrets
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
-from bmad_orchestrator.agent.memory.memory_tool import memory_tool_definition
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import HookCallback
+
 from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard
 from bmad_orchestrator.agent.safety.hooks import audit_tool_output, security_check_hook
 from bmad_orchestrator.agent.skills import dispatch as dispatch_skills
 from bmad_orchestrator.agent.skills import load_body as load_skill_body
-from bmad_orchestrator.agent.system_prompt import build_system_prompt
+from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
 from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
@@ -34,6 +62,21 @@ from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
 from bmad_orchestrator.runtime.worker_spawn import spawn_worker as runtime_spawn_worker
 
 log = structlog.get_logger(__name__)
+
+
+# 5 always-on tools per spec FS4 B11. Names match @tool registrations exactly
+# (see agent/tools/*.py). When SDK exposes `defer_loading=True` per-tool, switch
+# from the constant to per-tool flags. Until then this is the contract tests
+# assert against.
+ALWAYS_ON_TOOLS: tuple[str, ...] = (
+    "start_wave",
+    "stop_orchestrator",
+    "escalate_to_human",
+    "read_memory",
+    "read_sprint_status",
+)
+
+MCP_SERVER_NAME: str = "bmad_orchestrator"
 
 
 # ── public API ───────────────────────────────────────────────────────────────
@@ -48,11 +91,14 @@ async def run_orchestrator(
     mock: bool = False,
     event_loop: EventLoop | None = None,
 ) -> EventLoop:
-    """Main orchestrator loop. Returns the EventLoop instance (для тестов / bridge).
+    """Main orchestrator loop. Returns the EventLoop instance.
 
-    ``models`` — per-role config (CLI/Telegram override). None → settings default.
-    ``mock`` — пропустить реальный ClaudeSDKClient, прогнать только DAG cascade.
-    ``event_loop`` — externally-supplied bus (для bot bridge / unit tests).
+    ``mock=True`` → DAG cascade only (no SDK). Used in tests / CI without
+    ``ANTHROPIC_API_KEY``.
+
+    ``mock=False`` → validates options against the real SDK and raises
+    ``NotImplementedError`` because the full event-driven loop is deferred to
+    the Wave 1a pilot. Silent no-op was a B1 blocker.
     """
     settings = load_settings()
     models = models or settings.models
@@ -75,29 +121,24 @@ async def run_orchestrator(
         await _run_mock_pilot(bus, wave=wave, max_parallel=max_parallel, budget=budget)
         return bus
 
-    # Real-mode initialization. Full event-driven loop with claude-agent-sdk
-    # is wired here; per spec §22 deferred items we keep this minimal until
-    # the Odyssey pilot run (separate initiative).
+    # Real mode — FS4 B1: validate options shape against the SDK and refuse
+    # silently-succeeding no-op behavior.
     options = build_agent_options(
         project_root=settings.target_project,
         wave=wave,
         models=models,
     )
-    log.info(
-        "orchestrator_options_built",
-        tool_count=len(options["tools"]) if isinstance(options.get("tools"), list) else 0,
-        beta_headers=options.get("beta_headers", []),
+    _validate_sdk_options(options)
+
+    log.error(
+        "real_mode_not_implemented",
+        hint="full event loop deferred to Odyssey Wave 1a pilot; use --mock for now",
+        tool_count=len(ALL_TOOLS),
+        always_on=list(ALWAYS_ON_TOOLS),
     )
-
-    # Connect the agent SDK only when ANTHROPIC_API_KEY is present.
-    if settings.anthropic_api_key:
-        await _attempt_sdk_run(options, bus, max_iterations=1)
-    else:
-        log.warning("orchestrator_no_api_key", hint="run with --mock or set ANTHROPIC_API_KEY")
-
-    await bus.emit(EventType.SCHEDULED_WAKEUP, reason="run_orchestrator_done")
-    log.info("orchestrator_exited")
-    return bus
+    raise NotImplementedError(
+        "real mode requires Wave 1a pilot wiring; use --mock for now"
+    )
 
 
 def build_agent_options(
@@ -106,25 +147,70 @@ def build_agent_options(
     wave: str,
     models: ModelConfig,
 ) -> dict[str, Any]:
-    """Build the dict passed to ``ClaudeSDKClient(ClaudeAgentOptions(**...))``.
+    """Build the kwargs dict passed to ``ClaudeAgentOptions(**...)``.
 
-    Returns a plain dict (not the SDK class) so the function is import-light
-    and unit-testable without the SDK present. Caller adapts to SDK signature.
+    Returns a plain dict (not the SDK class) so unit tests can assert on shape
+    without instantiating the SDK type. ``_validate_sdk_options`` is the
+    instantiation gate before real-mode use.
     """
+    from claude_agent_sdk import HookMatcher, create_sdk_mcp_server
+
     settings = load_settings()
-    system_blocks = build_system_prompt(project_root=project_root, wave=wave,
-                                        locale=settings.locale)
-    tools_payload: list[Any] = [*ALL_TOOLS, memory_tool_definition()]
+
+    system_blocks = build_system_prompt(
+        project_root=project_root, wave=wave, locale=settings.locale
+    )
+    system_prompt: str = blocks_to_string(system_blocks)
+
+    mcp_server = create_sdk_mcp_server(
+        name=MCP_SERVER_NAME,
+        version="0.1.0",
+        tools=list(ALL_TOOLS),
+    )
+
     return {
-        "system": system_blocks,
-        "tools": tools_payload,
-        "model": models.dev,  # default per-call model; per-role routing applied at tool layer
-        "beta_headers": settings.beta_headers,
+        "system_prompt": system_prompt,
+        "mcp_servers": {MCP_SERVER_NAME: mcp_server},
+        "allowed_tools": [],
+        "model": models.dev,
+        "betas": list(settings.beta_headers),
+        # Hook functions live in agent/safety/hooks.py with `dict[str, Any]`
+        # signatures (predate SDK's typed HookInput union). Cast at the boundary
+        # — SDK invokes them with the typed input dict at runtime; the cast
+        # only relaxes mypy's strict check.
         "hooks": {
-            "PreToolUse": [security_check_hook],
-            "PostToolUse": [audit_tool_output],
+            "PreToolUse": [
+                HookMatcher(
+                    matcher=None,
+                    hooks=[cast("HookCallback", security_check_hook)],
+                )
+            ],
+            "PostToolUse": [
+                HookMatcher(
+                    matcher=None,
+                    hooks=[cast("HookCallback", audit_tool_output)],
+                )
+            ],
         },
     }
+
+
+def _validate_sdk_options(options: dict[str, Any]) -> None:
+    """Instantiate ``ClaudeAgentOptions(**options)`` — raise ``RuntimeError`` on TypeError.
+
+    FS4 B1: the previous `_attempt_sdk_run` swallowed `TypeError` as a warning
+    log line, which masked SDK contract drift (e.g. renaming ``beta_headers`` →
+    ``betas``). Promoting to ``RuntimeError`` surfaces real shape bugs before
+    they reach the bot/agent flow.
+    """
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    try:
+        ClaudeAgentOptions(**options)
+    except TypeError as exc:
+        raise RuntimeError(
+            f"ClaudeAgentOptions shape mismatch (SDK version drift?): {exc}"
+        ) from exc
 
 
 # ── mock pilot ───────────────────────────────────────────────────────────────
@@ -202,49 +288,47 @@ async def _run_mock_pilot(
     log.info("mock_pilot_done", stories=len(spawned), rounds=rounds)
 
 
-# ── SDK glue (best-effort, optional) ─────────────────────────────────────────
+# ── HUMAN_QUERY / HUMAN_RESPONSE subscriber (FS4 B9 stub) ────────────────────
 
 
-async def _attempt_sdk_run(
-    options: dict[str, Any],
-    bus: EventLoop,
-    *,
-    max_iterations: int,
-) -> None:
-    """Adapter to claude-agent-sdk if installed. Soft-fails to log on import error.
+async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
+    """Stub subscriber: on USER_CHAT_MESSAGE / HUMAN_QUERY → emit HUMAN_RESPONSE.
 
-    The real long-running event loop is the deferred Wave 1a pilot — here we
-    just verify import + option shape.
+    Full LLM dispatch through the intent-router skill body is deferred to the
+    Wave 1a pilot (loud `log.warning` here). For now this echoes a placeholder
+    response carrying the same `corr_id` so the bot's per-chat FIFO can
+    resolve its pending future end-to-end in tests.
     """
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-    except ImportError as exc:
-        log.warning("claude_sdk_unavailable", error=str(exc))
+    if event.type not in (EventType.USER_CHAT_MESSAGE, EventType.HUMAN_QUERY):
         return
 
-    try:
-        sdk_options = ClaudeAgentOptions(**options)
-    except TypeError as exc:
-        # SDK version mismatch — log and bail, не падаем для CI без точного SDK.
-        log.warning("claude_sdk_options_unsupported", error=str(exc))
-        return
+    payload = event.payload or {}
+    chat_id = payload.get("chat_id")
+    corr_id = payload.get("corr_id") or secrets.token_hex(8)
+    text = payload.get("text", "")
 
-    async with ClaudeSDKClient(options=sdk_options) as client:
-        log.info("claude_sdk_connected", client=type(client).__name__)
-        # Pump one wake — full loop deferred to pilot.
-        for _ in range(max_iterations):
-            event = await bus.dispatch_one(timeout=0.1)
-            if event is None:
-                break
-            await _on_event(event, bus)
-
-
-async def _on_event(event: Event, bus: EventLoop) -> None:
-    """Dispatch one event into skill bodies (Level 2 disclosure)."""
     skills = dispatch_skills(event.type)
     for skill in skills:
         body = load_skill_body(skill)
         log.debug("skill_body_loaded", skill=skill, body_chars=len(body))
+
+    log.warning(
+        "human_query_intent_router_deferred",
+        hint="Wave 1a pilot will wire intent-router skill body to LLM dispatch",
+        chat_id=chat_id,
+        corr_id=corr_id,
+        text_preview=text[:80],
+    )
+
+    await bus.emit(
+        EventType.HUMAN_RESPONSE,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        text=f"(stub) принято: {text[:80]}",
+    )
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
@@ -257,7 +341,14 @@ def main() -> None:
     asyncio.run(run_orchestrator(sys.argv[1], sys.argv[2], mock=True))
 
 
-__all__ = ["build_agent_options", "main", "run_orchestrator"]
+__all__ = [
+    "ALWAYS_ON_TOOLS",
+    "MCP_SERVER_NAME",
+    "build_agent_options",
+    "human_query_subscriber",
+    "main",
+    "run_orchestrator",
+]
 
 
 if __name__ == "__main__":

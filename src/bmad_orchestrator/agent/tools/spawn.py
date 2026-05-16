@@ -11,6 +11,7 @@ mock-режим (synthetic worker_spawned + worker_completed events). С `real=T
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -99,7 +100,10 @@ async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
     if not worktree:
         return error("missing 'worktree' arg", code="invalid_arg")
     if not Path(worktree).exists():
-        return error(f"worktree path not found: {worktree}", code="worktree_missing")
+        return error(
+            f"worktree path not found: {Path(worktree).name}",
+            code="worktree_missing",
+        )
 
     # `real=False` (default) → forced mock — sync write path matches earlier
     # contract (events written through `_worker_event` for test parity).
@@ -123,26 +127,62 @@ async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    # FS4 B12: distinguish "user asked for real" vs auto-detect. When the
+    # caller passes real=True explicitly we honor that and force mock=False;
+    # if the binary is missing we still get a handle back but with
+    # ``fallback_reason`` populated — the response payload then carries
+    # ``fallback_reason`` and ``real_requested=True`` so the agent can decide
+    # whether to raise / escalate / retry.
     handle = await runtime_spawn_worker(
         worktree=worktree,
         story_id=story_id,
         branch=branch,
         model=model,
         budget_cap_usd=cap,
-        mock=None,  # auto-detect by binary presence
+        mock=False if shutil.which("claude") else None,
     )
-    return json_ok(
-        {
-            "worktree": handle.worktree,
-            "pid": handle.pid,
-            "model": model,
-            "budget_cap_usd": cap,
-            "mock": handle.mock,
-            "story_id": handle.story_id,
-            "branch": handle.branch,
-            "jsonl_path": str(handle.jsonl_path),
+    payload: dict[str, Any] = {
+        "worktree": handle.worktree,
+        "pid": handle.pid,
+        "model": model,
+        "budget_cap_usd": cap,
+        "mock": handle.mock,
+        "story_id": handle.story_id,
+        "branch": handle.branch,
+        "jsonl_path": str(handle.jsonl_path),
+        "real_requested": True,
+    }
+    if handle.mock:
+        payload["fallback_reason"] = handle.fallback_reason or "claude_binary_not_found"
+        # SECURITY — error envelope is sometimes echoed back to humans / logs
+        # outside the orchestrator process. Strip absolute paths to basenames;
+        # the full path is still in the audit JSONL (`_worker_event`) under
+        # operator-only access.
+        sanitised = {
+            **payload,
+            "worktree": Path(handle.worktree).name,
+            "jsonl_path": Path(handle.jsonl_path).name,
         }
-    )
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "error": "real_spawn_fallback",
+                            "message": (
+                                "real-mode requested but worker spawned mock: "
+                                f"{payload['fallback_reason']}"
+                            ),
+                            **sanitised,
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            "isError": True,
+        }
+    return json_ok(payload)
 
 
 @tool(
