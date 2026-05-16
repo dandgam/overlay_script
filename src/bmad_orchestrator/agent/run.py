@@ -18,17 +18,16 @@ Builds an SDK-compatible ``ClaudeAgentOptions`` kwargs dict:
   wrapper — silently no-op).
 - ``betas=settings.beta_headers`` — 4 mandatory headers from agent/betas.py.
 
-Real-mode semantics (FS4 B1):
+Real-mode semantics (FS4 B1 + W1):
 
 - ``mock=True`` (default in CI / unit-tests) → DAG cascade pilot, no SDK.
 - ``mock=False`` →
     1. Build options.
     2. ``_validate_sdk_options`` — instantiate ``ClaudeAgentOptions(**opts)``,
        raise ``RuntimeError`` on ``TypeError`` (NOT silent log-warning).
-    3. ``raise NotImplementedError("real mode requires Wave 1a pilot wiring;
-       use --mock for now")`` with ``log.error``. The full event-driven loop is
-       deferred to the Odyssey Wave 1a pilot run (separate initiative). Real-mode
-       returning silently was a security/correctness blocker (B1).
+    3. Dispatch to ``_run_real_pilot`` (W1) — DAG → spawn worker → tail JSONL →
+       bridge ``worker_completed`` to bus, with ``max_stories`` / ``max_spend_usd``
+       hard caps and ``BMAD_REQUIRE_SANDBOX=1`` guard at entry.
 
 Memory tool (``memory_20250818``) is server-managed via the
 ``context-management-2025-06-27`` beta and is NOT a `@tool`-decorated function.
@@ -61,7 +60,14 @@ from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
-from bmad_orchestrator.runtime.worker_spawn import spawn_worker as runtime_spawn_worker
+from bmad_orchestrator.runtime.sandbox import detect_sandbox
+from bmad_orchestrator.runtime.worker_spawn import (
+    WorkerHandle,
+    tail_jsonl_events,
+)
+from bmad_orchestrator.runtime.worker_spawn import (
+    spawn_worker as runtime_spawn_worker,
+)
 from bmad_orchestrator.state.db import StateDB
 
 SESSION_ENV_VAR = "BMAD_ORCHESTRATOR_SESSION_ID"
@@ -95,17 +101,20 @@ async def run_orchestrator(
     models: ModelConfig | None = None,
     mock: bool = True,
     event_loop: EventLoop | None = None,
+    max_stories: int = 50,
+    max_spend_usd: float = 50.0,
 ) -> EventLoop:
     """Main orchestrator loop. Returns the EventLoop instance.
 
     ``mock=True`` (DEFAULT, N3 FS6) → DAG cascade only (no SDK). Used in tests
-    / CI without ``ANTHROPIC_API_KEY``. Real-mode wiring is deferred to Wave
-    1a pilot — making mock the default avoids the historical footgun where
-    omitting ``--mock`` caused a confusing ``NotImplementedError``.
+    / CI without ``ANTHROPIC_API_KEY``. ``max_stories`` and ``max_spend_usd``
+    are real-mode caps (W1) and are ignored by the mock path which has its own
+    ``max_rounds=6`` cap.
 
-    ``mock=False`` → validates options against the real SDK and raises
-    ``NotImplementedError`` because the full event-driven loop is deferred to
-    the Wave 1a pilot. Silent no-op was a B1 blocker.
+    ``mock=False`` (W1) → validates options against the real SDK and runs
+    ``_run_real_pilot`` — DAG → spawn worker → tail JSONL → bridge
+    ``worker_completed`` → bus, with caller-supplied ``max_stories`` /
+    ``max_spend_usd`` hard caps and ``BMAD_REQUIRE_SANDBOX=1`` guard.
     """
     settings = load_settings()
     models = models or settings.models
@@ -134,8 +143,8 @@ async def run_orchestrator(
         await _run_mock_pilot(bus, wave=wave, max_parallel=max_parallel, budget=budget)
         return bus
 
-    # Real mode — FS4 B1: validate options shape against the SDK and refuse
-    # silently-succeeding no-op behavior.
+    # Real mode — FS4 B1: validate options shape against the SDK before any
+    # subprocess work. Shape drift surfaces as RuntimeError here, not later.
     options = build_agent_options(
         project_root=settings.target_project,
         wave=wave,
@@ -143,15 +152,20 @@ async def run_orchestrator(
     )
     _validate_sdk_options(options)
 
-    log.error(
-        "real_mode_not_implemented",
-        hint="full event loop deferred to Odyssey Wave 1a pilot; use --mock for now",
-        tool_count=len(ALL_TOOLS),
-        always_on=list(ALWAYS_ON_TOOLS),
+    await _run_real_pilot(
+        bus,
+        project=project,
+        wave=wave,
+        max_parallel=max_parallel,
+        max_stories=max_stories,
+        max_spend_usd=max_spend_usd,
+        budget=budget,
+        state_db=state_db,
+        session_id=session_id,
+        models=models,
+        options=options,
     )
-    raise NotImplementedError(
-        "real mode requires Wave 1a pilot wiring; use --mock for now"
-    )
+    return bus
 
 
 def build_agent_options(
@@ -498,6 +512,233 @@ async def _run_mock_pilot(
         rounds=rounds,
     )
     log.info("mock_pilot_done", stories=len(spawned), rounds=rounds)
+
+
+# ── real pilot (W1 — Wave 1a wiring) ─────────────────────────────────────────
+
+
+async def _run_real_pilot(
+    bus: EventLoop,
+    *,
+    project: str,
+    wave: str,
+    max_parallel: int,
+    max_stories: int,
+    max_spend_usd: float,
+    budget: BudgetGuard,
+    state_db: StateDB | None,
+    session_id: int | None,
+    models: ModelConfig,
+    options: dict[str, Any],
+) -> None:
+    """Real-mode E2E pilot (W1).
+
+    Diverges from ``_run_mock_pilot`` only in:
+      * ``BMAD_REQUIRE_SANDBOX`` guard at entry (raises if NoSandbox + flag).
+      * ``runtime_spawn_worker(mock=False, sandbox_network="full")`` — real
+        ``claude -p /bmad-auto-dev`` subprocess inside bwrap.
+      * ``tail_jsonl_events`` bridges each worker's JSONL → ``WORKER_COMPLETED``
+        event on the bus (instead of synthetic emit).
+      * Caller-supplied ``max_stories`` / ``max_spend_usd`` hard caps on top of
+        :class:`BudgetGuard` policy.
+
+    The per-story spend reserve here is a placeholder (story_alarm_usd / 6 ≈
+    $5/story) — W3 wires real cost parsing from worker JSONL ``usage`` blocks.
+    """
+    # W1.3 — sandbox guard. ``detect_sandbox()`` itself enforces
+    # ``BMAD_REQUIRE_SANDBOX=1`` + NoSandbox → RuntimeError (FS9 H5). Calling at
+    # entry surfaces the missing-bwrap failure BEFORE any DAG / spawn work.
+    _ = detect_sandbox()
+
+    from bmad_orchestrator.agent.tools._common import (
+        read_sprint_status_yaml,
+        write_sprint_status_yaml,
+    )
+
+    settings = load_settings()
+    worktree_root = settings.target_project / ".worktrees"
+    worktree_root.mkdir(parents=True, exist_ok=True)
+
+    planner = DagPlanner.from_target()
+    spawned: list[str] = []
+    rounds = 0
+    max_rounds = 6
+
+    daily_limit_override = os.environ.get("BMAD_DAILY_LIMIT_USD")
+    if daily_limit_override:
+        try:
+            daily_limit = float(daily_limit_override)
+        except ValueError:
+            log.warning(
+                "bmad_daily_limit_usd_invalid",
+                value=daily_limit_override,
+                fallback=budget.cfg.daily_limit_usd,
+            )
+        else:
+            budget.cfg.daily_limit_usd = daily_limit
+    today_utc = datetime.now(UTC).date().isoformat()
+    daily_spent_usd = 0.0
+    # Placeholder reserve — W3 will replace with adaptive cost from
+    # WorkerCostTracker history. Until then we use the same heuristic the mock
+    # pilot uses so behaviour is symmetric across paths.
+    story_reserve = budget.cfg.story_alarm_usd / 6.0
+
+    bus.start_backstop_task()
+
+    daily_halt_reached = False
+    while (
+        rounds < max_rounds
+        and not daily_halt_reached
+        and len(spawned) < max_stories
+        and daily_spent_usd < max_spend_usd
+    ):
+        ready = [s for s in planner.find_ready(max_n=max_parallel * 2) if s["id"] not in spawned]
+        if not ready:
+            break
+
+        remaining_slots = max_stories - len(spawned)
+        effective_max = min(max_parallel, remaining_slots)
+        batch = ready[:effective_max]
+        if not batch:
+            break
+
+        handles: list[WorkerHandle] = []
+        for story in batch:
+            projected_daily = daily_spent_usd + story_reserve
+
+            # Local user-supplied hard cap (W1.2 --max-spend-usd).
+            if projected_daily > max_spend_usd:
+                log.warning(
+                    "max_spend_usd_cap_reached",
+                    projected_usd=projected_daily,
+                    max_spend_usd=max_spend_usd,
+                    story_id=story["id"],
+                )
+                await bus.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope="day",
+                    level="halt",
+                    spent_usd=projected_daily,
+                    alarm_threshold=max_spend_usd,
+                    halt_threshold=max_spend_usd,
+                    corrupted=False,
+                    story_id=story["id"],
+                    reason="max_spend_usd_cap",
+                )
+                daily_halt_reached = True
+                break
+
+            day_res = await budget.enforce_day(projected_daily, today_utc)
+            if day_res.level == "halt":
+                log.warning(
+                    "daily_budget_halt",
+                    projected_usd=projected_daily,
+                    halt_threshold=day_res.halt_threshold,
+                    day=today_utc,
+                )
+                await bus.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope="day",
+                    level="halt",
+                    spent_usd=projected_daily,
+                    alarm_threshold=day_res.alarm_threshold,
+                    halt_threshold=day_res.halt_threshold,
+                    corrupted=day_res.corrupted,
+                    story_id=story["id"],
+                    day=today_utc,
+                )
+                daily_halt_reached = True
+                break
+            daily_spent_usd = projected_daily
+
+            res = await budget.enforce_and_reserve_story(story["id"], story_reserve)
+            if not res.allowed:
+                await bus.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope=res.scope,
+                    level="halt",
+                    spent_usd=res.current_usd,
+                    alarm_threshold=res.alarm_threshold,
+                    halt_threshold=res.halt_threshold,
+                    corrupted=False,
+                    story_id=story["id"],
+                    reason=res.reason,
+                )
+                continue
+
+            wt = worktree_root / f"wt-{story['id']}"
+            wt.mkdir(exist_ok=True)
+            handle = await runtime_spawn_worker(
+                worktree=str(wt),
+                story_id=story["id"],
+                branch=f"feature/{story['id']}",
+                mock=False,
+                sandbox_network="full",
+            )
+            handles.append(handle)
+            spawned.append(story["id"])
+
+        if handles:
+            await asyncio.gather(
+                *[_tail_and_emit_completion(h, bus) for h in handles]
+            )
+
+        snap = read_sprint_status_yaml()
+        for sid in spawned:
+            for epic_block in (snap.get("epics") or {}).values():
+                if isinstance(epic_block, dict) and sid in (epic_block.get("stories") or {}):
+                    epic_block["stories"][sid] = "done"
+        write_sprint_status_yaml(snap)
+        planner.reload()
+        rounds += 1
+
+        # Per-batch budget aggregate (placeholder ≈ $5/story; replaced in W3).
+        await budget.enforce_batch(spent_usd=story_reserve * len(spawned), wave=wave)
+
+    await bus.emit(
+        EventType.WAVE_BOUNDARY_REACHED,
+        wave=wave,
+        spawned=spawned,
+        rounds=rounds,
+    )
+    log.info(
+        "real_pilot_done",
+        stories=len(spawned),
+        rounds=rounds,
+        daily_spent_usd=daily_spent_usd,
+        halted=daily_halt_reached,
+    )
+
+
+async def _tail_and_emit_completion(handle: WorkerHandle, bus: EventLoop) -> None:
+    """Tail a worker's JSONL until terminal event; bridge to bus.
+
+    The generator returns after seeing ``worker_completed`` or
+    ``worker_halt_file``. We re-emit only the success / failure terminal to
+    keep the bus surface narrow — intermediate ``claude_event`` / ``stdout_line``
+    rows stay in the JSONL for forensics but don't fan out to subscribers.
+    """
+    async for ev in tail_jsonl_events(handle.jsonl_path):
+        event_type = ev.get("event_type")
+        if event_type == "worker_completed":
+            await bus.emit(
+                EventType.WORKER_COMPLETED,
+                story_id=handle.story_id,
+                worktree=handle.worktree,
+                jsonl=str(handle.jsonl_path),
+                exit_code=ev.get("exit_code", 0),
+                status=ev.get("status", "success"),
+                mock=False,
+            )
+            return
+        if event_type == "worker_halt_file":
+            await bus.emit(
+                EventType.WORKER_HALT_FILE,
+                story_id=handle.story_id,
+                worktree=handle.worktree,
+                jsonl=str(handle.jsonl_path),
+            )
+            return
 
 
 # ── HUMAN_QUERY / HUMAN_RESPONSE subscriber (FS4 B9 stub) ────────────────────
