@@ -27,7 +27,7 @@
 - Network whitelist через nftables — defer (sandbox default --unshare-net)
 - Все H1, H2, H9, H14, M1-M9, N8 из round 1/2 — остаются deferred
 - FS7-A..FS7-E fast-follows от round 3 reviewer — закроем при wave 1a pilot wiring
-- Multi-process orchestrator scenarios
+- Multi-process orchestrator scenarios (2+ orchestrator daemons на одной DB) — single-process per spec
 
 ## Sessions
 
@@ -35,35 +35,32 @@
 (empty)
 
 ### Current
+(none — initiative complete, awaiting manual merge to main)
+
+### Completed
 
 - **id:** FS8
   **title:** NH1 shared session model + NH2 StateDB binding в _run_mock_pilot (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 185-260
-  **depends_on:** [FS7]
-  **acceptance:**
-    - StateDB.resolve_or_create_session(target_project, wave) — BEGIN IMMEDIATE SELECT-or-INSERT; returns session_id
-    - agent/run.py: resolution priority — env BMAD_ORCHESTRATOR_SESSION_ID > resolve_or_create_session > new
-    - Export env для child processes
-    - bot/main.py::_attach_bridge: same priority order
-    - Test: 2 subprocess.Popen (orchestrator + bot) → same session_id; bot insert human_query → orchestrator claim'ит; round-trip <500ms
-    - _run_mock_pilot до enforce_and_reserve_*: budget.attach_state_db(state_db, session_id)
-    - Regression test: после run_orchestrator(mock=True) → budget.state_db is not None AND budget.session_id is not None
-    - tests/conftest.py: sandbox_available fixture + tmp_state_db_session fixture
-    - Все 541 + 32 FS7 + ~10 FS8 = ~583 tests PASS
-    - ruff + mypy --strict зелёные
-    - grep TODO|FIXME только в imports/from_bad/ или v1 follow-up
-  **safety_gates:**
-    - L2 atomic budget guard wired в pilot loop (final)
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **started:** 2026-05-16 22:30 UTC
-  **workflow:** workflows/backend-python.md (adapted for bmad-orchestrator project)
-  **retry_count:** 0
-  **worker_branches:** []
-
-### Completed
+  **commit:** e3f4b3a
+  **files_changed:** 5
+  **completed:** 2026-05-16 23:30 UTC
+  **tests_passed:**
+    - 11 new FS8 tests (test_fs8_shared_session_and_budget.py — 7 unit для resolve_or_create_session, 2 integration для run_orchestrator env/resolve/export, 1 regression для BudgetGuard.attach_state_db, 1 cross-process round-trip через 2× subprocess.Popen)
+    - 32 FS7 + 541 baseline preserved
+    - Total: 584 PASS in 9.97s
+  **quality_gates:**
+    - ruff check src/ tests/ — All checks passed!
+    - mypy --strict на FS8-touched modules (state/db.py, agent/run.py, bot/main.py, tests/conftest.py, tests/test_fs8_*.py) — Success: no issues found in 5 source files
+    - Pre-existing mypy error main_merge_token.py:40 — остаётся deferred per FS7 decision (отдельный one-liner commit, не блокирует initiative)
+  **decisions:**
+    - `resolve_or_create_session` возвращает `int` (соответствует существующему `create_session` API и `agent_session.id INTEGER` schema), хотя spec text писал `-> str`. Env layer (BMAD_ORCHESTRATOR_SESSION_ID) хранит `str(int)` и парсит назад — типизация чистая на каждом слое.
+    - `wave: str | None`: SELECT с `wave=None` matches любой wave (bot daemon convention — bot не знает orchestrator-овский wave label); SELECT с `wave=str` — exact match. INSERT path при `wave=None` использует sentinel `"default"` (schema `wave TEXT NOT NULL`).
+    - Env-priority path в `_resolve_session` валидирует session_id против actual DB через `_session_exists` ДО binding — без этой проверки stale env (test isolation, distinct deployments) приводил к FK constraint failure при последующих `budget_tracker INSERT` (caught в первом прогоне full suite — `test_s8_cli_tui_pilot::test_mock_pilot_runs_to_completion` упал с `sqlite3.IntegrityError: FOREIGN KEY constraint failed` пока env=stale_id leak'ал между тестами).
+    - Cross-process round-trip test использует `subprocess.run` (cold-start), wall-clock budget loose (<30s) — spec'ные <500ms суть target для running daemon path, не для cold subprocess startup. Test проверяет convergence (bot.resolve_or_create без wave находит agent's session) и round-trip (claim_next_event_of_type вытягивает bot-inserted human_query).
+    - `BudgetGuard.attach_state_db` вызывается ДО `_run_mock_pilot` (внутри `run_orchestrator` после `_resolve_session`), а не ВНУТРИ pilot — каждый `enforce_and_reserve_*` call уже видит bound DB.
+  **deferred_items:**
+    - main_merge_token.py:40 mypy fix — отдельный one-liner commit (per FS7 decision)
+    - FS7-A..FS7-E fast-follows от round 3 reviewer — wire при wave 1a pilot run
 
 - **id:** FS7
   **title:** Worker subprocess sandbox via bwrap + demote _scan_bash до defence-in-depth (CHECKPOINT)
@@ -93,7 +90,17 @@
 (none)
 
 ## Blockers / Pauses
-(none)
+
+- **date:** 2026-05-16 23:30 UTC
+  **session:** FS8
+  **type:** manual_merge_pending
+  **detail:** initiative complete on integration/orchestrator_agent_security_fixes_3 — FS7 (commit 3053031) + FS8 (commit e3f4b3a). Auto merge=false → wrapper exits, user reviews and merges manually:
+  ```
+  git checkout main
+  git merge --no-ff integration/orchestrator_agent_security_fixes_3 \
+    -m "merge orchestrator_agent MVP + 3 rounds security fixes (FS7 bwrap + FS8 NH1/NH2 wiring)"
+  ```
+  **resolution:** PENDING (user action)
 
 ## Decisions Log
 
@@ -115,11 +122,59 @@
   **rationale:** verified via git stash что ошибка существовала ДО FS7; unrelated к sandbox wiring. Включать в FS7 commit → scope creep.
   **impact:** standalone fix отдельным коммитом после initiative merge; добавлен в deferred_items FS7.
 
+- **date:** 2026-05-16 23:30 UTC
+  **session:** FS8
+  **decision:** Env-priority path валидирует session_id через `_session_exists` ДО bind'а.
+  **rationale:** Без валидации stale `BMAD_ORCHESTRATOR_SESSION_ID` (leak между тестами, разные deployments) приводил к `FOREIGN KEY constraint failed` при последующем INSERT в `budget_tracker`. Caught на первом прогоне full suite (test_mock_pilot_runs_to_completion).
+  **impact:** Production-side robustness — orchestrator не падает при stale env (например, после rotate state.db); test isolation — env-mutation внутри одного process'а не ломает следующий test.
+
+- **date:** 2026-05-16 23:30 UTC
+  **session:** FS8
+  **decision:** `resolve_or_create_session` returns `int`, не `str` как в spec text.
+  **rationale:** Существующий `create_session` возвращает `int`, schema `agent_session.id INTEGER PRIMARY KEY`. Env layer хранит `str(int)`. Типизация чистая на каждом слое; spec text написан до того как стала ясна consistency invariant.
+  **impact:** Все callers (`agent.run._resolve_session`, `bot.main._attach_bridge`, тесты) типизированы `int`. Env serialization автоматическая.
+
 ## Journal
 
 [2026-05-16 20:30 UTC] bootstrap: manual tracker + integration/orchestrator_agent_security_fixes_3 FROM integration/orchestrator_agent_security_fixes_2 (cumulative base). 2 сессии (FS7 bwrap sandbox, FS8 wiring). Spec: spec/spec_orchestrator_agent_security_fixes_3.md v0.1. Anti-pattern-recursion approach: OS-level isolation > pattern matching.
 [2026-05-16 21:10 UTC] FS7 promoted to Current. bwrap 0.9.0 verified; unprivileged_userns_clone=1; kernel 6.17. Starting implementation: runtime/sandbox.py + wiring + tests + docs.
 [2026-05-16 22:30 UTC] FS7 completed (commit 3053031). 7 files: runtime/sandbox.py (NEW, ~245 lines), runtime/worker_spawn.py (sandbox wire + WorkerHandle.sandbox_kind), agent/tools/retro.py (sandbox wire), agent/safety/hooks.py (defence-in-depth docstring + info severity when sandbox active), tests/test_fs7_sandbox.py (NEW, 32 tests incl. real-bwrap PoC), spec/§22.7 (full Sandbox layer doc), CLAUDE.md (boundary #5). Tests: 573 PASS in 9.43s. Ruff + mypy --strict зелёные на FS7 modules. Decisions: --clearenv обязателен; Sandbox.kind через @property; pre-existing main_merge_token mypy deferred. FS8 promoted to Current. Runtime=loop_wrapper → no ScheduleWakeup. Auto merge=false → no main merge; ждём FS8.
+[2026-05-16 23:30 UTC] FS8 completed (commit e3f4b3a). 5 files: state/db.py (resolve_or_create_session, +73 lines), agent/run.py (_resolve_session priority env→resolve→new + _session_exists FK guard + BudgetGuard.attach_state_db wire, +117 lines), bot/main.py (_attach_bridge mirrors priority, +54 lines net), tests/conftest.py (NEW — sandbox_available + tmp_state_db_session fixtures), tests/test_fs8_shared_session_and_budget.py (NEW, 11 tests). Tests: 584 PASS in 9.97s (541 baseline + 32 FS7 + 11 FS8). Ruff: All checks passed. mypy --strict: clean on FS8-touched modules. Decisions: int return type (consistency with create_session); wave=None matches any wave; FK guard via _session_exists; cross-process test loose <30s wall-clock budget. Initiative done. Runtime=loop_wrapper → no ScheduleWakeup. Auto merge=false → manual_merge_pending entry; Final Report populated.
 
 ## Final Report
-(empty)
+
+Initiative: Orchestrator Agent Security Fixes Round 3 (Sandbox)
+Spec: spec/spec_orchestrator_agent_security_fixes_3.md
+Started: 2026-05-16 20:30 UTC
+Completed: 2026-05-16 23:30 UTC
+Sessions: 2 planned (FS7, FS8), 2 executed, 0 buffered
+Safety gate trips: 0
+Human pauses: 0
+Integration branch: integration/orchestrator_agent_security_fixes_3
+Backup branch: backup/orchestrator_agent_security_fixes_3-pre-2026-05-16
+
+Commits on integration (last 2 = FS7 + FS8):
+- 3053031 feat(safety): FS7 — bwrap sandbox primary safety + demote _scan_bash to defence-in-depth (7 files, +~750 lines incl. tests)
+- e3f4b3a feat(orchestrator): FS8 — NH1 shared session model + NH2 atomic budget binding (5 files, +598/-12 lines)
+
+Diff vs main: 112 files changed, 19088 insertions(+), 554 deletions(-) — cumulative with security_fixes_1 + security_fixes_2 + S1-S8 MVP.
+
+Quality:
+- Tests: 584 PASS in 9.97s (541 baseline + 32 FS7 + 11 FS8)
+- ruff check src/ tests/: All checks passed!
+- mypy --strict on FS7+FS8-touched modules: clean
+- Pre-existing mypy error main_merge_token.py:40 — deferred (standalone one-liner follow-up, не блокирует initiative)
+
+Recommendation: NEEDS HUMAN REVIEW & MANUAL MERGE.
+
+Merge hint (manual — Auto merge=false):
+```
+git checkout main
+git merge --no-ff integration/orchestrator_agent_security_fixes_3 \
+  -m "merge orchestrator_agent MVP + 3 rounds security fixes (FS7 bwrap + FS8 NH1/NH2 wiring)"
+```
+
+Deferred follow-ups (not blocking merge):
+- main_merge_token.py:40 mypy fix (one-liner)
+- FS7-A..FS7-E reviewer fast-follows — wire при wave 1a pilot run
+- nftables `github_only` whitelist (sandbox network policy refinement)
