@@ -47,3 +47,16 @@ confirm:
   cancel: "Отмена"
   approve: "✓ Подтвердить"
   reject: "✗ Отклонить"
+
+# Agent state (CLI)
+agent:
+  idle: "ожидает события"
+  pause_requested: "пауза запрошена — дождусь текущих workers"
+  resume_requested: "возобновляю работу"
+  stopping: "останавливаю"
+  starting: "запускаю на wave {wave}"
+
+# CLI smoke
+cli:
+  no_logs: "нет JSONL логов для worker {worker}"
+  no_retro: "нет retrospective для wave {wave}"

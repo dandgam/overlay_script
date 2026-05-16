@@ -9,6 +9,7 @@ confirmation для destructive ops (§15.4).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -18,8 +19,42 @@ from telegram.ext import ContextTypes
 from bmad_orchestrator.bot.audit import record_telegram_event
 from bmad_orchestrator.bot.pii_detector import scrub_input, scrub_output
 from bmad_orchestrator.config import load_settings
+from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
 
 log = structlog.get_logger(__name__)
+
+
+# ── EventLoop bridge ───────────────────────────────────────────────────────
+#
+# Bot — отдельный процесс; orchestrator agent — отдельный. Связка через
+# shared EventLoop (in-process) или JSONL-bridge (cross-process). При запуске
+# вместе (`bmad-orchestrator run --watch`) agent выставляет shared bus через
+# `attach_event_loop(bus)`. Stand-alone bot (`bmad-orchestrator bot start`)
+# работает в stub-режиме — пишет в audit JSONL, agent его читает.
+_BUS: EventLoop | None = None
+_HUMAN_RESPONSES: dict[int, asyncio.Future[str]] = {}
+
+
+def attach_event_loop(bus: EventLoop | None) -> None:
+    """Wire bot handlers to the orchestrator's EventLoop instance.
+
+    Call from `agent.run.run_orchestrator` before launching the bot daemon.
+    `bus=None` resets to stub mode (для unit-тестов).
+    """
+    global _BUS
+    _BUS = bus
+
+
+def deliver_human_response(chat_id: int, text: str) -> bool:
+    """Resolve a pending `forward_to_agent` future. Returns True if matched.
+
+    Orchestrator calls this when it receives `HUMAN_RESPONSE` event for a chat.
+    """
+    fut = _HUMAN_RESPONSES.pop(chat_id, None)
+    if fut is None or fut.done():
+        return False
+    fut.set_result(text)
+    return True
 
 
 # ── Whitelist ──────────────────────────────────────────────────────────────
@@ -51,15 +86,44 @@ async def _deny(update: Update, kind: str) -> None:
 # ── Agent forwarding (placeholder; full wiring в S8 mock pilot) ────────────
 
 
-async def forward_to_agent(text: str, *, chat_id: int | None, source: str) -> str:
-    """Push user text into orchestrator's chat queue.
+async def forward_to_agent(
+    text: str,
+    *,
+    chat_id: int | None,
+    source: str,
+    timeout: float = 30.0,
+) -> str:
+    """Push user text into orchestrator's chat queue (S8 — real EventLoop wiring).
 
-    Real wiring (S8): emit `USER_CHAT_MESSAGE` в `EventLoop` + await response
-    через `HUMAN_RESPONSE`-keyed future. На S6 — синхронный stub, чтобы
-    handlers были testable end-to-end без полного orchestrator-loop'а.
+    Bus mode (`attach_event_loop(bus)` was called): emit `USER_CHAT_MESSAGE`,
+    await `HUMAN_RESPONSE` future. Stub mode (bus is None): immediate echo so
+    the handlers stay testable without a running orchestrator.
     """
-    log.info("telegram_forward_to_agent", source=source, chat_id=chat_id, text_len=len(text))
-    return f"(оркестратор не подключён — S8) принято: {text[:80]}"
+    log.info(
+        "telegram_forward_to_agent",
+        source=source,
+        chat_id=chat_id,
+        text_len=len(text),
+        bus_attached=_BUS is not None,
+    )
+    if _BUS is None or chat_id is None:
+        return f"(оркестратор не подключён) принято: {text[:80]}"
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str] = loop.create_future()
+    _HUMAN_RESPONSES[chat_id] = future
+
+    await _BUS.emit(
+        EventType.USER_CHAT_MESSAGE,
+        chat_id=chat_id,
+        text=text,
+        source=source,
+    )
+    try:
+        return await asyncio.wait_for(future, timeout=timeout)
+    except TimeoutError:
+        _HUMAN_RESPONSES.pop(chat_id, None)
+        return f"(агент не ответил за {timeout:.0f}s — повтори)"
 
 
 # ── Slash commands (spec §15.3) ────────────────────────────────────────────

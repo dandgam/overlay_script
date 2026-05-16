@@ -127,10 +127,9 @@ warn_unused_configs = true
 ignore_missing_imports = true
 
 # Skeleton-стабы, которые поздние сессии переписывают с типизацией.
-# bot.* удалён из override после S6 — теперь полная типизация + Update narrowing.
+# bot.* удалён из override после S6, cli.* удалён после S8.
 [[tool.mypy.overrides]]
 module = [
-    "bmad_orchestrator.cli",
     "bmad_orchestrator.imports.from_bad.*",
 ]
 disallow_untyped_decorators = false
