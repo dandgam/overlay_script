@@ -234,28 +234,31 @@ def test_human_query_event_type_exists() -> None:
 
 @pytest.mark.asyncio
 async def test_forward_to_agent_per_chat_fifo_with_corr_id() -> None:
-    """Multiple concurrent requests on same chat — each future resolves by corr_id."""
+    """Multiple concurrent requests on same chat — each future resolves by corr_id (W5: via subscribe_one_correlation)."""
     import asyncio
 
     from bmad_orchestrator.bot import handlers as bot_handlers
-    from bmad_orchestrator.runtime.event_loop import EventLoop
+    from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
 
     bus = EventLoop()
     bot_handlers.attach_event_loop(bus)
     bot_handlers.attach_state_db(None, None)
+    bot_handlers.reset_for_test()
     try:
         async def _collect_and_reply() -> None:
             events = []
             for _ in range(5):
                 ev = await bus.next(timeout=2.0)
                 assert ev is not None
+                assert ev.type == EventType.USER_CHAT_MESSAGE
                 events.append(ev)
             # Reply in reverse order — futures must still resolve correctly.
             for ev in reversed(events):
-                bot_handlers.deliver_human_response(
-                    ev.payload["chat_id"],
-                    ev.payload["corr_id"],
-                    f"reply-{ev.payload['text']}",
+                await bus.emit(
+                    EventType.HUMAN_RESPONSE,
+                    chat_id=ev.payload["chat_id"],
+                    corr_id=ev.payload["corr_id"],
+                    text=f"reply-{ev.payload['text']}",
                 )
 
         collector = asyncio.create_task(_collect_and_reply())
@@ -273,6 +276,7 @@ async def test_forward_to_agent_per_chat_fifo_with_corr_id() -> None:
             assert r == f"reply-msg{i}", f"mismatched corr_id mapping: {results}"
     finally:
         bot_handlers.attach_event_loop(None)
+        bot_handlers.reset_for_test()
 
 
 @pytest.mark.asyncio

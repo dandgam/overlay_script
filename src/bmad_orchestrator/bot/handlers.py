@@ -79,6 +79,7 @@ def reset_for_test() -> None:
     """Test helper — clear in-flight state + lock binding between tests."""
     global _RESPONSES_LOCK
     _HUMAN_RESPONSES.clear()
+    _BUS_INFLIGHT.clear()
     _RESPONSES_LOCK = None
 
 
@@ -203,6 +204,17 @@ async def forward_to_agent(
     if bridge == "stub" or chat_id is None:
         return f"(оркестратор не подключён) принято: {text[:80]}"
 
+    if bridge == "bus":
+        assert _BUS is not None
+        return await _forward_via_bus(
+            bus=_BUS,
+            text=text,
+            chat_id=chat_id,
+            source=source,
+            timeout=timeout,
+        )
+
+    # bridge == "state_db" — cross-process FIFO bridge (unchanged)
     lock = _get_lock()
     loop = asyncio.get_running_loop()
     future: asyncio.Future[str] = loop.create_future()
@@ -229,34 +241,94 @@ async def forward_to_agent(
         _HUMAN_RESPONSES.setdefault(chat_id, []).append((corr_id, future))
 
     try:
-        if bridge == "state_db":
-            assert _STATE_DB is not None and _SESSION_ID is not None
-            await _STATE_DB.enqueue_human_query(
-                _SESSION_ID, chat_id, text, corr_id
-            )
-            poll_task = asyncio.create_task(
-                _poll_state_db_response(chat_id, corr_id, timeout),
-                name=f"poll_human_response_{corr_id}",
-            )
-            try:
-                return await asyncio.wait_for(future, timeout=timeout)
-            finally:
-                poll_task.cancel()
-        else:
-            assert _BUS is not None
-            await _BUS.emit(
-                EventType.HUMAN_QUERY,
-                chat_id=chat_id,
-                corr_id=corr_id,
-                text=text,
-                source=source,
-            )
+        assert _STATE_DB is not None and _SESSION_ID is not None
+        await _STATE_DB.enqueue_human_query(
+            _SESSION_ID, chat_id, text, corr_id
+        )
+        poll_task = asyncio.create_task(
+            _poll_state_db_response(chat_id, corr_id, timeout),
+            name=f"poll_human_response_{corr_id}",
+        )
+        try:
             return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            poll_task.cancel()
     except TimeoutError:
         return f"(агент не ответил за {timeout:.0f}s — повтори)"
     finally:
         async with lock:
             _drop_pending(chat_id, corr_id)
+
+
+# Per-chat in-flight counter for the bus bridge — independent of the
+# state-db FIFO map (`_HUMAN_RESPONSES`) so we still enforce DoS caps even
+# though the bus path doesn't need a per-chat lookup table.
+_BUS_INFLIGHT: dict[int, int] = {}
+
+
+def _bus_inflight_total() -> int:
+    return sum(_BUS_INFLIGHT.values())
+
+
+async def _forward_via_bus(
+    *,
+    bus: EventLoop,
+    text: str,
+    chat_id: int,
+    source: str,
+    timeout: float,
+) -> str:
+    """In-process bridge: emit ``USER_CHAT_MESSAGE`` and await ``HUMAN_RESPONSE``.
+
+    Uses :meth:`EventLoop.subscribe_one_correlation` so the bot doesn't have to
+    maintain a per-chat FIFO map for the in-process case — the bus resolves
+    the future on the matching ``HUMAN_RESPONSE`` event regardless of who
+    drains the queue. Per-chat / global caps still apply (DoS guard).
+    """
+    lock = _get_lock()
+    corr_id = secrets.token_hex(8)
+
+    async with lock:
+        if _bus_inflight_total() >= _INFLIGHT_CAP:
+            log.warning(
+                "telegram_inflight_cap_reached",
+                chat_id=chat_id,
+                cap=_INFLIGHT_CAP,
+                bridge="bus",
+            )
+            return "queue_full"
+        if _BUS_INFLIGHT.get(chat_id, 0) >= _PER_CHAT_CAP:
+            log.warning(
+                "telegram_per_chat_cap_reached",
+                chat_id=chat_id,
+                cap=_PER_CHAT_CAP,
+                bridge="bus",
+            )
+            return "queue_full"
+        _BUS_INFLIGHT[chat_id] = _BUS_INFLIGHT.get(chat_id, 0) + 1
+
+    future = bus.subscribe_one_correlation(corr_id)
+    try:
+        await bus.emit(
+            EventType.USER_CHAT_MESSAGE,
+            chat_id=chat_id,
+            corr_id=corr_id,
+            text=text,
+            source=source,
+        )
+        event = await asyncio.wait_for(future, timeout=timeout)
+        response_text = (event.payload or {}).get("text", "")
+        return str(response_text)
+    except TimeoutError:
+        return f"(агент не ответил за {timeout:.0f}s — повтори)"
+    finally:
+        bus.unsubscribe_correlation(corr_id)
+        async with lock:
+            remaining = _BUS_INFLIGHT.get(chat_id, 1) - 1
+            if remaining <= 0:
+                _BUS_INFLIGHT.pop(chat_id, None)
+            else:
+                _BUS_INFLIGHT[chat_id] = remaining
 
 
 async def _poll_state_db_response(chat_id: int, corr_id: str, timeout: float) -> None:
