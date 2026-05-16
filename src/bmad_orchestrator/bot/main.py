@@ -111,9 +111,14 @@ async def _attach_bridge() -> None:
                 wave=None,
                 max_parallel=settings.max_parallel_workers,
             )
-            os.environ[SESSION_ENV_VAR] = str(session_id)
+            # FS9 R5 NH2: attach BEFORE setting env. If attach raises, env stays
+            # clean — a subsequent retry of _attach_bridge re-resolves from
+            # scratch. Old order set env first → an attach failure left a
+            # "valid" env pointer + no actual bridge wired, silent desync.
 
         attach_state_db(db, session_id)
+        # Only after attach succeeds: publish env for child processes.
+        os.environ[SESSION_ENV_VAR] = str(session_id)
         log.info(
             "bot_state_db_attached",
             db_path=str(settings.state_db),

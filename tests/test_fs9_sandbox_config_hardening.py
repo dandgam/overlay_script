@@ -107,11 +107,11 @@ def test_h3_default_rlimits_present(tmp_path: Path) -> None:
 def test_h3_env_override_nproc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``BMAD_SANDBOX_MAX_NPROC`` env overrides the default cap."""
-    monkeypatch.setenv("BMAD_SANDBOX_MAX_NPROC", "128")
+    """``BMAD_SANDBOX_MAX_NPROC`` env overrides the default cap (above min)."""
+    monkeypatch.setenv("BMAD_SANDBOX_MAX_NPROC", "2048")
     out = BwrapSandbox().wrap_command(["echo"], worktree=tmp_path)
     head = out[: out.index("--")]
-    assert "--nproc=128" in head
+    assert "--nproc=2048" in head
     assert f"--nproc={DEFAULT_MAX_NPROC}" not in head
 
 
@@ -132,6 +132,67 @@ def test_h3_prlimit_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         BwrapSandbox(prlimit_path="/does/not/exist/prlimit")
 
 
+# R5 P0-1 — nproc default must be high enough to not break clone() on busy hosts.
+# RLIMIT_NPROC is per-UID; cap below host's per-UID process count makes bwrap
+# fail with EAGAIN before namespace creation. 16384 leaves headroom on
+# typical hosts (~3000 procs) while still capping fork bombs (kernel hard
+# limit ~250K).
+def test_r5_p0_1_nproc_default_above_typical_host_load() -> None:
+    """nproc default must clear typical host process count to prevent EAGAIN."""
+    # Round 4 ship 512 broke real-bwrap on hosts with >512 procs.
+    # Floor for this assertion: enough headroom for desktop + worker pool.
+    assert DEFAULT_MAX_NPROC >= 8192, (
+        f"DEFAULT_MAX_NPROC={DEFAULT_MAX_NPROC} too low — RLIMIT_NPROC is "
+        "per-UID; below host process count, clone() fails with EAGAIN before "
+        "bwrap can create namespace. Raise to >=8192 or migrate to cgroup "
+        "TasksMax (see backlog sandbox-cgroup-migration)."
+    )
+
+
+# R5 P1-1 — env overrides below safe minimums must clamp + warn, not silently
+# break workers. Typo MAX_AS_BYTES=8589934 (8 MB) used to silently kill every
+# Python interpreter; now the validator floors to _MIN_AS_BYTES and logs.
+def test_r5_p1_1_env_override_below_minimum_clamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Sub-minimum env override is clamped to MIN + warning logged."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="bmad_orchestrator.runtime.sandbox")
+    # 100 nproc would brick clone(); below _MIN_NPROC=1024 must clamp.
+    monkeypatch.setenv("BMAD_SANDBOX_MAX_NPROC", "100")
+    out = BwrapSandbox().wrap_command(["echo"], worktree=tmp_path)
+    head = out[: out.index("--")]
+    # Must NOT use the broken 100; must use MIN floor (1024).
+    assert "--nproc=100" not in head
+    assert "--nproc=1024" in head
+    assert any("sandbox_rlimit_below_minimum" in rec.message for rec in caplog.records), (
+        "expected warning log when env override below minimum"
+    )
+
+
+# R5 P0-2 — /sys hide was asymmetric. /proc still leaked kernel fingerprint
+# files. These individual /proc paths must be bound to /dev/null inside the
+# sandbox to defeat host fingerprinting.
+@pytest.mark.parametrize("proc_path", [
+    "/proc/version",
+    "/proc/cmdline",
+    "/proc/modules",
+    "/proc/kallsyms",
+    "/proc/cpuinfo",
+    "/proc/meminfo",
+])
+def test_r5_p0_2_proc_fingerprint_paths_hidden(tmp_path: Path, proc_path: str) -> None:
+    """Each high-leak /proc file is bound to /dev/null in wrap output."""
+    out = BwrapSandbox().wrap_command(["echo"], worktree=tmp_path)
+    # Find the --ro-bind /dev/null <proc_path> sequence.
+    found = False
+    for i in range(len(out) - 2):
+        if out[i] == "--ro-bind" and out[i + 1] == "/dev/null" and out[i + 2] == proc_path:
+            found = True
+            break
+    assert found, f"expected '--ro-bind /dev/null {proc_path}' in wrap output to hide kernel fingerprint"
+
+
 # Note: a real fork-bomb PoC under bwrap is omitted intentionally. RLIMIT_NPROC
 # is per-UID, not per-process-tree, so the cap counts *every* process the user
 # owns (including the pytest runner itself + 2k+ background services on a typical
@@ -145,15 +206,17 @@ def test_h3_prlimit_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_h4_real_fsize_capped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``--fsize`` cap blocks writing huge files. Use 1 MiB cap to keep test fast."""
-    monkeypatch.setenv("BMAD_SANDBOX_MAX_FSIZE_BYTES", "1048576")  # 1 MiB
+    """``--fsize`` cap blocks writing huge files. Cap above _MIN_FSIZE_BYTES (64 MiB)."""
+    # R5 P1-1: minimum bound is 64 MiB so MAX_FSIZE_BYTES=1MB silently clamps.
+    # Use 100 MiB cap, try to write 200 MiB → must fail with SIGXFSZ.
+    monkeypatch.setenv("BMAD_SANDBOX_MAX_FSIZE_BYTES", str(100 * 1024**2))
     sb = BwrapSandbox()
     wrapped = sb.wrap_command(
         [
             "bash",
             "-c",
             # dd will hit the size limit and fail with SIGXFSZ / "File too large".
-            "dd if=/dev/zero of=/tmp/bigfile bs=1M count=10 2>&1; echo exit=$?",
+            "dd if=/dev/zero of=/tmp/bigfile bs=1M count=200 2>&1; echo exit=$?",
         ],
         worktree=tmp_path,
         env={"PATH": "/usr/bin:/bin"},
@@ -168,7 +231,7 @@ def test_h4_real_fsize_capped(
         "File size limit exceeded" in combined
         or "File too large" in combined
         or "exit=0" not in combined.splitlines()[-1]
-    ), f"expected fsize cap to block 10 MiB write:\n{combined}"
+    ), f"expected fsize cap to block 200 MiB write under 100 MiB cap:\n{combined}"
 
 
 # ── H5: BMAD_REQUIRE_SANDBOX hard-fail ───────────────────────────────────────

@@ -42,28 +42,59 @@ _SANDBOX_DEFAULT_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "PWD", "SHELL", "TERM",
 })
 
-# FS9 H3+H4 — defence-in-depth resource limits applied via ``prlimit(1)``
-# wrapped around the bwrap invocation. bwrap itself has no native rlimit
-# flags; a worker that escapes the mount/net sandbox but stays in-process
-# can still fork-bomb the host or fill tmpfs without these caps. Defaults
-# are conservative; override via env for tuning.
-DEFAULT_MAX_NPROC = 512               # fork-bomb cap (per-uid process count)
+# FS9 H3+H4 + R5 P0-1 — defence-in-depth resource limits applied via ``prlimit(1)``.
+# bwrap itself has no native rlimit flags; a worker that escapes the mount/net
+# sandbox but stays in-process can still fork-bomb the host or fill tmpfs.
+#
+# CRITICAL — round 5 P0-1: `RLIMIT_NPROC` is **per-UID** in the kernel, not
+# per-process-tree. A cap of 512 on a host with >512 processes under the
+# orchestrator UID makes `clone()` (and thus `bwrap`) fail with EAGAIN
+# *before* the namespace is created. Default raised from 512 → 16384 so the
+# cap still blocks fork bombs (typical kernel hard limit ~250K) but does not
+# refuse legitimate workers on busy hosts. For tighter per-cgroup isolation,
+# see backlog `sandbox-cgroup-migration` (switch to `systemd-run --user
+# --scope -p TasksMax=N`).
+#
+# FSIZE — `RLIMIT_FSIZE` caps SINGLE-FILE size, not aggregate. Workers can
+# still fill /tmp by writing many files. Per-mount sizing or cgroup IO
+# quotas needed for aggregate caps (deferred to sandbox-cgroup-migration).
+DEFAULT_MAX_NPROC = 16384             # fork-bomb cap (per-uid count; see note above)
 DEFAULT_MAX_AS_BYTES = 8 * 1024**3    # virtual memory ceiling (8 GiB)
-DEFAULT_MAX_FSIZE_BYTES = 10 * 1024**3  # max single-file size (10 GiB) — caps tmpfs spills
+DEFAULT_MAX_FSIZE_BYTES = 10 * 1024**3  # max single-file size (10 GiB); per-file ONLY, NOT aggregate
 DEFAULT_MAX_NOFILE = 4096             # max open fds
 
-# Env var override knobs (positive int → use; otherwise default).
+# FS9 R5 P1-1 — minimum bounds for env overrides. A typo like
+# `MAX_AS_BYTES=8589934` (8 MB instead of 8 GB) silently broke every Python
+# worker; below these floors we ignore the override and log a warning.
+_MIN_NPROC = 1024                     # below this bwrap clone() may fail
+_MIN_AS_BYTES = 256 * 1024**2         # 256 MiB — Python interpreter needs ~50 MiB
+_MIN_FSIZE_BYTES = 64 * 1024**2       # 64 MiB
+_MIN_NOFILE = 256
+
+# Env var override knobs (positive int → use if above minimum; otherwise default).
 _ENV_NPROC = "BMAD_SANDBOX_MAX_NPROC"
 _ENV_AS = "BMAD_SANDBOX_MAX_AS_BYTES"
 _ENV_FSIZE = "BMAD_SANDBOX_MAX_FSIZE_BYTES"
 _ENV_NOFILE = "BMAD_SANDBOX_MAX_NOFILE"
 
 
-def _env_positive_int(name: str, default: int) -> int:
-    """Read ``name`` as positive int from env, fall back to ``default``."""
+def _env_positive_int(name: str, default: int, minimum: int | None = None) -> int:
+    """Read ``name`` as positive int from env, fall back to ``default``.
+
+    If ``minimum`` is provided and the env value is below it, log a warning
+    and return ``minimum`` (FS9 R5 P1-1 — refuse silently-broken overrides).
+    """
     raw = os.environ.get(name, "").strip()
     if raw.isdigit() and int(raw) > 0:
-        return int(raw)
+        val = int(raw)
+        if minimum is not None and val < minimum:
+            log.warning(
+                "sandbox_rlimit_below_minimum: env=%s value=%d minimum=%d "
+                "(using minimum; orchestrator would be unusable otherwise)",
+                name, val, minimum,
+            )
+            return minimum
+        return val
     return default
 
 
@@ -175,6 +206,16 @@ class BwrapSandbox:
             "--dev", "/dev",
             "--tmpfs", "/tmp",  # noqa: S108 — bwrap mount point inside the sandbox namespace, not a host path
             "--tmpfs", "/sys",  # FS9 H1 — hide kernel info (LSMs, dmi, network)
+            # FS9 R5 P0-2 — H1 was asymmetric: /sys hidden but /proc still
+            # exposed the same kernel fingerprint (version, cmdline, modules,
+            # kallsyms, cpuinfo, meminfo). Block those individual /proc files
+            # via /dev/null bind. Bash, ps, /proc/self/* still work.
+            "--ro-bind", "/dev/null", "/proc/version",
+            "--ro-bind", "/dev/null", "/proc/cmdline",
+            "--ro-bind", "/dev/null", "/proc/modules",
+            "--ro-bind", "/dev/null", "/proc/kallsyms",
+            "--ro-bind", "/dev/null", "/proc/cpuinfo",
+            "--ro-bind", "/dev/null", "/proc/meminfo",
             "--bind", str(wt_abs), str(wt_abs),
             "--chdir", str(wt_abs),
             "--unshare-pid",
@@ -219,10 +260,10 @@ class BwrapSandbox:
         # all descendants).
         rlimit_wrapper = [
             self.prlimit_path,
-            f"--nproc={_env_positive_int(_ENV_NPROC, DEFAULT_MAX_NPROC)}",
-            f"--as={_env_positive_int(_ENV_AS, DEFAULT_MAX_AS_BYTES)}",
-            f"--fsize={_env_positive_int(_ENV_FSIZE, DEFAULT_MAX_FSIZE_BYTES)}",
-            f"--nofile={_env_positive_int(_ENV_NOFILE, DEFAULT_MAX_NOFILE)}",
+            f"--nproc={_env_positive_int(_ENV_NPROC, DEFAULT_MAX_NPROC, _MIN_NPROC)}",
+            f"--as={_env_positive_int(_ENV_AS, DEFAULT_MAX_AS_BYTES, _MIN_AS_BYTES)}",
+            f"--fsize={_env_positive_int(_ENV_FSIZE, DEFAULT_MAX_FSIZE_BYTES, _MIN_FSIZE_BYTES)}",
+            f"--nofile={_env_positive_int(_ENV_NOFILE, DEFAULT_MAX_NOFILE, _MIN_NOFILE)}",
             "--",
         ]
         return rlimit_wrapper + wrapped

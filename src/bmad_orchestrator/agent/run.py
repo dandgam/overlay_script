@@ -262,7 +262,9 @@ async def _resolve_session(
             log.warning(
                 "session_env_var_invalid",
                 env_var=SESSION_ENV_VAR,
-                value=env_value,
+                # FS9 R5 NH1: don't log raw env_value — future opaque session
+                # tokens would leak as credentials. Length is enough signal.
+                value_len=len(env_value),
                 fallback="resolve_or_create",
                 cleared=True,
             )
@@ -284,7 +286,8 @@ async def _resolve_session(
                 log.warning(
                     "session_env_var_stale",
                     env_var=SESSION_ENV_VAR,
-                    value=env_value,
+                    # FS9 R5 NH1: avoid logging raw value (future credentials).
+                    value_len=len(env_value),
                     db_path=str(db_path),
                     fallback="resolve_or_create",
                     cleared=True,
