@@ -36,6 +36,12 @@ from bmad_orchestrator.agent.tools._common import (
     worker_jsonl_path,
 )
 from bmad_orchestrator.config import DEFAULT_BUDGET_CAP_USD, DEFAULT_MODEL
+from bmad_orchestrator.runtime.sandbox import (
+    NetworkPolicy,
+    NoSandbox,
+    Sandbox,
+    detect_sandbox,
+)
 
 CLAUDE_BIN_DEFAULT = "claude"
 DEFAULT_SKILL_INVOCATION = "/bmad-auto-dev"
@@ -86,6 +92,7 @@ class WorkerHandle:
     mock: bool
     fallback_reason: str | None = None
     real_requested: bool = False
+    sandbox_kind: str = "none"
 
 
 def _resolve_claude_bin() -> str | None:
@@ -175,6 +182,8 @@ async def spawn_worker(
     extra_args: list[str] | None = None,
     mock: bool | None = None,
     env: dict[str, str] | None = None,
+    use_sandbox: bool = True,
+    sandbox_network: NetworkPolicy = "github_only",
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 
@@ -205,6 +214,9 @@ async def spawn_worker(
 
     if use_mock:
         # Synthetic spawn + completion — useful for pipeline E2E без CLI.
+        # Mock-mode never actually invokes a subprocess so sandbox_kind is
+        # recorded but no wrap occurs.
+        sandbox_kind = "n/a-mock"
         _emit(
             jsonl_path,
             {
@@ -217,6 +229,8 @@ async def spawn_worker(
                 "mock": True,
                 "fallback_reason": fallback_reason,
                 "real_requested": real_requested,
+                "sandbox_used": False,
+                "sandbox_kind": sandbox_kind,
             },
         )
         _emit(
@@ -241,6 +255,7 @@ async def spawn_worker(
             mock=True,
             fallback_reason=fallback_reason,
             real_requested=real_requested,
+            sandbox_kind=sandbox_kind,
         )
 
     # Real-mode subprocess.
@@ -255,8 +270,19 @@ async def spawn_worker(
     merged_env.setdefault("ORCHESTRATOR_WORKER_MODEL", model)
     merged_env.setdefault("ORCHESTRATOR_WORKER_BUDGET_USD", str(budget_cap_usd))
 
+    # FS7 — wrap the worker command in an OS-level sandbox (default: bwrap)
+    # so the inner ``claude -p`` cannot reach prod files no matter what bash
+    # tricks it attempts. ``_scan_bash`` remains as defence-in-depth.
+    sandbox: Sandbox = detect_sandbox() if use_sandbox else NoSandbox()
+    wrapped_args = sandbox.wrap_command(
+        args,
+        worktree=Path(worktree),
+        network=sandbox_network,
+        env=merged_env,
+    )
+
     process = await asyncio.create_subprocess_exec(
-        *args,
+        *wrapped_args,
         cwd=worktree,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -276,6 +302,8 @@ async def spawn_worker(
             "budget_cap_usd": budget_cap_usd,
             "pid": pid,
             "mock": False,
+            "sandbox_used": sandbox.kind != "none",
+            "sandbox_kind": sandbox.kind,
         },
     )
 
@@ -302,6 +330,7 @@ async def spawn_worker(
         jsonl_path=jsonl_path,
         process=process,
         mock=False,
+        sandbox_kind=sandbox.kind,
     )
 
 

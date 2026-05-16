@@ -1307,8 +1307,98 @@ BAD покрывает ~30% нашего spec'а. Полная карта в tas
 
 ---
 
-**End of consolidated spec v0.7** — Источник истины для scaffold'а.
+## 22.7 Sandbox layer (FS7, round 3 — 2026-05-16)
+
+**Primary safety для worker subprocess** = OS-level isolation через `bwrap`
+(Bubblewrap). Заменил pattern-based `_scan_bash` как primary safety floor
+после того как 3 round'а fix-loop'ов произвели по 5-6 новых P0 bash-bypass'ов
+каждый (NC1 `bash <<<`, NC2 `(rm -rf x)`, NC3 brace expansion, NC4 xargs,
+NC5 pipe-to-interpreter…). Blacklist на bash text фундаментально неисчерпаем.
+
+### Архитектура
+
+`src/bmad_orchestrator/runtime/sandbox.py`:
+
+| Класс | Назначение |
+|---|---|
+| `Sandbox` (Protocol) | Backend-агностичный интерфейс: `wrap_command(cmd, *, worktree, readonly_paths, network, env) → list[str]` |
+| `BwrapSandbox` | `bwrap`-backed impl. Default policy ниже |
+| `NoSandbox` | Fallback. Возвращает `cmd` без изменений + loud audit warning |
+| `detect_sandbox()` | Factory: `BMAD_SANDBOX` env override → `shutil.which("bwrap")` → fallback |
+
+### Default bwrap policy
+
+```text
+bwrap \
+  --die-with-parent --new-session \
+  --ro-bind / / \            # entire host FS read-only
+  --proc /proc --dev /dev \  # minimal proc/dev
+  --tmpfs /tmp \             # fresh empty /tmp per worker
+  --bind {worktree} {worktree} --chdir {worktree} \  # writable: worktree only
+  --unshare-pid --unshare-uts --unshare-ipc --unshare-cgroup-try \
+  --unshare-net \            # network="none" (default) — drops netns
+  --clearenv \               # NO host env inheritance
+  --setenv K V ...           # only allow-listed env vars forwarded
+```
+
+Allow-list для `--setenv`: `PATH HOME USER LANG LC_ALL TZ PWD SHELL TERM` +
+caller-supplied (e.g. `ORCHESTRATOR_WORKER_STORY_ID`). Никаких
+`ANTHROPIC_API_KEY` / `TELEGRAM_*` / `*_TOKEN` — physically не наследуются.
+
+### Wiring points
+
+- `runtime/worker_spawn.py::spawn_worker(use_sandbox=True, sandbox_network="github_only")` — wraps `claude -p /bmad-auto-dev`. Audit event записывает `sandbox_used` + `sandbox_kind`.
+- `agent/tools/retro.py::spawn_retro_worktree` — wraps `claude -p /bmad-retrospective`. Default `network="none"` (retro работает с локальными артефактами).
+
+### Network policy
+
+- `"none"` (default) — `--unshare-net`. Worker полностью без сети.
+- `"full"` — share host netns. Используется когда worker должен делать `git clone` / `pip install`.
+- `"github_only"` — currently treated as `"full"`. nftables-based whitelist (только GitHub + Anthropic endpoints) — **deferred** к v1.
+
+### `_scan_bash` роль после FS7
+
+`agent/safety/hooks.py::_scan_bash` — **defence-in-depth**, не primary:
+
+- Catch'ит known patterns (rm -rf, git push --force, subshells, `git -c core.hooksPath=...`, etc).
+- Audit severity = `info` если sandbox активен (вместо `warning`).
+- Новые bash bypass'ы НЕ добавлять сюда unless они также bypass'ят sandbox.
+- Если bypass'ит sandbox — fix в `runtime/sandbox.py`, не в scanner.
+
+### Fallback behaviour
+
+Если `bwrap` отсутствует:
+
+1. `log.error()` warning.
+2. Audit event `sandbox_unavailable` с `severity="warning"`.
+3. `NoSandbox` возвращается → worker запускается без OS-level изоляции.
+4. `_scan_bash` остаётся как только slabый барьер.
+5. Prod deployment должен иметь `bubblewrap` package установлен (`apt install bubblewrap`).
+
+### Override
+
+`BMAD_SANDBOX=none` — force disable (для CI без bwrap или для отладки).
+`BMAD_SANDBOX=bwrap` — force bwrap (fails-soft к NoSandbox если binary missing + audit).
+
+### Limitations / deferred (FS7-A..FS7-E fast-follows)
+
+- `.env`-style files в `/home/...` visible read-only через `--ro-bind /`. Sandbox защищает от **write** outside worktree, но не от **read** — secret hygiene должен обеспечиваться tooling'ом (FS1 secret scrubbing audit log).
+- nftables whitelist для `network="github_only"` — deferred.
+- Seccomp filter для дополнительной syscall restriction — deferred.
+- Multi-process orchestrator (несколько orchestrator daemon'ов на одной DB) — out of scope.
+
+### Tests
+
+`tests/test_fs7_sandbox.py` — 32 теста:
+- Abstraction unit tests (Protocol, wrap_command flags, validation).
+- Factory tests (detect_sandbox priority, audit emission on fallback).
+- Real-bwrap PoC tests (skip-if-no-bwrap): worker не пишет в /etc, пишет в worktree, network unreachable, NC1/NC2/NC4 bypass'ы blocked на FS уровне, env isolation verified.
+
+---
+
+**End of consolidated spec v0.9** — Источник истины для scaffold'а.
 **Changelog:**
+- **v0.9 (2026-05-16, FS7):** §22.7 Sandbox layer — `runtime/sandbox.py` (bwrap-backed) primary safety для worker subprocess. `_scan_bash` demoted до defence-in-depth. 32 new sandbox tests, all 573 PASS.
 - **v0.8 (2026-05-16):** §22 Session Plan — 8 сессий для /auto-loop-spec-long bootstrap.
 - **v0.7 (2026-05-16):** §21 Story Splitting (Stage 3.6 pre-split check) — +40pp first-try PASS, 2-4× wall-clock. §15.8 Voice control через Whisper local. §3 capabilities 14→16. §19 12-й skill `story-splitter`. §4 events `+voice_message_received`, `+story_split_triggered`. Pipeline 11→12 stages. §11 stack +openai-whisper. §10 MVP scope IN: voice + splitting heuristic. §17 +2 tools (`check_should_split`, `split_story`).
 - **v0.6 (2026-05-16):** §19 11-й skill `proactive-improver` (closes gap «накапливает знания но не предлагает применять»). §4 event `monthly_review_scheduled`. §6.1 mandatory proactive push после каждого retro.

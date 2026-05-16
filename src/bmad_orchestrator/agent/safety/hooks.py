@@ -1,4 +1,17 @@
-"""PreToolUse / PostToolUse hooks (spec §9 layer 1, FS2 hardening).
+"""PreToolUse / PostToolUse hooks — defence-in-depth bash/FS scanner.
+
+**Role change (FS7, round 3, 2026-05-16):** primary safety for worker
+isolation is the OS-level sandbox (`runtime/sandbox.py`, bwrap-backed). The
+scanner below is now **defence-in-depth**, not primary safety. Three rounds
+of fix-loops produced 15 new P0 bash bypasses in total — pattern matching
+on bash text is fundamentally exhaustible. The sandbox blocks the *class*
+of attacks at the FS/syscall level; the scanner stays as a second line that
+catches known patterns and feeds the audit log.
+
+Scanner deny still blocks the tool call (defence-in-depth retains its
+teeth), but a deny while the sandbox is active is audit-severity ``info``
+rather than ``warning`` — the sandbox would have stopped real damage
+regardless.
 
 Bash deny matrix — token-based, not substring (closes C5 substring-bypass family):
 - `rm` with `-r/-R/--recursive` AND `-f/--force` AND NOT `-i/--interactive`
@@ -422,7 +435,16 @@ def _scan_sub_command(
 
 
 def _scan_bash(command: str) -> tuple[bool, str | None, str | None]:
-    """Return (denied, pattern_id, reason). Empty command always allowed."""
+    """Return (denied, pattern_id, reason). Empty command always allowed.
+
+    **Defence-in-depth, not primary safety.** Primary worker isolation is
+    the OS-level sandbox in ``runtime/sandbox.py``. This scanner catches
+    *known* dangerous patterns in bash command text and logs them — useful
+    on the orchestrator process itself (which is not sandboxed) and as a
+    second filter for worker telemetry. New bash bypasses do not warrant
+    new patterns here unless they also bypass the sandbox; if they bypass
+    the sandbox the fix belongs in ``runtime/sandbox.py``, not here.
+    """
     if not command:
         return False, None, None
 
@@ -556,6 +578,14 @@ async def security_check_hook(
         denied, pattern, reason = _scan_filesystem_write(tool_name, tool_input)
 
     if denied:
+        # FS7 — when the OS-level sandbox is active for worker subprocesses,
+        # the scanner-deny is a defence-in-depth catch (the sandbox would
+        # have neutralised damage regardless). Downgrade audit severity to
+        # ``info`` so SIEM noise reflects actual risk; otherwise mark as
+        # ``warning``. Deny still blocks the tool call either way.
+        from bmad_orchestrator.runtime.sandbox import detect_sandbox
+        sandbox_active = detect_sandbox().kind != "none"
+        severity = "info" if sandbox_active else "warning"
         record_audit(
             "pretooluse_deny",
             tool_name=tool_name,
@@ -563,6 +593,8 @@ async def security_check_hook(
             pattern=pattern,
             reason=reason,
             tool_input=tool_input,
+            severity=severity,
+            sandbox_active=sandbox_active,
         )
         return {
             "hookSpecificOutput": {

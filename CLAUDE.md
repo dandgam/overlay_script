@@ -23,6 +23,7 @@
 2. **`/home/server/crm/` и `/home/server/odyssey-ux/main` — никогда напрямую.** Все правки через ветку.
 3. **Cost budget hard-cap.** Оркестратор остановится при превышении дневного лимита токенов.
 4. **Никогда `--no-verify`, `git push --force`, `git reset --hard` без explicit human approval.**
+5. **Worker isolation — primary safety = OS-level sandbox** (`runtime/sandbox.py`, bwrap). `_scan_bash` (`agent/safety/hooks.py`) — **defence-in-depth, не primary**. Новые bash bypass'ы НЕ добавлять как patterns в scanner; fix в sandbox если bypass'ит изоляцию. Prod prerequisite: `apt install bubblewrap` (отсутствует → `NoSandbox` fallback + loud audit warning, primary safety теряется). См. `spec/spec_orchestrator_agent.md` §22.7.
 
 ## Stack
 

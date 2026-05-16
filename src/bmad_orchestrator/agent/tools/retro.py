@@ -153,6 +153,7 @@ async def spawn_retro_worktree(args: dict[str, Any]) -> dict[str, Any]:
     # (ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, etc). Reuse the worker spawn
     # allow-list so the retro subagent runs in the same locked-down env as a
     # regular dev worker.
+    from bmad_orchestrator.runtime.sandbox import detect_sandbox
     from bmad_orchestrator.runtime.worker_spawn import _build_worker_env
 
     retro_env = _build_worker_env({
@@ -160,10 +161,25 @@ async def spawn_retro_worktree(args: dict[str, Any]) -> dict[str, Any]:
         "ORCHESTRATOR_LEVEL": level,
     })
 
+    # FS7 — wrap retro subagent in the same bwrap sandbox as dev workers.
+    # Retro needs to read the wave's planning artifacts and write a single
+    # retrospective.md, both reside under the canonical retro path
+    # `out.parent`; treat that as the writable worktree. Default network=none
+    # since retros aggregate local lessons, no remote fetch required.
+    sandbox = detect_sandbox()
+    wrapped_cmd = sandbox.wrap_command(
+        [
+            claude_bin,
+            "-p",
+            f"/bmad-retrospective {wave} {level}",
+        ],
+        worktree=out.parent,
+        network="none",
+        env=retro_env,
+    )
+
     proc = await asyncio.create_subprocess_exec(
-        claude_bin,
-        "-p",
-        f"/bmad-retrospective {wave} {level}",
+        *wrapped_cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=retro_env,
@@ -200,6 +216,8 @@ async def spawn_retro_worktree(args: dict[str, Any]) -> dict[str, Any]:
             "subagent_id": f"retro-{slug}-{proc.pid}",
             "mock": False,
             "pid": proc.pid,
+            "sandbox_used": sandbox.kind != "none",
+            "sandbox_kind": sandbox.kind,
         }
     )
 
