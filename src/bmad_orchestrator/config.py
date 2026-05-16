@@ -109,7 +109,11 @@ class Settings(BaseSettings):
     Они tradicionally без ORCHESTRATOR_ prefix.
     """
 
-    model_config = SettingsConfigDict(env_prefix="ORCHESTRATOR_", env_file=".env")
+    model_config = SettingsConfigDict(
+        env_prefix="ORCHESTRATOR_",
+        env_file=".env",
+        env_nested_delimiter="__",
+    )
 
     target_project: Path = Path("/home/server/odyssey")
     orchestrator_home: Path = Path("/home/server/bmad-orchestrator")
