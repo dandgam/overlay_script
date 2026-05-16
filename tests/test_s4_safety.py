@@ -24,7 +24,9 @@ import pytest
 from bmad_orchestrator.agent.safety import (
     BudgetGuard,
     audit_log_path,
+    generate_token,
     record_audit,
+    revoke_token,
     security_check_hook,
     validate_merge_target,
     validate_worker_write_path,
@@ -42,7 +44,11 @@ def _isolate_target_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setenv("ORCHESTRATOR_STATE_DB", str(tmp_path / "state.db"))
     monkeypatch.setenv("ORCHESTRATOR_ORCHESTRATOR_HOME", str(tmp_path / "orch"))
     monkeypatch.setenv("BMAD_AUDIT_LOG", str(tmp_path / "audit.events.jsonl"))
+    monkeypatch.setenv(
+        "BMAD_MAIN_MERGE_TOKEN_PATH", str(tmp_path / "main-merge-token.json")
+    )
     monkeypatch.delenv("BMAD_ALLOW_MAIN_MERGE", raising=False)
+    monkeypatch.delenv("BMAD_WORKER_WORKTREE", raising=False)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -135,10 +141,13 @@ async def test_pretooluse_denies_git_main_merge_without_flag() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pretooluse_allows_main_merge_with_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BMAD_ALLOW_MAIN_MERGE", "1")
-    reply = await _hook("Bash", {"command": "git checkout main"})
-    assert _decision(reply) == "allow"
+async def test_pretooluse_allows_main_merge_with_signed_token() -> None:
+    generate_token(ttl_seconds=300)
+    try:
+        reply = await _hook("Bash", {"command": "git checkout main"})
+        assert _decision(reply) == "allow"
+    finally:
+        revoke_token()
 
 
 @pytest.mark.asyncio
@@ -183,7 +192,7 @@ async def test_pretooluse_audit_logs_deny() -> None:
     assert any(e["event_type"] == "pretooluse_deny" for e in entries)
     deny = next(e for e in entries if e["event_type"] == "pretooluse_deny")
     assert deny["tool_name"] == "Bash"
-    assert deny["pattern"] == "rm_rf"
+    assert deny["pattern"] == "rm_recursive_force"
 
 
 # ── Layer 2 — Budget guard ─────────────────────────────────────────────────────

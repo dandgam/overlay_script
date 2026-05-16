@@ -259,7 +259,21 @@ async def free_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_safe(msg, response, chat_id=chat_id, message_type="text")
 
 
-# ── Inline callbacks (spec §15.4) ──────────────────────────────────────────
+# ── Inline callbacks (spec §15.4 + FS2 §M8) ───────────────────────────────
+
+# Whitelist of permitted callback_data prefixes. Unknown prefixes are logged
+# + audited + silently dropped (NOT forwarded to agent — closes the
+# arbitrary-callback-injection vector enumerated in M8).
+ALLOWED_CALLBACK_PREFIXES: frozenset[str] = frozenset(
+    {"stop:", "proposal:", "merge:", "confirm:", "cancel:"}
+)
+
+
+def _callback_prefix(data: str) -> str:
+    """Return `<prefix>:` if data has a `:`, else the whole data string."""
+    if ":" in data:
+        return data.split(":", 1)[0] + ":"
+    return data
 
 
 async def callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -272,6 +286,23 @@ async def callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
     data = query.data or ""
     chat_id = _chat_id(update)
+    prefix = _callback_prefix(data)
+
+    if prefix not in ALLOWED_CALLBACK_PREFIXES:
+        log.warning(
+            "callback_unknown_prefix_dropped",
+            prefix=prefix,
+            data=data,
+            chat_id=chat_id,
+        )
+        record_telegram_event(
+            direction="in",
+            chat_id=chat_id,
+            message_type="callback",
+            original=data,
+            extra={"action": "dropped", "reason": "unknown_prefix", "prefix": prefix},
+        )
+        return
 
     if data == "stop:graceful":
         await forward_to_agent("/stop graceful", chat_id=chat_id, source="callback")

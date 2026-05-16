@@ -303,12 +303,24 @@ async def test_merge_run_security_review_fails_on_high_finding(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_merge_git_merge_mock_when_not_a_repo(tmp_path: Path) -> None:
+async def test_merge_git_merge_mock_when_not_a_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bmad_orchestrator.agent.safety.main_merge_token import generate_token
     from bmad_orchestrator.agent.tools.merge import git_merge
 
+    monkeypatch.setenv(
+        "BMAD_MAIN_MERGE_TOKEN_PATH", str(tmp_path / "main-merge-token.json")
+    )
+    token = generate_token(ttl_seconds=300)
     r = await _call(
         git_merge,
-        {"worktree": str(tmp_path), "target_branch": "main", "message": "test"},
+        {
+            "worktree": str(tmp_path),
+            "target_branch": "main",
+            "message": "test",
+            "signed_token": token,
+        },
     )
     p = _payload(r)
     assert p["merged"] is True and p["mock"] is True

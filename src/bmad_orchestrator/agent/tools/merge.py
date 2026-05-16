@@ -17,6 +17,11 @@ from typing import Any
 
 from claude_agent_sdk import tool
 
+from bmad_orchestrator.agent.safety.branch_isolation import (
+    FORBIDDEN_DIRECT_MERGE_TARGETS,
+    validate_merge_target,
+)
+from bmad_orchestrator.agent.safety.main_merge_token import consume_token
 from bmad_orchestrator.agent.tools._common import (
     append_jsonl,
     error,
@@ -92,14 +97,43 @@ async def run_security_review(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "git_merge",
     "Merge worktree's branch into target_branch (with flock on shared state).",
-    {"worktree": str, "target_branch": str, "message": str},
+    {"worktree": str, "target_branch": str, "message": str, "signed_token": str},
 )
 async def git_merge(args: dict[str, Any]) -> dict[str, Any]:
     worktree = str(args.get("worktree", ""))
     target = str(args.get("target_branch", ""))
     message = str(args.get("message", f"merge {worktree} → {target}"))
+    signed_token = args.get("signed_token")
     if not worktree or not target:
         return error("require 'worktree' and 'target_branch'", code="invalid_arg")
+
+    is_main_target = target in FORBIDDEN_DIRECT_MERGE_TARGETS
+    if is_main_target:
+        consumed, reason = consume_token(
+            str(signed_token) if isinstance(signed_token, str) else None
+        )
+        if not consumed:
+            _merge_event(
+                "git_merge_refused",
+                worktree=worktree,
+                target_branch=target,
+                reason=reason,
+            )
+            return error(
+                f"merge to {target} refused: {reason} "
+                "(generate via bmad_orchestrator.agent.safety.main_merge_token.generate_token)",
+                code="main_merge_token_required",
+            )
+    else:
+        allowed, why = validate_merge_target(target, has_human_approval=True)
+        if not allowed:
+            _merge_event(
+                "git_merge_refused",
+                worktree=worktree,
+                target_branch=target,
+                reason=why,
+            )
+            return error(f"merge refused: {why}", code="merge_target_forbidden")
 
     repo = Path(worktree)
     if not (repo / ".git").exists():
