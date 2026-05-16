@@ -39,42 +39,6 @@
 
 ### Pending
 
-- **id:** S1
-  **title:** Foundation & SDK scaffold (pyproject.toml, system_prompt.py, beta headers, state.db, mock fixtures)
-  **surface:** backend-python
-  **spec_section:** 270-326
-  **depends_on:** []
-  **acceptance:**
-    - pyproject.toml со всеми deps из §11 (anthropic, claude-agent-sdk, networkx, pydantic v2, pydantic-ai, pyyaml, typer, rich, gitpython, structlog, aiosqlite, psutil, watchdog, python-telegram-bot, jinja2, presidio-analyzer, openai-whisper)
-    - src/bmad_orchestrator/agent/ skeleton + system_prompt.py с cache_control={"type":"ephemeral","ttl":"1h"} explicit
-    - ANTHROPIC_BETA_HEADERS константа со всеми 4 beta-флагами
-    - state.db aiosqlite schema (agent_session, budget_tracker, event_queue)
-    - tests/fixtures/ с mock projects + mock stories
-    - ruff check, mypy --strict, pytest PASS
-  **safety_gates:**
-    - L2 budget guard (deterministic) — wired stub
-  **destructive_actions:** []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
-- **id:** S2
-  **title:** Tools layer (24 tools, 9 categories, defer_loading на всех)
-  **surface:** backend-python
-  **spec_section:** 643-712
-  **depends_on:** [S1]
-  **acceptance:**
-    - 24 tools реализованы по §17: state(5)/DAG(3)/spawn(4)/control(4)/merge(3)/memory+retro(4)/operational(4)/splitting(2)/escalate(2)
-    - Все с defer_loading=True (anti-pattern #1 §18.3)
-    - Pydantic v2 schemas для inputs/outputs
-    - Mock implementations: DB writes к state.db, file I/O к tests/fixtures/
-    - Tool Search Tool integration (beta tool-search-tool-2025-10-19)
-    - Unit tests на каждый tool (mock invocations PASS)
-  **safety_gates:**
-    - L1 PreToolUse hooks — wired stub (deny rules не активируются в S2)
-  **destructive_actions:** []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S3
   **title:** Core runtime — event loop, DAG planner, worktree, worker spawn (CHECKPOINT)
   **surface:** backend-python
@@ -194,10 +158,50 @@
   **estimated_retries_allowed:** 3
 
 ### Current
-(none — next wake promotes S1 from Pending)
+
+- **id:** S2
+  **title:** Tools layer (24 tools, 9 categories, defer_loading на всех)
+  **surface:** backend-python
+  **spec_section:** 643-712
+  **depends_on:** [S1]
+  **acceptance:**
+    - 24 tools реализованы по §17: state(5)/DAG(3)/spawn(4)/control(4)/merge(3)/memory+retro(4)/operational(4)/splitting(2)/escalate(2)
+    - Все с defer_loading=True (anti-pattern #1 §18.3)
+    - Pydantic v2 schemas для inputs/outputs
+    - Mock implementations: DB writes к state.db, file I/O к tests/fixtures/
+    - Tool Search Tool integration (beta tool-search-tool-2025-10-19)
+    - Unit tests на каждый tool (mock invocations PASS)
+  **safety_gates:**
+    - L1 PreToolUse hooks — wired stub (deny rules не активируются в S2)
+  **destructive_actions:** []
+  **checkpoint:** false
+  **estimated_retries_allowed:** 3
+  **started:** 2026-05-16 01:10 UTC
+  **workflow:** .claude/skills/auto-loop-spec/workflows/backend-python.md
+  **retry_count:** 0
+  **worker_branches:** []
 
 ### Completed
-(empty — initiative not yet started)
+
+- **id:** S1
+  **title:** Foundation & SDK scaffold (pyproject.toml, system_prompt.py, beta headers, state.db, mock fixtures)
+  **completed:** 2026-05-16 01:10 UTC
+  **commit:** dcaadfb
+  **files_changed:** 21
+  **tests_passed:**
+    - ruff check src tests — PASS
+    - mypy --strict src — PASS (45 source files)
+    - pytest — 13 passed (7 новых S1 + 6 smoke)
+  **decisions_made:**
+    - ANTHROPIC_BETA_HEADERS вынесен в отдельный модуль agent/betas.py (single source of truth) — Settings.beta_headers ссылается на него.
+    - state/db.py: 3 таблицы + UNIQUE(session_id, scope, scope_target_id) на budget_tracker для idempotent UPSERT.
+    - claim_next_event single-writer race-free под допущением одного orchestrator-процесса на DB (spec §6 уже это утверждает).
+    - Ruff RUF001/RUF002/RUF003 (ambiguous Cyrillic) добавлены в ignore — project convention «Russian for prose, English for identifiers» (CLAUDE.md).
+    - mypy overrides для tools/, bot/, cli/, imports/from_bad/ — scaffold-стабы из v0.7; будут переписаны в S2-S8 с полной типизацией.
+    - .gitignore исправлен `state/` → `/state/` чтобы не глотать src/bmad_orchestrator/state/.
+  **deferred_items:**
+    - Реальный install claude-agent-sdk + pydantic-ai + python-telegram-bot + openai-whisper — в S2 (для full type-check tools layer).
+    - system_prompt._load_project_context() остался placeholder — наполняется в S5 (skills metadata) и S8 (CLAUDE.md ingest).
 
 ## Safety Gates Triggered
 (none)
@@ -211,6 +215,9 @@
 ## Journal
 
 [2026-05-16 04:10 UTC] bootstrap: tracker + backup branch (backup/orchestrator_agent-pre-2026-05-16) + integration branch (integration/orchestrator_agent) created via /auto-loop-spec-long. 8 сессий запланировано (все surface=backend-python, code-only). Runtime=loop_wrapper, Delay=600s, Auto merge=false. Helper-скрипты скопированы из /home/server/crm/.claude/scripts/. Spec обновлён до v0.8 (добавлен §22 Session Plan).
+[2026-05-16 01:01 UTC] S1 promote: Pending → Current. Audit prior v0.7 scaffold (commit 03d3e29) covers pyproject.toml + agent/system_prompt.py (ttl="1h" ✓). Gaps to close in this wake: (a) add 4th beta header `interleaved-thinking-2025-05-14` + module-level ANTHROPIC_BETA_HEADERS constant; (b) state.db aiosqlite schema (agent_session, budget_tracker, event_queue); (c) tests/fixtures/ mock-odyssey project + mock stories; (d) green ruff+mypy+pytest gates.
+[2026-05-16 01:10 UTC] S1 execution: agent/betas.py создан с 4 beta-флагами, Settings.beta_headers ссылается на canonical. state/db.py — aiosqlite schema (agent_session, budget_tracker, event_queue) + StateDB façade с create_session/end_session/upsert_budget/enqueue_event/claim_next_event. tests/fixtures/mock-odyssey/_bmad-output/planning-artifacts/ с 4 mock stories (1-1, 1-2, 1-3, 2-1) + epics.md + sprint-status.yaml. Migration (str, Enum) → StrEnum для UP042. pyproject.toml: добавлены RUF001/2/3 в ignore (русский prose), per-file-ignores для imports/from_bad/**, mypy overrides для scaffold-стабов. Все 3 gate'а green: ruff PASS, mypy --strict PASS (45 files), pytest 13/13 PASS.
+[2026-05-16 01:10 UTC] S1 completed (commit dcaadfb). S2 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration.
 
 ## Final Report
 (empty — last session not yet completed)
