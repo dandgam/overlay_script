@@ -126,15 +126,10 @@ warn_unused_configs = true
 # Strict mode применяется к нашему коду; внешние API-stub'ы покрыты в S2+.
 ignore_missing_imports = true
 
-# Skeleton-стабы (v0.7), которые S5-S8 переписывают с типизацией.
-# Они импортируют claude_agent_sdk @tool decorator который рождает "untyped" cascade.
-# agent.tools.* удалены из override после S2 — там теперь полная типизация.
+# Skeleton-стабы, которые поздние сессии переписывают с типизацией.
+# bot.* удалён из override после S6 — теперь полная типизация + Update narrowing.
 [[tool.mypy.overrides]]
 module = [
-    "bmad_orchestrator.bot.handlers",
-    "bmad_orchestrator.bot.voice_handler",
-    "bmad_orchestrator.bot.voice_providers",
-    "bmad_orchestrator.bot.telegram_bot",
     "bmad_orchestrator.cli",
     "bmad_orchestrator.imports.from_bad.*",
 ]
@@ -144,9 +139,6 @@ disallow_incomplete_defs = false
 disallow_any_generics = false
 warn_return_any = false
 warn_unused_ignores = false
-# Bot scaffold stubs use python-telegram-bot's Update.message which is typed as
-# `Message | None`. Production handlers will narrow it explicitly in S6; for the
-# S1/S2 scaffold we accept the union-attr noise.
 disable_error_code = ["union-attr", "arg-type", "misc", "func-returns-value"]
 
 [tool.pytest.ini_options]

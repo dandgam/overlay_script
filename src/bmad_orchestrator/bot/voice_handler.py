@@ -1,10 +1,13 @@
 """Voice handler — pluggable STT provider (spec §15.8).
 
 Voice .ogg → text (через выбранный provider) → free_text chat flow.
-Аудио файл DELETED immediately после transcription.
+Аудио файл DELETED immediately после transcription (no persistent storage).
 
 Provider configurable: whisper_local | whisper_api | claude_audio |
                        yandex_speechkit | google_stt_v2 | disabled
+
+Fallback chain: при ошибке primary → автоматически попробовать
+`settings.voice.stt_fallback`. Уведомление в чат пишется отдельным сообщением.
 
 152-ФЗ skipped per AABIT decision (личный проект, 2026-05-16).
 """
@@ -13,99 +16,69 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 
 import structlog
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from bmad_orchestrator.bot.voice_providers import STTProvider, make_stt_provider
-from bmad_orchestrator.config import load_settings
+from bmad_orchestrator.bot.audit import record_telegram_event
+from bmad_orchestrator.bot.voice_providers import (
+    STTProvider,
+    make_stt_provider,
+    transcribe_with_fallback,
+)
+from bmad_orchestrator.config import VoiceConfig, load_settings
 
 log = structlog.get_logger(__name__)
 
-# Lazy-loaded provider — switched через settings.voice.stt_provider
-_stt: STTProvider | None = None
-_stt_provider_name: str | None = None
+
+# Lazy-loaded provider cache — switched при изменении settings.voice.stt_provider.
+_stt_cache: dict[str, STTProvider | None] = {}
 
 
-def _get_stt() -> STTProvider | None:
-    """Lazy-construct STT provider. Rebuilds если config изменился."""
-    global _stt, _stt_provider_name
-    cfg = load_settings().voice
-    if _stt_provider_name != cfg.stt_provider:
-        _stt = make_stt_provider(
-            cfg.stt_provider,
-            model_size=cfg.stt_model,
-            api_key=cfg.openai_api_key,
-            folder_id=cfg.yandex_folder_id,
-            credentials_path=cfg.google_credentials_path,
-        )
-        _stt_provider_name = cfg.stt_provider
-        log.info("stt_provider_loaded", provider=cfg.stt_provider)
-    return _stt
+def _provider_kwargs(cfg: VoiceConfig) -> dict[str, Any]:
+    return {
+        "model_size": cfg.stt_model,
+        "api_key": cfg.openai_api_key or cfg.yandex_api_key,
+        "folder_id": cfg.yandex_folder_id,
+        "credentials_path": cfg.google_credentials_path,
+    }
 
 
-async def voice_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Voice message → STT → free_text flow.
-
-    1. whitelist check
-    2. download .ogg to /tmp
-    3. STT through pluggable provider
-    4. post-process typos
-    5. DELETE .ogg
-    6. forward to free_text_handler как обычное сообщение
-    """
-    from bmad_orchestrator.bot.handlers import _whitelisted, free_text
-
-    if not _whitelisted(update):
-        return
-
-    voice = update.message.voice if update.message else None
-    if not voice:
-        return
-
-    stt = _get_stt()
-    if stt is None:
-        await update.message.reply_text("Voice disabled. Включи в config voice.stt_provider")
-        return
-
-    cfg = load_settings().voice
-    tmp_dir = Path(cfg.audio_temp_dir)
-    # S6: переключить на anyio.Path для строгости; sync mkdir в async — приемлемо для tmp dir.
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    audio_path = tmp_dir / f"voice_{uuid.uuid4().hex}.ogg"
-
-    try:
-        # 1. Download from Telegram
-        file = await voice.get_file()
-        await file.download_to_drive(str(audio_path))
-        log.info(
-            "voice_received",
-            duration=voice.duration,
-            provider=stt.name,
-            estimated_cost=stt.estimate_cost_usd(voice.duration),
-        )
-
-        # 2. Transcribe via pluggable provider
-        text = await stt.transcribe(audio_path, language=cfg.language)
-        text = post_process_transcription(text)
-        log.info("voice_transcribed", text_len=len(text))
-
-        # 3. Forward as text message (mock override via update text)
-        # In real implementation — invoke agent chat queue directly
-        # For now: reply with transcription as confirmation
-        await update.message.reply_text(f"📝 «{text}»\n\nОбрабатываю...")
-        # TODO: push text into agent chat queue (same as free_text would)
-        _ = free_text  # placeholder for actual integration
-
-    finally:
-        # 4. ALWAYS delete audio (no persistent storage)
-        if cfg.delete_audio_after_transcription and audio_path.exists():
-            audio_path.unlink()
+def get_stt(cfg: VoiceConfig) -> STTProvider | None:
+    """Build (or fetch cached) primary STT provider per config."""
+    name = cfg.stt_provider
+    if name not in _stt_cache:
+        try:
+            _stt_cache[name] = make_stt_provider(name, **_provider_kwargs(cfg))
+        except Exception as exc:
+            log.warning("stt_provider_init_failed", provider=name, error=str(exc))
+            _stt_cache[name] = None
+    return _stt_cache[name]
 
 
-# Technical-term post-processing patterns
-# (любой STT иногда mis-hears английский в русской речи)
+def get_fallback(cfg: VoiceConfig) -> STTProvider | None:
+    """Build (or fetch cached) fallback STT provider (whisper_local by default)."""
+    name = cfg.stt_fallback
+    if name == cfg.stt_provider:
+        return None
+    key = f"__fallback__{name}"
+    if key not in _stt_cache:
+        try:
+            _stt_cache[key] = make_stt_provider(name, **_provider_kwargs(cfg))
+        except Exception:
+            _stt_cache[key] = None
+    return _stt_cache[key]
+
+
+def reset_provider_cache() -> None:
+    """Clear cached providers — для тестов и `set_voice_provider` tool."""
+    _stt_cache.clear()
+
+
+# ── Technical-term post-processing ─────────────────────────────────────────
+
 TYPO_PATTERNS: dict[str, str] = {
     "карго тошнол": "Cargo.toml",
     "карго томл": "Cargo.toml",
@@ -128,3 +101,97 @@ def post_process_transcription(text: str) -> str:
     for typo, correct in TYPO_PATTERNS.items():
         result = result.replace(typo, correct)
     return result
+
+
+# ── Telegram handler ───────────────────────────────────────────────────────
+
+
+async def voice_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Voice message → STT → free_text flow.
+
+    1. whitelist check
+    2. download .ogg to tmp dir
+    3. STT через pluggable provider + fallback chain
+    4. post-process typos
+    5. DELETE .ogg (no persistent storage)
+    6. forward результат в orchestrator chat queue
+    """
+    # Late import предотвращает циклический импорт handlers↔voice_handler.
+    from bmad_orchestrator.bot.handlers import _whitelisted, forward_to_agent
+
+    if not _whitelisted(update):
+        return
+
+    message = update.message
+    voice = message.voice if message else None
+    if not message or not voice:
+        return
+
+    cfg = load_settings().voice
+    primary = get_stt(cfg)
+    if primary is None:
+        await message.reply_text("Голос выключен. Включи в config voice.stt_provider.")
+        return
+
+    fallback = get_fallback(cfg)
+    tmp_dir = Path(cfg.audio_temp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = tmp_dir / f"voice_{uuid.uuid4().hex}.ogg"
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    raw_dur = voice.duration
+    if raw_dur is None:
+        duration_s = 0.0
+    elif hasattr(raw_dur, "total_seconds"):
+        duration_s = raw_dur.total_seconds()
+    else:
+        duration_s = float(raw_dur)
+    try:
+        file = await voice.get_file()
+        await file.download_to_drive(str(audio_path))
+        log.info(
+            "voice_received",
+            duration=duration_s,
+            provider=primary.name,
+            estimated_cost=primary.estimate_cost_usd(duration_s),
+        )
+
+        text, used = await transcribe_with_fallback(
+            primary, fallback, audio_path, language=cfg.language
+        )
+        text = post_process_transcription(text)
+        record_telegram_event(
+            direction="in",
+            chat_id=chat_id,
+            message_type="voice",
+            original=text,
+            redacted=text,
+            extra={
+                "duration_s": duration_s,
+                "provider": used,
+                "cost_usd": primary.estimate_cost_usd(duration_s)
+                if used == primary.name
+                else (fallback.estimate_cost_usd(duration_s) if fallback else 0.0),
+            },
+        )
+
+        if used != primary.name:
+            await message.reply_text(
+                f"{primary.name} недоступен — переключилась на {used}."
+            )
+        await message.reply_text(f"📝 «{text}»\n\nОбрабатываю...")
+        await forward_to_agent(text, chat_id=chat_id, source="voice")
+
+    finally:
+        if cfg.delete_audio_after_transcription and audio_path.exists():
+            audio_path.unlink()
+
+
+__all__ = [
+    "TYPO_PATTERNS",
+    "get_fallback",
+    "get_stt",
+    "post_process_transcription",
+    "reset_provider_cache",
+    "voice_handler",
+]
