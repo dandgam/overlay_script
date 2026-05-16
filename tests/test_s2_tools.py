@@ -1,8 +1,8 @@
 """S2 acceptance tests — Tools layer (spec §17).
 
 Coverage:
-- All 34 tools registered (5 state + 3 DAG + 4 spawn + 4 control + 3 merge
-  + 3 memory + 3 retro + 5 operational + 2 splitter + 2 escalate).
+- All 35 tools registered (5 state + 3 DAG + 4 spawn + 4 control + 3 merge
+  + 3 memory + 3 retro + 5 operational + 2 splitter + 2 escalate + 1 audit).
 - Each tool is invokable with a valid mock argument set and returns a structured
   MCP content payload (not an error) unless explicitly testing error path.
 - Tool Search Tool beta header is in the canonical beta_headers list (S1 already
@@ -58,7 +58,7 @@ def test_all_tools_registered() -> None:
     from bmad_orchestrator.agent.tools import ALL_TOOLS, tool_names
 
     names = tool_names()
-    assert len(ALL_TOOLS) == 34, f"expected 34 tools, got {len(ALL_TOOLS)}"
+    assert len(ALL_TOOLS) == 35, f"expected 35 tools, got {len(ALL_TOOLS)}"
     # Spec §17 names must be present:
     required = {
         "read_sprint_status",

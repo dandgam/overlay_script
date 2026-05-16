@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from bmad_orchestrator.agent.tools import (
+    audit,
     control,
     dag,
     escalate,
@@ -37,6 +38,7 @@ ALL_TOOLS: list[Any] = [
     *operational.TOOLS,
     *splitter.TOOLS,
     *escalate.TOOLS,
+    *audit.TOOLS,
 ]
 
 
@@ -52,6 +54,7 @@ def tool_descriptions() -> dict[str, str]:
 
 __all__ = [
     "ALL_TOOLS",
+    "audit",
     "control",
     "dag",
     "escalate",
