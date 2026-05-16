@@ -2,14 +2,11 @@
 
 create_worktree, spawn_worker, sync_skill_patches, cleanup_worktree.
 
-Mock-mode behavior (S2):
-- create_worktree — creates an empty sibling directory under <target>/.worktrees/<story_id>
-  and emits a `worktree_created` event into state.db.
-- spawn_worker — records `worker_spawned` intent in state.db; returns a synthetic PID 0
-  so callers can distinguish mock-mode. Real `claude -p` subprocess wiring → S3.
-- sync_skill_patches — diff-by-stat between orchestrator's `.claude/skills/` and the
-  worktree's; emits a `skills_synced` event with file count.
-- cleanup_worktree — removes the worktree directory (mock); records event.
+S3 update — `spawn_worker` теперь делегирует в `runtime.worker_spawn` для
+реальной `claude -p` subprocess логики. По умолчанию `real=False` →
+mock-режим (synthetic worker_spawned + worker_completed events). С `real=True`
+запускает реальный `claude -p /bmad-auto-dev` если бинарь найден; иначе
+автоматически падает в mock (с пометкой `mock=True` в payload).
 """
 
 from __future__ import annotations
@@ -28,6 +25,13 @@ from bmad_orchestrator.agent.tools._common import (
     now_iso,
     runs_dir,
     worktree_root,
+)
+from bmad_orchestrator.runtime.worker_spawn import (
+    DEFAULT_BUDGET_CAP_USD,
+    DEFAULT_MODEL,
+)
+from bmad_orchestrator.runtime.worker_spawn import (
+    spawn_worker as runtime_spawn_worker,
 )
 
 
@@ -86,30 +90,57 @@ async def create_worktree(args: dict[str, Any]) -> dict[str, Any]:
 )
 async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
     worktree = str(args.get("worktree", ""))
-    model = str(args.get("model", "claude-sonnet-4-6"))
-    cap = float(args.get("budget_cap_usd", 30.0))
+    model = str(args.get("model", DEFAULT_MODEL))
+    cap = float(args.get("budget_cap_usd", DEFAULT_BUDGET_CAP_USD))
+    real = bool(args.get("real", False))
+    story_id = str(args.get("story_id", "")) or Path(worktree).name
+    branch = str(args.get("branch", "")) or f"feature/{story_id}"
+
     if not worktree:
         return error("missing 'worktree' arg", code="invalid_arg")
     if not Path(worktree).exists():
         return error(f"worktree path not found: {worktree}", code="worktree_missing")
 
-    # S2 mock — record intent; real subprocess in S3.
-    pid = 0
-    _worker_event(
-        worktree,
-        "worker_spawned",
+    # `real=False` (default) → forced mock — sync write path matches earlier
+    # contract (events written through `_worker_event` for test parity).
+    if not real:
+        pid = 0
+        _worker_event(
+            worktree,
+            "worker_spawned",
+            model=model,
+            budget_cap_usd=cap,
+            pid=pid,
+            mock=True,
+        )
+        return json_ok(
+            {
+                "worktree": worktree,
+                "pid": pid,
+                "model": model,
+                "budget_cap_usd": cap,
+                "mock": True,
+            }
+        )
+
+    handle = await runtime_spawn_worker(
+        worktree=worktree,
+        story_id=story_id,
+        branch=branch,
         model=model,
         budget_cap_usd=cap,
-        pid=pid,
-        mock=True,
+        mock=None,  # auto-detect by binary presence
     )
     return json_ok(
         {
-            "worktree": worktree,
-            "pid": pid,
+            "worktree": handle.worktree,
+            "pid": handle.pid,
             "model": model,
             "budget_cap_usd": cap,
-            "mock": True,
+            "mock": handle.mock,
+            "story_id": handle.story_id,
+            "branch": handle.branch,
+            "jsonl_path": str(handle.jsonl_path),
         }
     )
 

@@ -107,6 +107,9 @@ ignore = [
     # sync FS calls в tool handlers — допустимо (small files, mock state).
     "ASYNC230",
     "ASYNC240",
+    # ASYNC109 — `timeout` kwarg is the asyncio.Queue.get convention;
+    # event_loop.next/dispatch_one mirror it intentionally.
+    "ASYNC109",
 ]
 
 [tool.ruff.lint.per-file-ignores]
