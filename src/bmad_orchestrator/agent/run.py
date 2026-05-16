@@ -249,6 +249,27 @@ async def _run_mock_pilot(
 
         batch = ready[:max_parallel]
         for story in batch:
+            # C5 (round 2) — atomic check-and-reserve BEFORE spawn. Without
+            # this, two concurrent ``get_budget → spawn`` pairs could both
+            # observe ``spent < halt`` and overcommit. ``enforce_and_reserve_story``
+            # serialises on the SQLite write lock; if the DB is unbound (CI
+            # without state.db) the fallback path still returns a synthetic
+            # decision so the mock pilot stays deterministic.
+            reserve = budget.cfg.story_alarm_usd / 6.0  # mock spend ≈ $5/story
+            res = await budget.enforce_and_reserve_story(story["id"], reserve)
+            if not res.allowed:
+                await bus.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope=res.scope,
+                    level="halt",
+                    spent_usd=res.current_usd,
+                    alarm_threshold=res.alarm_threshold,
+                    halt_threshold=res.halt_threshold,
+                    corrupted=False,
+                    story_id=story["id"],
+                    reason=res.reason,
+                )
+                continue
             wt = worktree_root / f"wt-{story['id']}"
             wt.mkdir(exist_ok=True)
             handle = await runtime_spawn_worker(

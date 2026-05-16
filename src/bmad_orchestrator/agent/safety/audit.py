@@ -14,27 +14,17 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{40,}"),
-    re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"),
-    re.compile(r"\bghp_[A-Za-z0-9]{36}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"Bearer\s+[A-Za-z0-9_.\-+/=]{20,}", re.IGNORECASE),
-    re.compile(r"https?://[^\s/:@]+:[^\s/@]+@[^\s/]+"),
-)
-_REDACTION = "[REDACTED:SECRET]"
+from bmad_orchestrator.agent.safety.secret_patterns import scrub_secrets_generic
 
 
 def _scrub_secrets(text: str) -> str:
-    for pat in _SECRET_PATTERNS:
-        text = pat.sub(_REDACTION, text)
-    return text
+    """Audit-log scrubber — single ``[REDACTED:SECRET]`` placeholder preserved
+    for FS1 contract compatibility."""
+    return scrub_secrets_generic(text)
 
 
 def _scrub_value(value: Any) -> Any:

@@ -22,13 +22,16 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from bmad_orchestrator.agent.safety.audit import record_audit
 from bmad_orchestrator.config import BudgetConfig
 from bmad_orchestrator.models import Budget
 from bmad_orchestrator.runtime.budget import is_finite_spend
 from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
+
+if TYPE_CHECKING:
+    from bmad_orchestrator.state.db import BudgetEnforceResult, StateDB
 
 BudgetLevel = Literal["ok", "alarm", "halt"]
 BudgetScope = Literal["story", "batch", "day"]
@@ -89,9 +92,27 @@ class BudgetGuard:
     Это нужно чтобы guard оставался deterministic (нет skew из-за внутреннего кеша).
     """
 
-    def __init__(self, cfg: BudgetConfig, event_loop: EventLoop | None = None) -> None:
+    def __init__(
+        self,
+        cfg: BudgetConfig,
+        event_loop: EventLoop | None = None,
+        state_db: StateDB | None = None,
+        session_id: int | None = None,
+    ) -> None:
         self.cfg = cfg
         self.event_loop = event_loop
+        # Optional binding: when both ``state_db`` and ``session_id`` are set,
+        # ``enforce_and_reserve_story|batch|day`` delegate to the atomic
+        # check-and-reserve in ``StateDB.enforce_and_reserve`` (C5 round 2).
+        # If unbound, the methods fall back to the synchronous deterministic
+        # ``_evaluate`` (unit tests and pre-pilot stages).
+        self.state_db = state_db
+        self.session_id = session_id
+
+    def attach_state_db(self, state_db: StateDB, session_id: int) -> None:
+        """Late-binding helper — wire the guard to a shared StateDB after init."""
+        self.state_db = state_db
+        self.session_id = session_id
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -118,6 +139,121 @@ class BudgetGuard:
         limit = self.cfg.daily_limit_usd
         result = self._evaluate(spent_usd, limit, limit, scope="day")
         await self._publish(result, day=day)
+        return result
+
+    # ── atomic reserve API (C5 round 2 — REAL impl, not paper) ────────────────
+
+    async def enforce_and_reserve_story(
+        self, story_id: str, reserve_usd: Decimal | float
+    ) -> BudgetEnforceResult:
+        """Atomically reserve ``reserve_usd`` against the story budget.
+
+        Returns ``allowed=True`` only when ``current + reserve ≤ story_halt``.
+        Concurrent gather workers serialise on the SQLite write lock — exactly
+        one can fit the last slot under the cap, others get ``halt_breached``.
+        """
+        return await self._enforce_and_reserve(
+            scope="story",
+            scope_target_id=story_id,
+            reserve_usd=reserve_usd,
+            alarm=self.cfg.story_alarm_usd,
+            halt=self.cfg.story_halt_usd,
+        )
+
+    async def enforce_and_reserve_batch(
+        self, wave: str, reserve_usd: Decimal | float
+    ) -> BudgetEnforceResult:
+        return await self._enforce_and_reserve(
+            scope="batch",
+            scope_target_id=wave,
+            reserve_usd=reserve_usd,
+            alarm=self.cfg.batch_alarm_usd,
+            halt=self.cfg.batch_halt_usd,
+        )
+
+    async def enforce_and_reserve_day(
+        self, day: str, reserve_usd: Decimal | float
+    ) -> BudgetEnforceResult:
+        limit = self.cfg.daily_limit_usd
+        return await self._enforce_and_reserve(
+            scope="day",
+            scope_target_id=day,
+            reserve_usd=reserve_usd,
+            alarm=limit,
+            halt=limit,
+        )
+
+    async def _enforce_and_reserve(
+        self,
+        *,
+        scope: str,
+        scope_target_id: str,
+        reserve_usd: Decimal | float,
+        alarm: float,
+        halt: float,
+    ) -> BudgetEnforceResult:
+        """Internal — delegate to StateDB if bound, otherwise synthetic result."""
+        from bmad_orchestrator.state.db import BudgetEnforceResult
+
+        if self.state_db is None or self.session_id is None:
+            # Unbound mode — synchronous evaluation only. Surface "allowed"
+            # against the legacy ``_evaluate`` path so callers that never
+            # attached a DB still get a deterministic decision.
+            reserve_float = float(reserve_usd)
+            if not is_finite_spend(reserve_float):
+                return BudgetEnforceResult(
+                    allowed=False,
+                    scope=scope,
+                    scope_target_id=scope_target_id,
+                    current_usd=0.0,
+                    attempted=0.0,
+                    alarm_threshold=alarm,
+                    halt_threshold=halt,
+                    reason="corruption",
+                    breached_alarm=True,
+                    breached_halt=True,
+                )
+            allowed = reserve_float <= halt
+            return BudgetEnforceResult(
+                allowed=allowed,
+                scope=scope,
+                scope_target_id=scope_target_id,
+                current_usd=reserve_float if allowed else 0.0,
+                attempted=reserve_float,
+                alarm_threshold=alarm,
+                halt_threshold=halt,
+                reason="ok" if allowed else "halt_breached",
+                breached_alarm=reserve_float >= alarm,
+                breached_halt=reserve_float >= halt,
+            )
+
+        result = await self.state_db.enforce_and_reserve(
+            session_id=self.session_id,
+            scope=scope,
+            scope_target_id=scope_target_id,
+            reserve_usd=reserve_usd,
+            alarm_threshold=alarm,
+            halt_threshold=halt,
+        )
+        if not result.allowed and result.reason == "halt_breached":
+            record_audit(
+                "budget_halt_breached",
+                scope=scope,
+                scope_target_id=scope_target_id,
+                current_usd=result.current_usd,
+                attempted=result.attempted,
+                halt_threshold=halt,
+            )
+            if self.event_loop is not None:
+                await self.event_loop.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope=scope,
+                    level="halt",
+                    spent_usd=result.current_usd,
+                    alarm_threshold=alarm,
+                    halt_threshold=halt,
+                    corrupted=False,
+                )
         return result
 
     # Sync probes для unit-тестов / TUI dashboard.

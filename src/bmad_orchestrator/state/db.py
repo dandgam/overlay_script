@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,29 @@ CREATE INDEX IF NOT EXISTS idx_event_queue_unconsumed
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+@dataclass(slots=True, frozen=True)
+class BudgetEnforceResult:
+    """Outcome of an atomic ``enforce_and_reserve`` call.
+
+    ``allowed`` — True iff the reservation fit under ``halt_threshold``.
+    ``current_usd`` — post-reservation total (or pre-reservation if denied).
+    ``attempted`` — the reservation amount the caller requested.
+    ``reason`` — ``"ok"``, ``"halt_breached"``, or ``"corruption"``.
+    ``breached_alarm`` / ``breached_halt`` — flags after evaluation.
+    """
+
+    allowed: bool
+    scope: str
+    scope_target_id: str
+    current_usd: float
+    attempted: float
+    alarm_threshold: float
+    halt_threshold: float
+    reason: str
+    breached_alarm: bool
+    breached_halt: bool
 
 
 async def init_db(db_path: Path) -> None:
@@ -207,6 +231,132 @@ class StateDB:
             except Exception:
                 await conn.rollback()
                 raise
+
+    async def enforce_and_reserve(
+        self,
+        session_id: int,
+        scope: str,
+        scope_target_id: str,
+        reserve_usd: Decimal | float,
+        alarm_threshold: float,
+        halt_threshold: float,
+    ) -> BudgetEnforceResult:
+        """Atomic budget check-and-reserve (C5 — round 2 real implementation).
+
+        Round 1 left ``BudgetGuard`` referring to ``enforce_and_reserve`` in
+        docstrings but never landed the SQL — every concurrent ``get_budget +
+        upsert_budget`` pair could race past the halt threshold. This method
+        closes that hole: the SELECT and the conditional UPSERT live in a
+        single ``BEGIN IMMEDIATE`` transaction, so concurrent writers serialise
+        on the SQLite write lock.
+
+        Protocol:
+        1. BEGIN IMMEDIATE (acquires write lock — no other writer can race).
+        2. SELECT current ``spent_usd`` for (session, scope, target).
+        3. If ``current + reserve > halt`` → ROLLBACK; return ``allowed=False,
+           reason="halt_breached"``. The CURRENT spent stays unchanged.
+        4. Else UPSERT additive (``spent_usd = current + reserve``), COMMIT,
+           return ``allowed=True``.
+
+        ``reserve_usd`` accepts ``Decimal`` (caller's source of truth for
+        money math) — the float is only used at the SQLite boundary.
+        """
+        from bmad_orchestrator.runtime.budget import is_finite_spend
+
+        reserve_float = float(reserve_usd)
+        if not is_finite_spend(reserve_float):
+            return BudgetEnforceResult(
+                allowed=False,
+                scope=scope,
+                scope_target_id=scope_target_id,
+                current_usd=0.0,
+                attempted=0.0,
+                alarm_threshold=alarm_threshold,
+                halt_threshold=halt_threshold,
+                reason="corruption",
+                breached_alarm=True,
+                breached_halt=True,
+            )
+
+        async with connect(self.db_path) as conn:
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = await conn.execute(
+                    """
+                    SELECT spent_usd, spent_tokens
+                      FROM budget_tracker
+                     WHERE session_id = ? AND scope = ? AND scope_target_id = ?
+                    """,
+                    (session_id, scope, scope_target_id),
+                )
+                row = await cur.fetchone()
+                current_usd = float(row["spent_usd"]) if row else 0.0
+
+                projected = current_usd + reserve_float
+                if projected > halt_threshold:
+                    await conn.rollback()
+                    return BudgetEnforceResult(
+                        allowed=False,
+                        scope=scope,
+                        scope_target_id=scope_target_id,
+                        current_usd=current_usd,
+                        attempted=reserve_float,
+                        alarm_threshold=alarm_threshold,
+                        halt_threshold=halt_threshold,
+                        reason="halt_breached",
+                        breached_alarm=current_usd >= alarm_threshold,
+                        breached_halt=True,
+                    )
+
+                await conn.execute(
+                    """
+                    INSERT INTO budget_tracker
+                      (session_id, scope, scope_target_id,
+                       spent_usd, spent_tokens,
+                       alarm_threshold, halt_threshold,
+                       breached_alarm, breached_halt, updated_at)
+                    VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id, scope, scope_target_id) DO UPDATE SET
+                      spent_usd       = budget_tracker.spent_usd + excluded.spent_usd,
+                      alarm_threshold = excluded.alarm_threshold,
+                      halt_threshold  = excluded.halt_threshold,
+                      breached_alarm  = CASE
+                          WHEN budget_tracker.spent_usd + excluded.spent_usd
+                                  >= excluded.alarm_threshold THEN 1 ELSE 0 END,
+                      breached_halt   = CASE
+                          WHEN budget_tracker.spent_usd + excluded.spent_usd
+                                  >= excluded.halt_threshold THEN 1 ELSE 0 END,
+                      updated_at      = excluded.updated_at
+                    """,
+                    (
+                        session_id,
+                        scope,
+                        scope_target_id,
+                        reserve_float,
+                        alarm_threshold,
+                        halt_threshold,
+                        1 if projected >= alarm_threshold else 0,
+                        1 if projected >= halt_threshold else 0,
+                        _utc_now(),
+                    ),
+                )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+
+        return BudgetEnforceResult(
+            allowed=True,
+            scope=scope,
+            scope_target_id=scope_target_id,
+            current_usd=projected,
+            attempted=reserve_float,
+            alarm_threshold=alarm_threshold,
+            halt_threshold=halt_threshold,
+            reason="ok",
+            breached_alarm=projected >= alarm_threshold,
+            breached_halt=projected >= halt_threshold,
+        )
 
     async def get_budget(
         self,
