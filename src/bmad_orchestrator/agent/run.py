@@ -18,17 +18,16 @@ Builds an SDK-compatible ``ClaudeAgentOptions`` kwargs dict:
   wrapper — silently no-op).
 - ``betas=settings.beta_headers`` — 4 mandatory headers from agent/betas.py.
 
-Real-mode semantics (FS4 B1):
+Real-mode semantics (FS4 B1 + W1):
 
 - ``mock=True`` (default in CI / unit-tests) → DAG cascade pilot, no SDK.
 - ``mock=False`` →
     1. Build options.
     2. ``_validate_sdk_options`` — instantiate ``ClaudeAgentOptions(**opts)``,
        raise ``RuntimeError`` on ``TypeError`` (NOT silent log-warning).
-    3. ``raise NotImplementedError("real mode requires Wave 1a pilot wiring;
-       use --mock for now")`` with ``log.error``. The full event-driven loop is
-       deferred to the Odyssey Wave 1a pilot run (separate initiative). Real-mode
-       returning silently was a security/correctness blocker (B1).
+    3. Dispatch to ``_run_real_pilot`` (W1) — DAG → spawn worker → tail JSONL →
+       bridge ``worker_completed`` to bus, with ``max_stories`` / ``max_spend_usd``
+       hard caps and ``BMAD_REQUIRE_SANDBOX=1`` guard at entry.
 
 Memory tool (``memory_20250818``) is server-managed via the
 ``context-management-2025-06-27`` beta and is NOT a `@tool`-decorated function.
@@ -42,8 +41,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -59,9 +62,19 @@ from bmad_orchestrator.agent.skills import load_body as load_skill_body
 from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
 from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
+from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
-from bmad_orchestrator.runtime.worker_spawn import spawn_worker as runtime_spawn_worker
+from bmad_orchestrator.runtime.sandbox import detect_sandbox
+from bmad_orchestrator.runtime.worker_spawn import (
+    WorkerHandle,
+    tail_jsonl_events,
+)
+from bmad_orchestrator.runtime.worker_spawn import (
+    spawn_worker as runtime_spawn_worker,
+)
+from bmad_orchestrator.runtime.worktree import cleanup_worktree
 from bmad_orchestrator.state.db import StateDB
 
 SESSION_ENV_VAR = "BMAD_ORCHESTRATOR_SESSION_ID"
@@ -95,17 +108,20 @@ async def run_orchestrator(
     models: ModelConfig | None = None,
     mock: bool = True,
     event_loop: EventLoop | None = None,
+    max_stories: int = 50,
+    max_spend_usd: float = 50.0,
 ) -> EventLoop:
     """Main orchestrator loop. Returns the EventLoop instance.
 
     ``mock=True`` (DEFAULT, N3 FS6) → DAG cascade only (no SDK). Used in tests
-    / CI without ``ANTHROPIC_API_KEY``. Real-mode wiring is deferred to Wave
-    1a pilot — making mock the default avoids the historical footgun where
-    omitting ``--mock`` caused a confusing ``NotImplementedError``.
+    / CI without ``ANTHROPIC_API_KEY``. ``max_stories`` and ``max_spend_usd``
+    are real-mode caps (W1) and are ignored by the mock path which has its own
+    ``max_rounds=6`` cap.
 
-    ``mock=False`` → validates options against the real SDK and raises
-    ``NotImplementedError`` because the full event-driven loop is deferred to
-    the Wave 1a pilot. Silent no-op was a B1 blocker.
+    ``mock=False`` (W1) → validates options against the real SDK and runs
+    ``_run_real_pilot`` — DAG → spawn worker → tail JSONL → bridge
+    ``worker_completed`` → bus, with caller-supplied ``max_stories`` /
+    ``max_spend_usd`` hard caps and ``BMAD_REQUIRE_SANDBOX=1`` guard.
     """
     settings = load_settings()
     models = models or settings.models
@@ -134,8 +150,8 @@ async def run_orchestrator(
         await _run_mock_pilot(bus, wave=wave, max_parallel=max_parallel, budget=budget)
         return bus
 
-    # Real mode — FS4 B1: validate options shape against the SDK and refuse
-    # silently-succeeding no-op behavior.
+    # Real mode — FS4 B1: validate options shape against the SDK before any
+    # subprocess work. Shape drift surfaces as RuntimeError here, not later.
     options = build_agent_options(
         project_root=settings.target_project,
         wave=wave,
@@ -143,15 +159,20 @@ async def run_orchestrator(
     )
     _validate_sdk_options(options)
 
-    log.error(
-        "real_mode_not_implemented",
-        hint="full event loop deferred to Odyssey Wave 1a pilot; use --mock for now",
-        tool_count=len(ALL_TOOLS),
-        always_on=list(ALWAYS_ON_TOOLS),
+    await _run_real_pilot(
+        bus,
+        project=project,
+        wave=wave,
+        max_parallel=max_parallel,
+        max_stories=max_stories,
+        max_spend_usd=max_spend_usd,
+        budget=budget,
+        state_db=state_db,
+        session_id=session_id,
+        models=models,
+        options=options,
     )
-    raise NotImplementedError(
-        "real mode requires Wave 1a pilot wiring; use --mock for now"
-    )
+    return bus
 
 
 def build_agent_options(
@@ -500,16 +521,681 @@ async def _run_mock_pilot(
     log.info("mock_pilot_done", stories=len(spawned), rounds=rounds)
 
 
-# ── HUMAN_QUERY / HUMAN_RESPONSE subscriber (FS4 B9 stub) ────────────────────
+# ── real pilot (W1 — Wave 1a wiring) ─────────────────────────────────────────
+
+
+async def _run_real_pilot(
+    bus: EventLoop,
+    *,
+    project: str,
+    wave: str,
+    max_parallel: int,
+    max_stories: int,
+    max_spend_usd: float,
+    budget: BudgetGuard,
+    state_db: StateDB | None,
+    session_id: int | None,
+    models: ModelConfig,
+    options: dict[str, Any],
+) -> None:
+    """Real-mode E2E pilot (W1).
+
+    Diverges from ``_run_mock_pilot`` only in:
+      * ``BMAD_REQUIRE_SANDBOX`` guard at entry (raises if NoSandbox + flag).
+      * ``runtime_spawn_worker(mock=False, sandbox_network="full")`` — real
+        ``claude -p /bmad-auto-dev`` subprocess inside bwrap.
+      * ``tail_jsonl_events`` bridges each worker's JSONL → ``WORKER_COMPLETED``
+        event on the bus (instead of synthetic emit).
+      * Caller-supplied ``max_stories`` / ``max_spend_usd`` hard caps on top of
+        :class:`BudgetGuard` policy.
+
+    The per-story spend reserve here is a placeholder (story_alarm_usd / 6 ≈
+    $5/story) — W3 wires real cost parsing from worker JSONL ``usage`` blocks.
+    """
+    # W1.3 — sandbox guard. ``detect_sandbox()`` itself enforces
+    # ``BMAD_REQUIRE_SANDBOX=1`` + NoSandbox → RuntimeError (FS9 H5). Calling at
+    # entry surfaces the missing-bwrap failure BEFORE any DAG / spawn work.
+    _ = detect_sandbox()
+
+    from bmad_orchestrator.agent.tools._common import (
+        read_sprint_status_yaml,
+        write_sprint_status_yaml,
+    )
+
+    settings = load_settings()
+    worktree_root = settings.target_project / ".worktrees"
+    worktree_root.mkdir(parents=True, exist_ok=True)
+
+    # W4 — share the gate context with code_review / merge subscribers so they
+    # know which target project + wave to merge into. Subscribers are wired to
+    # the bus by caller-side startup code; configure_code_review_gate keeps the
+    # module-level config in sync per pilot run.
+    configure_code_review_gate(
+        target_project=settings.target_project,
+        wave=wave,
+        escalation_chat_id=getattr(getattr(settings, "bot", None), "escalation_chat_id", None),
+    )
+
+    planner = DagPlanner.from_target()
+    spawned: list[str] = []
+    rounds = 0
+    max_rounds = 6
+
+    daily_limit_override = os.environ.get("BMAD_DAILY_LIMIT_USD")
+    if daily_limit_override:
+        try:
+            daily_limit = float(daily_limit_override)
+        except ValueError:
+            log.warning(
+                "bmad_daily_limit_usd_invalid",
+                value=daily_limit_override,
+                fallback=budget.cfg.daily_limit_usd,
+            )
+        else:
+            budget.cfg.daily_limit_usd = daily_limit
+    today_utc = datetime.now(UTC).date().isoformat()
+    daily_spent_usd = 0.0
+    # W3 — adaptive per-story reservation. ``adaptive_story_reserve`` returns
+    # ``story_alarm_usd / 2`` until the first worker reports a finalised cost,
+    # then switches to ``min(story_alarm_usd, p95(last_3))``. Recomputed inside
+    # the round loop so updates from completed workers flow into the next
+    # ``enforce_and_reserve_story`` call.
+    worker_model = models.dev
+
+    bus.start_backstop_task()
+
+    daily_halt_reached = False
+    while (
+        rounds < max_rounds
+        and not daily_halt_reached
+        and len(spawned) < max_stories
+        and daily_spent_usd < max_spend_usd
+    ):
+        ready = [s for s in planner.find_ready(max_n=max_parallel * 2) if s["id"] not in spawned]
+        if not ready:
+            break
+
+        remaining_slots = max_stories - len(spawned)
+        effective_max = min(max_parallel, remaining_slots)
+        batch = ready[:effective_max]
+        if not batch:
+            break
+
+        handles: list[WorkerHandle] = []
+        for story in batch:
+            story_reserve_decimal = budget.adaptive_story_reserve()
+            story_reserve = float(story_reserve_decimal)
+            projected_daily = daily_spent_usd + story_reserve
+
+            # Local user-supplied hard cap (W1.2 --max-spend-usd).
+            if projected_daily > max_spend_usd:
+                log.warning(
+                    "max_spend_usd_cap_reached",
+                    projected_usd=projected_daily,
+                    max_spend_usd=max_spend_usd,
+                    story_id=story["id"],
+                )
+                await bus.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope="day",
+                    level="halt",
+                    spent_usd=projected_daily,
+                    alarm_threshold=max_spend_usd,
+                    halt_threshold=max_spend_usd,
+                    corrupted=False,
+                    story_id=story["id"],
+                    reason="max_spend_usd_cap",
+                )
+                daily_halt_reached = True
+                break
+
+            day_res = await budget.enforce_day(projected_daily, today_utc)
+            if day_res.level == "halt":
+                log.warning(
+                    "daily_budget_halt",
+                    projected_usd=projected_daily,
+                    halt_threshold=day_res.halt_threshold,
+                    day=today_utc,
+                )
+                await bus.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope="day",
+                    level="halt",
+                    spent_usd=projected_daily,
+                    alarm_threshold=day_res.alarm_threshold,
+                    halt_threshold=day_res.halt_threshold,
+                    corrupted=day_res.corrupted,
+                    story_id=story["id"],
+                    day=today_utc,
+                )
+                daily_halt_reached = True
+                break
+            daily_spent_usd = projected_daily
+
+            res = await budget.enforce_and_reserve_story(story["id"], story_reserve_decimal)
+            if not res.allowed:
+                await bus.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope=res.scope,
+                    level="halt",
+                    spent_usd=res.current_usd,
+                    alarm_threshold=res.alarm_threshold,
+                    halt_threshold=res.halt_threshold,
+                    corrupted=False,
+                    story_id=story["id"],
+                    reason=res.reason,
+                )
+                continue
+
+            wt = worktree_root / f"wt-{story['id']}"
+            wt.mkdir(exist_ok=True)
+            handle = await runtime_spawn_worker(
+                worktree=str(wt),
+                story_id=story["id"],
+                branch=f"feature/{story['id']}",
+                mock=False,
+                sandbox_network="full",
+            )
+            handles.append(handle)
+            spawned.append(story["id"])
+
+        if handles:
+            await asyncio.gather(
+                *[
+                    _tail_and_emit_completion(
+                        h, bus, budget=budget, model=worker_model
+                    )
+                    for h in handles
+                ]
+            )
+
+        snap = read_sprint_status_yaml()
+        for sid in spawned:
+            for epic_block in (snap.get("epics") or {}).values():
+                if isinstance(epic_block, dict) and sid in (epic_block.get("stories") or {}):
+                    epic_block["stories"][sid] = "done"
+        write_sprint_status_yaml(snap)
+        planner.reload()
+        rounds += 1
+
+        # Per-batch budget aggregate — sum of realised story costs (W3) with a
+        # fallback to the adaptive reserve when no real cost has landed yet.
+        recent_costs = list(budget._recent_story_costs)
+        batch_spent = (
+            float(sum(recent_costs))
+            if recent_costs
+            else float(budget.adaptive_story_reserve()) * len(spawned)
+        )
+        await budget.enforce_batch(spent_usd=batch_spent, wave=wave)
+
+    await bus.emit(
+        EventType.WAVE_BOUNDARY_REACHED,
+        wave=wave,
+        spawned=spawned,
+        rounds=rounds,
+    )
+    log.info(
+        "real_pilot_done",
+        stories=len(spawned),
+        rounds=rounds,
+        daily_spent_usd=daily_spent_usd,
+        halted=daily_halt_reached,
+    )
+
+
+async def _tail_and_emit_completion(
+    handle: WorkerHandle,
+    bus: EventLoop,
+    *,
+    budget: BudgetGuard | None = None,
+    model: str | None = None,
+) -> None:
+    """Tail a worker's JSONL until terminal event; bridge to bus.
+
+    The generator returns after seeing ``worker_completed`` or
+    ``worker_halt_file``. We re-emit only the success / failure terminal to
+    keep the bus surface narrow — intermediate ``claude_event`` / ``stdout_line``
+    rows stay in the JSONL for forensics but don't fan out to subscribers.
+
+    W3 — when ``budget`` and ``model`` are supplied, every event is fed through
+    a :class:`WorkerCostTracker` so the running cost is attributed to the day
+    cap via :meth:`BudgetGuard.attribute_usd` (scope ``worker:<story_id>``) and
+    the realised total is pushed back into the adaptive reservation via
+    :meth:`BudgetGuard.record_story_cost`. Tests that drive this helper with
+    pure mock-mode handles can omit both and get the legacy bridge-only path.
+    """
+    tracker: WorkerCostTracker | None = None
+    if budget is not None and model:
+        tracker = WorkerCostTracker(model=model)
+
+    async for ev in tail_jsonl_events(handle.jsonl_path):
+        if tracker is not None and budget is not None:
+            delta = tracker.feed(ev)
+            if delta > 0:
+                await budget.attribute_usd(
+                    scope=f"worker:{handle.story_id}", spent=delta
+                )
+        event_type = ev.get("event_type")
+        if event_type == "worker_completed":
+            if tracker is not None and budget is not None:
+                _emit_worker_cost_final(tracker, handle.story_id)
+                budget.record_story_cost(tracker.total_cost)
+            await bus.emit(
+                EventType.WORKER_COMPLETED,
+                story_id=handle.story_id,
+                worktree=handle.worktree,
+                jsonl=str(handle.jsonl_path),
+                exit_code=ev.get("exit_code", 0),
+                status=ev.get("status", "success"),
+                mock=False,
+            )
+            return
+        if event_type == "worker_halt_file":
+            if tracker is not None and budget is not None:
+                _emit_worker_cost_final(tracker, handle.story_id)
+                budget.record_story_cost(tracker.total_cost)
+            await bus.emit(
+                EventType.WORKER_HALT_FILE,
+                story_id=handle.story_id,
+                worktree=handle.worktree,
+                jsonl=str(handle.jsonl_path),
+            )
+            return
+
+
+def _emit_worker_cost_final(tracker: WorkerCostTracker, story_id: str) -> None:
+    """Structured ``worker_cost_final`` log emitted on terminal event (W3)."""
+    log.info(
+        "worker_cost_final",
+        story_id=story_id,
+        total_usd=str(tracker.total_cost),
+        cache_hit_ratio=round(tracker.cache_hit_ratio, 4),
+        input_tokens=tracker.cumulative.input_tokens,
+        cache_read_tokens=tracker.cumulative.cache_read_input_tokens,
+        cache_write_tokens=tracker.cumulative.cache_creation_input_tokens,
+        output_tokens=tracker.cumulative.output_tokens,
+    )
+
+
+# ── HUMAN_QUERY / HUMAN_RESPONSE subscriber (W2 — intent-router dispatch) ────
+
+INTENT_ROUTER_SYSTEM_PROMPT: str = (
+    "You are the bmad-orchestrator intent router. Parse the user's free-text "
+    "request (Russian or English) and decide whether to: (a) call exactly one "
+    "tool to fulfil it, or (b) reply with a plain-text clarification when the "
+    "request is ambiguous or out-of-scope. Read-only intents → call the matching "
+    "tool directly. Destructive intents (stop, kill, delete, rollback) → reply "
+    "with text asking the user to confirm via the bot's inline buttons rather "
+    "than calling the tool. Unknown intents → reply with 'не знаю' plus the "
+    "closest valid options."
+)
+
+INTENT_ROUTER_TOOL_WHITELIST: frozenset[str] = frozenset({
+    "start_wave",
+    "stop_orchestrator",
+    "escalate_to_human",
+    "read_sprint_status",
+})
+
+# Module-level injection points so unit tests can configure dispatch without
+# touching env / load_settings(). Production code calls
+# ``configure_intent_router(budget=…, models=…)`` once during orchestrator
+# start-up; tests monkeypatch ``_intent_router_client_factory`` to return a
+# stub AsyncAnthropic.
+_INTENT_ROUTER_BUDGET: BudgetGuard | None = None
+_INTENT_ROUTER_MODELS: ModelConfig | None = None
+_intent_router_client_factory: Callable[[], Any] | None = None
+
+
+def configure_intent_router(
+    *,
+    budget: BudgetGuard | None,
+    models: ModelConfig | None,
+    client_factory: Callable[[], Any] | None = None,
+) -> None:
+    """Wire the intent-router subscriber to a budget guard + model selection.
+
+    Called once from ``run_orchestrator`` (real-mode) so subsequent
+    ``human_query_subscriber`` invocations have access to the live
+    :class:`BudgetGuard` and active :class:`ModelConfig`. Tests pass a custom
+    ``client_factory`` returning a stub AsyncAnthropic.
+    """
+    global _INTENT_ROUTER_BUDGET, _INTENT_ROUTER_MODELS, _intent_router_client_factory
+    _INTENT_ROUTER_BUDGET = budget
+    _INTENT_ROUTER_MODELS = models
+    _intent_router_client_factory = client_factory
+
+
+def _default_anthropic_client_factory() -> Any:
+    """Build a fresh ``AsyncAnthropic`` client picking up ``ANTHROPIC_API_KEY``.
+
+    Imported lazily so the test suite can run without ``anthropic`` installed
+    in any unusual env. Production hosts ship it via ``pyproject.toml``.
+    """
+    from anthropic import AsyncAnthropic
+
+    return AsyncAnthropic()
+
+
+def _intent_router_tools() -> list[dict[str, Any]]:
+    """Return the tool subset exposed to the intent router (Messages API schema).
+
+    Filters ``ALL_TOOLS`` down to ``INTENT_ROUTER_TOOL_WHITELIST`` so the router
+    cannot accidentally dispatch destructive tools (spawn / merge / control)
+    from a free-text user message. The schema follows the Anthropic Messages
+    API tool spec: ``{"name", "description", "input_schema": {…}}``.
+    """
+    tools: list[dict[str, Any]] = []
+    for t in ALL_TOOLS:
+        if t.name not in INTENT_ROUTER_TOOL_WHITELIST:
+            continue
+        schema = getattr(t, "input_schema", None) or {"type": "object", "properties": {}}
+        # SDK tools store input_schema either as the dict form already or as a
+        # callable producing it; tolerate both.
+        if callable(schema):
+            schema = schema()
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            schema = {"type": "object", "properties": dict(schema or {})}
+        tools.append({
+            "name": t.name,
+            "description": t.description,
+            "input_schema": schema,
+        })
+    return tools
+
+
+def _tool_by_name(name: str) -> Any:
+    """Return the registered ``@tool`` for ``name`` (or None if absent)."""
+    for t in ALL_TOOLS:
+        if t.name == name:
+            return t
+    return None
+
+
+def _extract_usage(response: Any) -> TokenUsage:
+    """Build :class:`TokenUsage` from an Anthropic Messages response.
+
+    Tolerates dict-shaped and pydantic-shaped ``usage`` blocks so tests can
+    stub with plain dicts.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return TokenUsage()
+
+    def _get(field: str) -> int:
+        if isinstance(usage, dict):
+            return int(usage.get(field, 0) or 0)
+        return int(getattr(usage, field, 0) or 0)
+
+    return TokenUsage(
+        input_tokens=_get("input_tokens"),
+        cache_creation_input_tokens=_get("cache_creation_input_tokens"),
+        cache_read_input_tokens=_get("cache_read_input_tokens"),
+        output_tokens=_get("output_tokens"),
+    )
+
+
+def _iter_content_blocks(response: Any) -> list[Any]:
+    """Yield ``response.content`` blocks across SDK and dict-shaped responses."""
+    content = getattr(response, "content", None)
+    if content is None and isinstance(response, dict):
+        content = response.get("content")
+    return list(content or [])
+
+
+def _block_kind(block: Any) -> str:
+    if isinstance(block, dict):
+        return str(block.get("type") or "")
+    return str(getattr(block, "type", "") or "")
+
+
+def _block_text(block: Any) -> str:
+    if isinstance(block, dict):
+        return str(block.get("text") or "")
+    return str(getattr(block, "text", "") or "")
+
+
+def _tool_use_payload(block: Any) -> tuple[str, dict[str, Any]]:
+    if isinstance(block, dict):
+        return str(block.get("name") or ""), dict(block.get("input") or {})
+    return str(getattr(block, "name", "") or ""), dict(getattr(block, "input", {}) or {})
+
+
+async def _stub_human_response(
+    bus: EventLoop,
+    *,
+    chat_id: Any,
+    corr_id: str,
+    text: str,
+    reason: str,
+) -> None:
+    """Emit the legacy stub HUMAN_RESPONSE (no LLM call).
+
+    Triggered when (a) ``ANTHROPIC_API_KEY`` is unset, (b) the budget guard
+    halted dispatch, or (c) the Anthropic call raised — the bot's per-chat
+    FIFO future must still resolve, so we mirror the FS4 stub contract.
+    """
+    log.warning(
+        "human_query_stub_fallback",
+        reason=reason,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        text_preview=text[:80],
+    )
+    await bus.emit(
+        EventType.HUMAN_RESPONSE,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        text=f"(stub) принято: {text[:80]}",
+    )
+
+
+async def _dispatch_intent_router(
+    *,
+    bus: EventLoop,
+    chat_id: Any,
+    corr_id: str,
+    text: str,
+    budget: BudgetGuard,
+    models: ModelConfig,
+) -> None:
+    """Real LLM dispatch path — Anthropic Messages API + tool_use routing.
+
+    Layers:
+      1. Daily-cap pre-check via ``budget.attribute_usd`` snapshot — halt
+         before any call when cumulative is already over the daily limit.
+      2. Build cached system blocks (router prompt + intent-router skill body),
+         restrict tools to the whitelist, call ``messages.create``.
+      3. Attribute the post-call cost (via ``usd_cost`` + ``attribute_usd``);
+         emit BUDGET_THRESHOLD_HIT on the day cap automatically through
+         ``BudgetGuard._publish``.
+      4. Walk ``response.content`` — dispatch the first whitelisted ``tool_use``
+         block via its registered handler; concatenate text blocks for the
+         HUMAN_RESPONSE payload.
+    """
+    # Pre-check: cumulative intent-router spend may already exceed daily cap.
+    if budget.attributed_total() >= Decimal(str(budget.cfg.daily_limit_usd)):
+        log.warning(
+            "intent_router_daily_cap_blocked",
+            chat_id=chat_id,
+            corr_id=corr_id,
+            attributed_total=str(budget.attributed_total()),
+        )
+        await bus.emit(
+            EventType.BUDGET_THRESHOLD_HIT,
+            scope="day",
+            level="halt",
+            spent_usd=float(budget.attributed_total()),
+            alarm_threshold=budget.cfg.daily_limit_usd,
+            halt_threshold=budget.cfg.daily_limit_usd,
+            corrupted=False,
+            attribution_scope="intent_router",
+        )
+        await _stub_human_response(
+            bus,
+            chat_id=chat_id,
+            corr_id=corr_id,
+            text=text,
+            reason="daily_cap_halt",
+        )
+        return
+
+    factory = _intent_router_client_factory or _default_anthropic_client_factory
+    client = factory()
+
+    try:
+        body = load_skill_body("intent-router")
+    except Exception as exc:  #skill registry malformed → loud stub
+        log.error("intent_router_skill_load_failed", error=str(exc))
+        await _stub_human_response(
+            bus, chat_id=chat_id, corr_id=corr_id, text=text, reason="skill_load_failed"
+        )
+        return
+
+    system_blocks = [
+        {
+            "type": "text",
+            "text": INTENT_ROUTER_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": body,
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    messages = [{"role": "user", "content": text}]
+    tools = _intent_router_tools()
+
+    try:
+        response = await client.messages.create(
+            model=models.routine,
+            max_tokens=512,
+            system=system_blocks,
+            tools=tools,
+            messages=messages,
+        )
+    except Exception as exc:  #network / API errors → stub
+        log.error(
+            "intent_router_api_error",
+            error_type=type(exc).__name__,
+            error=str(exc)[:200],
+            chat_id=chat_id,
+            corr_id=corr_id,
+        )
+        await _stub_human_response(
+            bus, chat_id=chat_id, corr_id=corr_id, text=text, reason="api_error"
+        )
+        return
+
+    usage = _extract_usage(response)
+    try:
+        cost = usd_cost(models.routine, usage)
+    except ValueError:
+        # Unknown model — log loud, attribute 0, continue with dispatch so the
+        # user still receives a response. Production deploys pin
+        # ``models.routine`` to a known model so this branch never trips.
+        log.error(
+            "intent_router_unknown_model_pricing",
+            model=models.routine,
+        )
+        cost = Decimal("0")
+
+    cap_result = await budget.attribute_usd(scope="intent_router", spent=cost)
+
+    total = usage.input_tokens + usage.cache_read_input_tokens
+    cache_hit_ratio = (
+        float(usage.cache_read_input_tokens) / float(total) if total > 0 else 0.0
+    )
+    log.info(
+        "intent_router_dispatched",
+        model=models.routine,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        input_tokens=usage.input_tokens,
+        cache_read_tokens=usage.cache_read_input_tokens,
+        cache_write_tokens=usage.cache_creation_input_tokens,
+        output_tokens=usage.output_tokens,
+        cost_usd=str(cost),
+        cache_hit_ratio=round(cache_hit_ratio, 4),
+        daily_attributed_total=str(budget.attributed_total()),
+        daily_level=cap_result.level,
+    )
+
+    # Walk response.content — dispatch first whitelisted tool_use; collect text.
+    text_parts: list[str] = []
+    tool_results: list[str] = []
+    for block in _iter_content_blocks(response):
+        kind = _block_kind(block)
+        if kind == "tool_use":
+            tool_name, tool_input = _tool_use_payload(block)
+            if tool_name not in INTENT_ROUTER_TOOL_WHITELIST:
+                log.warning(
+                    "intent_router_tool_outside_whitelist",
+                    tool=tool_name,
+                    chat_id=chat_id,
+                )
+                continue
+            handler_tool = _tool_by_name(tool_name)
+            if handler_tool is None:
+                continue
+            try:
+                result = await handler_tool.handler(tool_input)
+            except Exception as exc:  #tool failure → loud, but emit response
+                log.error(
+                    "intent_router_tool_dispatch_error",
+                    tool=tool_name,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
+                tool_results.append(f"(tool {tool_name} failed: {type(exc).__name__})")
+                continue
+            tool_results.append(f"tool:{tool_name} → {_summarise_tool_result(result)}")
+        elif kind == "text":
+            text_parts.append(_block_text(block))
+
+    if tool_results:
+        reply = "; ".join(tool_results)
+    elif text_parts:
+        reply = "\n".join(t.strip() for t in text_parts if t).strip()
+    else:
+        reply = "(no response)"
+
+    await bus.emit(
+        EventType.HUMAN_RESPONSE,
+        chat_id=chat_id,
+        corr_id=corr_id,
+        text=reply or "(empty)",
+    )
+
+
+def _summarise_tool_result(result: Any) -> str:
+    """Compact one-line summary of an SDK tool envelope for HUMAN_RESPONSE."""
+    if isinstance(result, dict):
+        if result.get("isError"):
+            content = result.get("content")
+            if isinstance(content, list) and content:
+                first = content[0]
+                if isinstance(first, dict):
+                    return f"error:{first.get('text', '')[:120]}"
+            return "error"
+        content = result.get("content")
+        if isinstance(content, list) and content:
+            first = content[0]
+            if isinstance(first, dict):
+                return str(first.get("text", "ok"))[:120]
+        return "ok"
+    return str(result)[:120]
 
 
 async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
-    """Stub subscriber: on USER_CHAT_MESSAGE / HUMAN_QUERY → emit HUMAN_RESPONSE.
+    """Route USER_CHAT_MESSAGE / HUMAN_QUERY through the intent-router skill.
 
-    Full LLM dispatch through the intent-router skill body is deferred to the
-    Wave 1a pilot (loud `log.warning` here). For now this echoes a placeholder
-    response carrying the same `corr_id` so the bot's per-chat FIFO can
-    resolve its pending future end-to-end in tests.
+    Real-mode dispatch when ``ANTHROPIC_API_KEY`` is set and
+    :func:`configure_intent_router` has wired a :class:`BudgetGuard` +
+    :class:`ModelConfig`. Otherwise falls back to the legacy stub
+    (FS4 B9 contract) so the bot's per-chat FIFO future can still resolve in
+    tests / CI without secrets.
     """
     if event.type not in (EventType.USER_CHAT_MESSAGE, EventType.HUMAN_QUERY):
         return
@@ -519,25 +1205,341 @@ async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
     corr_id = payload.get("corr_id") or secrets.token_hex(8)
     text = payload.get("text", "")
 
+    # Touch skill metadata so dispatcher trigger graph stays asserted at
+    # runtime (and unknown event-types fail loud before hitting Anthropic).
     skills = dispatch_skills(event.type)
     for skill in skills:
         body = load_skill_body(skill)
         log.debug("skill_body_loaded", skill=skill, body_chars=len(body))
 
-    log.warning(
-        "human_query_intent_router_deferred",
-        hint="Wave 1a pilot will wire intent-router skill body to LLM dispatch",
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    budget = _INTENT_ROUTER_BUDGET
+    models = _INTENT_ROUTER_MODELS
+
+    if not api_key or budget is None or models is None:
+        await _stub_human_response(
+            bus,
+            chat_id=chat_id,
+            corr_id=corr_id,
+            text=text,
+            reason="no_api_key" if not api_key else "intent_router_unconfigured",
+        )
+        return
+
+    await _dispatch_intent_router(
+        bus=bus,
         chat_id=chat_id,
         corr_id=corr_id,
-        text_preview=text[:80],
+        text=text,
+        budget=budget,
+        models=models,
     )
 
-    await bus.emit(
-        EventType.HUMAN_RESPONSE,
-        chat_id=chat_id,
-        corr_id=corr_id,
-        text=f"(stub) принято: {text[:80]}",
+
+# ── CODE_REVIEW gate + auto-merge subscribers (W4) ───────────────────────────
+
+CODE_REVIEW_SKILL_INVOCATION: str = "/bmad-code-review"
+CODE_REVIEW_VERDICTS: frozenset[str] = frozenset({"approve", "request_changes", "reject"})
+_VERDICT_LINE_RE = re.compile(
+    r"verdict\s*[:=]\s*(approve|request_changes|reject)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(slots=True)
+class CodeReviewGateConfig:
+    """Caller context shared between the two W4 subscribers."""
+
+    target_project: Path
+    wave: str
+    escalation_chat_id: int | None = None
+
+
+_CODE_REVIEW_GATE: CodeReviewGateConfig | None = None
+
+
+def configure_code_review_gate(
+    *,
+    target_project: Path | None,
+    wave: str | None,
+    escalation_chat_id: int | None = None,
+) -> None:
+    """Wire the W4 gate to a target project + wave.
+
+    Called once from ``_run_real_pilot`` so both subscribers share the live
+    project root, wave name and escalation chat id. Passing ``None`` for either
+    required field clears the gate (tests use this to assert the unconfigured
+    branch).
+    """
+    global _CODE_REVIEW_GATE
+    if target_project is None or wave is None:
+        _CODE_REVIEW_GATE = None
+        return
+    _CODE_REVIEW_GATE = CodeReviewGateConfig(
+        target_project=target_project,
+        wave=wave,
+        escalation_chat_id=escalation_chat_id,
     )
+
+
+def _verdict_from_text(text: str) -> str | None:
+    """Return ``approve|request_changes|reject`` if a verdict line is present."""
+    if not text:
+        return None
+    m = _VERDICT_LINE_RE.search(text)
+    if m is None:
+        return None
+    return m.group(1).lower()
+
+
+def _extract_verdict_from_event(ev: dict[str, Any]) -> tuple[str, str] | None:
+    """Return ``(verdict, summary)`` if event carries verdict info; else None.
+
+    Supports two shapes emitted by the ``/bmad-code-review`` skill:
+      * Explicit JSON key: ``{"verdict": "approve", "summary": "…"}``.
+      * Text body (``text`` / ``summary`` field) matching
+        ``verdict: <approve|request_changes|reject>``.
+    """
+    if not isinstance(ev, dict):
+        return None
+    explicit = ev.get("verdict")
+    if isinstance(explicit, str) and explicit.lower() in CODE_REVIEW_VERDICTS:
+        return explicit.lower(), str(ev.get("summary") or ev.get("text") or "")
+    for key in ("summary", "text", "content"):
+        val = ev.get(key)
+        if isinstance(val, str):
+            v = _verdict_from_text(val)
+            if v is not None:
+                return v, val
+    return None
+
+
+async def _spawn_code_review_worker(
+    *,
+    worktree: str,
+    story_id: str,
+    wave: str,
+) -> WorkerHandle:
+    """Spawn ``claude -p /bmad-code-review`` in ``worktree`` with a distinct JSONL.
+
+    The JSONL path is derived from ``BMAD_CURRENT_WAVE`` inside
+    :func:`worker_jsonl_path`. We pivot the env var to a wave-scoped review
+    namespace so the review stream lands at
+    ``runs_dir / <wave>__review_<story_id> / <basename>.events.jsonl`` instead
+    of clobbering (and being clobbered by) the dev worker's terminal event.
+    """
+    original_wave = os.environ.get("BMAD_CURRENT_WAVE")
+    os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__review_{story_id}"
+    try:
+        handle = await runtime_spawn_worker(
+            worktree=worktree,
+            story_id=story_id,
+            branch=f"feature/{story_id}",
+            skill_invocation=CODE_REVIEW_SKILL_INVOCATION,
+            sandbox_network="none",
+        )
+    finally:
+        if original_wave is None:
+            os.environ.pop("BMAD_CURRENT_WAVE", None)
+        else:
+            os.environ["BMAD_CURRENT_WAVE"] = original_wave
+    return handle
+
+
+async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
+    """On ``WORKER_COMPLETED(success)`` → spawn ``/bmad-code-review``, emit verdict.
+
+    Filtering: anything other than ``WORKER_COMPLETED`` with
+    ``payload['status'] == 'success'`` is a no-op (failures bypass review and
+    flow straight to W5 escalation). The verdict is extracted from the LAST
+    matching ``claude_event`` block in the review JSONL — supports both an
+    explicit ``verdict`` JSON key and a ``verdict: <X>`` text pattern.
+    """
+    if event.type != EventType.WORKER_COMPLETED:
+        return
+    payload = event.payload or {}
+    if payload.get("status") != "success":
+        return
+
+    story_id = str(payload.get("story_id") or "")
+    worktree = str(payload.get("worktree") or "")
+    if not story_id or not worktree:
+        log.warning("code_review_skip_missing_fields", payload=payload)
+        return
+
+    cfg = _CODE_REVIEW_GATE
+    wave = (cfg.wave if cfg is not None else None) or os.environ.get(
+        "BMAD_CURRENT_WAVE", "default"
+    )
+
+    try:
+        handle = await _spawn_code_review_worker(
+            worktree=worktree, story_id=story_id, wave=wave
+        )
+    except Exception as exc:  # spawn / sandbox failure → escalate
+        log.exception(
+            "code_review_spawn_failed", story_id=story_id, worktree=worktree
+        )
+        await bus.emit(
+            EventType.CODE_REVIEW_VERDICT,
+            story_id=story_id,
+            verdict="error",
+            summary=f"spawn failed: {type(exc).__name__}: {exc}",
+            worktree=worktree,
+        )
+        return
+
+    verdict = "error"
+    summary = ""
+    async for ev in tail_jsonl_events(handle.jsonl_path):
+        extracted = _extract_verdict_from_event(ev)
+        if extracted is not None:
+            verdict, summary = extracted
+
+    log.info(
+        "code_review_dispatched",
+        story_id=story_id,
+        verdict=verdict,
+        worktree=worktree,
+        review_jsonl=str(handle.jsonl_path),
+    )
+    await bus.emit(
+        EventType.CODE_REVIEW_VERDICT,
+        story_id=story_id,
+        verdict=verdict,
+        summary=summary,
+        worktree=worktree,
+        review_jsonl=str(handle.jsonl_path),
+    )
+
+
+async def _ff_merge_to_integration(
+    *,
+    target_project: Path,
+    integration_branch: str,
+    feature_branch: str,
+) -> str:
+    """Fast-forward merge ``feature_branch`` → ``integration_branch``.
+
+    Returns the commit hash that integration now points at. Raises whatever
+    gitpython raises on conflict / non-ff / missing branch — caller wraps the
+    error into a ``HUMAN_QUERY`` escalation.
+
+    Hard rules per CLAUDE.md + spec §W4: this helper is restricted to ff-only
+    plus signoff. Disabling pre-commit hooks, forcing the ref forward, or
+    rewriting history with destructive resets are all out of scope.
+    """
+    from git import Repo
+
+    repo = Repo(str(target_project))
+
+    existing = {b.name for b in repo.branches}
+    if integration_branch not in existing:
+        base = "main" if "main" in existing else repo.active_branch.name
+        repo.git.branch(integration_branch, base)
+
+    repo.git.checkout(integration_branch)
+    repo.git.merge(feature_branch, "--ff-only", "--signoff")
+    head_sha: str = repo.head.commit.hexsha
+    return head_sha
+
+
+async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
+    """On ``CODE_REVIEW_VERDICT`` → fast-forward merge OR escalate.
+
+    Behaviour matrix:
+
+    * ``verdict == "approve"``  → ``git merge --ff-only --signoff`` of
+      ``feature/<story>`` into ``integration/<wave>`` in the target project.
+      On success: emit a ``story_merged`` audit log + cleanup worktree under
+      the project's ``.worktrees/`` root. On failure (conflict, non-ff, missing
+      branch): emit ``HUMAN_QUERY`` with the diagnostic payload.
+    * ``verdict in {"request_changes", "reject", "error"}`` → emit
+      ``HUMAN_QUERY`` with the review summary; worktree stays put for human
+      inspection.
+    """
+    if event.type != EventType.CODE_REVIEW_VERDICT:
+        return
+
+    cfg = _CODE_REVIEW_GATE
+    if cfg is None:
+        log.warning("merge_subscriber_unconfigured")
+        return
+
+    payload = event.payload or {}
+    story_id = str(payload.get("story_id") or "")
+    verdict = str(payload.get("verdict") or "")
+    summary = str(payload.get("summary") or "")
+    worktree = str(payload.get("worktree") or "")
+
+    if not story_id:
+        log.warning("merge_subscriber_missing_story_id", payload=payload)
+        return
+
+    if verdict != "approve":
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id,
+            text=(
+                f"Code-review {verdict} для {story_id}:\n\n"
+                f"{summary}\n\nWorktree: {worktree}"
+            ),
+            story_id=story_id,
+            verdict=verdict,
+            worktree=worktree,
+            actions=["approve_override", "abandon", "edit_in_human_loop"],
+        )
+        return
+
+    integration_branch = f"integration/{cfg.wave}"
+    feature_branch = f"feature/{story_id}"
+    try:
+        merge_sha = await _ff_merge_to_integration(
+            target_project=cfg.target_project,
+            integration_branch=integration_branch,
+            feature_branch=feature_branch,
+        )
+    except Exception as exc:
+        log.exception(
+            "merge_to_integration_failed",
+            story_id=story_id,
+            feature=feature_branch,
+            integration=integration_branch,
+        )
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id,
+            text=(
+                f"Merge conflict для {story_id}:\n\n"
+                f"{type(exc).__name__}: {exc}\n\nWorktree: {worktree}"
+            ),
+            story_id=story_id,
+            verdict="merge_conflict",
+            worktree=worktree,
+            actions=["manual_resolve", "abandon"],
+        )
+        return
+
+    log.info(
+        "story_merged",
+        story_id=story_id,
+        feature=feature_branch,
+        integration=integration_branch,
+        sha=merge_sha,
+    )
+
+    if worktree:
+        try:
+            cleanup_worktree(
+                Path(worktree), root=cfg.target_project / ".worktrees"
+            )
+        except Exception as exc:  # cleanup failure must not block the merge
+            log.warning(
+                "worktree_cleanup_failed",
+                story_id=story_id,
+                worktree=worktree,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -555,9 +1557,12 @@ def main() -> None:
 
 __all__ = [
     "ALWAYS_ON_TOOLS",
+    "INTENT_ROUTER_SYSTEM_PROMPT",
+    "INTENT_ROUTER_TOOL_WHITELIST",
     "MCP_SERVER_NAME",
     "SESSION_ENV_VAR",
     "build_agent_options",
+    "configure_intent_router",
     "human_query_subscriber",
     "main",
     "run_orchestrator",

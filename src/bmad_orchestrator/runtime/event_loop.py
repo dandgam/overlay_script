@@ -44,6 +44,7 @@ class EventType(StrEnum):
     HUMAN_QUERY = "human_query"
     HUMAN_RESPONSE = "human_response"
     SCHEDULED_WAKEUP = "scheduled_wakeup_5min"
+    CODE_REVIEW_VERDICT = "code_review_verdict"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
@@ -77,6 +78,7 @@ class EventLoop:
         self._lock = asyncio.Lock()
         self._backstop_task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
+        self._corr_futures: dict[str, asyncio.Future[Event]] = {}
 
     # ── public producer API ──────────────────────────────────────────────────
 
@@ -87,6 +89,7 @@ class EventLoop:
         else:
             event = event_or_type
         await self.queue.put(event)
+        self._resolve_correlation(event)
         return event
 
     # ── public consumer API ──────────────────────────────────────────────────
@@ -109,10 +112,57 @@ class EventLoop:
         event = await self.next(timeout=timeout)
         if event is None:
             return None
+        self._resolve_correlation(event)
         async with self._lock:
             for cb in list(self._subs):
                 await cb(event)
         return event
+
+    # ── single-shot correlation futures (W5 — bot ↔ intent-router bridge) ────
+
+    def subscribe_one_correlation(self, corr_id: str) -> asyncio.Future[Event]:
+        """Return an asyncio.Future that resolves on the first ``HUMAN_RESPONSE``
+        event whose payload's ``corr_id`` matches.
+
+        Single-shot: resolved on first match, then removed from the registry.
+        Callers MUST call :meth:`unsubscribe_correlation` in a ``finally`` block
+        if they abandon the wait (timeout, cancellation), otherwise the entry
+        leaks until process exit.
+
+        If an outstanding (not-yet-resolved) future already exists for the same
+        ``corr_id``, that same future is returned so concurrent callers join the
+        single wait. A done/cancelled future is replaced with a fresh one — the
+        old corr_id has effectively expired.
+        """
+        existing = self._corr_futures.get(corr_id)
+        if existing is not None and not existing.done():
+            return existing
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Event] = loop.create_future()
+        self._corr_futures[corr_id] = fut
+        return fut
+
+    def unsubscribe_correlation(self, corr_id: str) -> None:
+        """Drop the future registered for ``corr_id``. Idempotent."""
+        self._corr_futures.pop(corr_id, None)
+
+    def _resolve_correlation(self, event: Event) -> None:
+        """Resolve any pending future whose ``corr_id`` matches this event.
+
+        Fired from both :meth:`emit` (producer-side, wakes awaiter even when
+        nobody drains the queue) and :meth:`dispatch_one` (consumer-side, kept
+        as defence-in-depth — a future could have been registered after the
+        emit but before dispatch). Pop semantics make the resolution idempotent.
+        """
+        if event.type is not EventType.HUMAN_RESPONSE:
+            return
+        payload = event.payload or {}
+        corr_id = payload.get("corr_id")
+        if not isinstance(corr_id, str):
+            return
+        fut = self._corr_futures.pop(corr_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result(event)
 
     # ── backstop wakeup ──────────────────────────────────────────────────────
 

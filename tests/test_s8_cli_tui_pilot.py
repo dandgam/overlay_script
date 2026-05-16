@@ -325,8 +325,8 @@ async def test_forward_to_agent_stub_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forward_to_agent_real_eventloop_emits_human_query() -> None:
-    """С attached bus — emit HUMAN_QUERY (FS4 B9) + await corr_id-matched response."""
+async def test_forward_to_agent_real_eventloop_emits_user_chat_message() -> None:
+    """С attached bus — emit USER_CHAT_MESSAGE (W5) + await HUMAN_RESPONSE via subscribe_one_correlation."""
     import asyncio
 
     from bmad_orchestrator.bot import handlers as bot_handlers
@@ -335,16 +335,21 @@ async def test_forward_to_agent_real_eventloop_emits_human_query() -> None:
     bus = EventLoop()
     bot_handlers.attach_event_loop(bus)
     bot_handlers.attach_state_db(None, None)
-    bot_handlers._HUMAN_RESPONSES.clear()
+    bot_handlers.reset_for_test()
     try:
         async def _responder() -> None:
             ev = await bus.next(timeout=2.0)
             assert ev is not None
-            assert ev.type == EventType.HUMAN_QUERY
+            assert ev.type == EventType.USER_CHAT_MESSAGE
             assert ev.payload["chat_id"] == 999
             assert ev.payload["text"] == "статус"
             corr_id = ev.payload["corr_id"]
-            bot_handlers.deliver_human_response(999, corr_id, "wave 1a: 2/5 done")
+            await bus.emit(
+                EventType.HUMAN_RESPONSE,
+                chat_id=999,
+                corr_id=corr_id,
+                text="wave 1a: 2/5 done",
+            )
 
         responder = asyncio.create_task(_responder())
         reply = await bot_handlers.forward_to_agent(
@@ -354,7 +359,7 @@ async def test_forward_to_agent_real_eventloop_emits_human_query() -> None:
         assert reply == "wave 1a: 2/5 done"
     finally:
         bot_handlers.attach_event_loop(None)
-        bot_handlers._HUMAN_RESPONSES.clear()
+        bot_handlers.reset_for_test()
 
 
 @pytest.mark.asyncio

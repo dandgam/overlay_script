@@ -119,8 +119,16 @@ def run(
         help=(
             "Mock-mode E2E pilot — no real spawns. Default ON (N3 FS6); "
             "use --real for real-mode (requires ANTHROPIC_API_KEY + claude "
-            "binary, currently raises NotImplementedError until Wave 1a)."
+            "binary)."
         ),
+    ),
+    max_stories: int = typer.Option(
+        50, "--max-stories",
+        help="Hard cap на число story spawns в этом запуске (default 50)",
+    ),
+    max_spend_usd: float = typer.Option(
+        50.0, "--max-spend-usd",
+        help="Soft cap на дневной spend в USD (default 50.0)",
     ),
 ) -> None:
     """Запустить оркестратор на указанной wave."""
@@ -138,9 +146,13 @@ def run(
         # Spawn ourselves detached (§14.4 mode 2).
         args = [sys.executable, "-m", "bmad_orchestrator.cli", "run",
                 "--project", project, "--wave", wave,
-                "--max-parallel", str(max_parallel)]
+                "--max-parallel", str(max_parallel),
+                "--max-stories", str(max_stories),
+                "--max-spend-usd", str(max_spend_usd)]
         if mock:
             args.append("--mock")
+        else:
+            args.append("--real")
         env = dict(os.environ)
         env["ORCHESTRATOR_DAEMON"] = "1"
         proc = subprocess.Popen(  # noqa: S603 — own args, no shell  # nosec
@@ -170,6 +182,7 @@ def run(
             await run_orchestrator(
                 project=project, wave=wave, max_parallel=max_parallel,
                 models=models_cfg, mock=mock,
+                max_stories=max_stories, max_spend_usd=max_spend_usd,
             )
 
         async def _supervised() -> None:
@@ -193,6 +206,7 @@ def run(
         run_orchestrator(
             project=project, wave=wave, max_parallel=max_parallel,
             models=models_cfg, mock=mock,
+            max_stories=max_stories, max_spend_usd=max_spend_usd,
         )
     )
 

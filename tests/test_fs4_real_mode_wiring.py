@@ -3,7 +3,7 @@
 Coverage:
 - B1  build_agent_options shape — ClaudeAgentOptions instantiation succeeds.
 - B1  _validate_sdk_options raises RuntimeError on TypeError (no soft-fail).
-- B1  run_orchestrator(mock=False) raises NotImplementedError (no silent no-op).
+- B1  run_orchestrator(mock=False) dispatches to _run_real_pilot (W1: no longer raises).
 - B10 system_prompt.build_system_prompt — 5 cached blocks, no "TODO" markers.
 - B10 _load_project_context — cap enforced; truncation marker on oversize.
 - B10 RU operational rules + 15 few-shot pairs present.
@@ -105,12 +105,26 @@ def test_validate_sdk_options_raises_runtimeerror_on_unknown_field() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_orchestrator_real_mode_raises_not_implemented() -> None:
-    """FS4 B1: real-mode no-op was silent; now must raise loudly."""
+async def test_run_orchestrator_real_mode_dispatches_to_real_pilot() -> None:
+    """W1: real-mode no longer raises NotImplementedError; dispatches to _run_real_pilot."""
+    from bmad_orchestrator.agent import run as run_mod
     from bmad_orchestrator.agent.run import run_orchestrator
 
-    with pytest.raises(NotImplementedError, match="real mode requires Wave 1a pilot"):
-        await run_orchestrator(project="x", wave="1a", mock=False)
+    captured: dict[str, Any] = {}
+
+    async def _fake_pilot(bus: Any, **kwargs: Any) -> None:
+        captured["called"] = True
+        captured["kwargs"] = kwargs
+
+    with patch.object(run_mod, "_run_real_pilot", new=_fake_pilot):
+        bus = await run_orchestrator(
+            project="x", wave="1a", mock=False,
+            max_stories=7, max_spend_usd=3.5,
+        )
+    assert captured.get("called") is True
+    assert captured["kwargs"]["max_stories"] == 7
+    assert captured["kwargs"]["max_spend_usd"] == 3.5
+    assert bus is not None
 
 
 # ── B10 — system_prompt full impl ────────────────────────────────────────────
@@ -220,28 +234,31 @@ def test_human_query_event_type_exists() -> None:
 
 @pytest.mark.asyncio
 async def test_forward_to_agent_per_chat_fifo_with_corr_id() -> None:
-    """Multiple concurrent requests on same chat — each future resolves by corr_id."""
+    """Multiple concurrent requests on same chat — each future resolves by corr_id (W5: via subscribe_one_correlation)."""
     import asyncio
 
     from bmad_orchestrator.bot import handlers as bot_handlers
-    from bmad_orchestrator.runtime.event_loop import EventLoop
+    from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
 
     bus = EventLoop()
     bot_handlers.attach_event_loop(bus)
     bot_handlers.attach_state_db(None, None)
+    bot_handlers.reset_for_test()
     try:
         async def _collect_and_reply() -> None:
             events = []
             for _ in range(5):
                 ev = await bus.next(timeout=2.0)
                 assert ev is not None
+                assert ev.type == EventType.USER_CHAT_MESSAGE
                 events.append(ev)
             # Reply in reverse order — futures must still resolve correctly.
             for ev in reversed(events):
-                bot_handlers.deliver_human_response(
-                    ev.payload["chat_id"],
-                    ev.payload["corr_id"],
-                    f"reply-{ev.payload['text']}",
+                await bus.emit(
+                    EventType.HUMAN_RESPONSE,
+                    chat_id=ev.payload["chat_id"],
+                    corr_id=ev.payload["corr_id"],
+                    text=f"reply-{ev.payload['text']}",
                 )
 
         collector = asyncio.create_task(_collect_and_reply())
@@ -259,6 +276,7 @@ async def test_forward_to_agent_per_chat_fifo_with_corr_id() -> None:
             assert r == f"reply-msg{i}", f"mismatched corr_id mapping: {results}"
     finally:
         bot_handlers.attach_event_loop(None)
+        bot_handlers.reset_for_test()
 
 
 @pytest.mark.asyncio
