@@ -39,24 +39,6 @@
 
 ### Pending
 
-- **id:** S4
-  **title:** Safety — 3-layer hooks + budget guard + branch isolation
-  **surface:** backend-python
-  **spec_section:** 226-234
-  **depends_on:** [S3]
-  **acceptance:**
-    - safety/hooks.py PreToolUse deny: rm -rf, git push --force, git commit --no-verify, git reset --hard main
-    - safety/budget_guard.py — story alarm $30/halt $50, batch alarm $200/halt $300
-    - safety/branch_isolation.py — worker может писать только в свою feature-ветку в worktree
-    - runtime/liveness.py — liveness-before-kill
-    - audit_event tool wires events в audit log JSONL
-    - Tests: каждый PreToolUse rule reject'ит; budget hard-cap halts mock workflow
-  **safety_gates:**
-    - L1 PreToolUse hooks (full activation), L2 budget hard-cap (full), L3 branch isolation (full)
-  **destructive_actions:** []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S5
   **title:** 12 specialized internal skills (progressive disclosure)
   **surface:** backend-python
@@ -140,25 +122,24 @@
 
 ### Current
 
-- **id:** S3
-  **title:** Core runtime — event loop, DAG planner, worktree, worker spawn (CHECKPOINT)
+- **id:** S4
+  **title:** Safety — 3-layer hooks + budget guard + branch isolation
   **surface:** backend-python
-  **spec_section:** 15-79,106-142
-  **depends_on:** [S2]
+  **spec_section:** 226-234
+  **depends_on:** [S3]
   **acceptance:**
-    - runtime/event_loop.py — 13 event types из §4 + backstop polling 5min
-    - runtime/ratelimit.py — per-worktree token bucket
-    - DAG planner (networkx 3.x) — build_dag, find_ready_stories с shared-files mutex
-    - create_worktree + spawn_worker — claude -p subprocess, Sonnet 4.6 default
-    - JSONL event tail из _bmad-output/runs/<wave>/<story>.events.jsonl
-    - Heartbeat / liveness (psutil)
-    - Mock pilot: 3 fake stories → DAG → ready → worker spawned → JSONL streamed → completed
+    - safety/hooks.py PreToolUse deny: rm -rf, git push --force, git commit --no-verify, git reset --hard main
+    - safety/budget_guard.py — story alarm $30/halt $50, batch alarm $200/halt $300
+    - safety/branch_isolation.py — worker может писать только в свою feature-ветку в worktree
+    - runtime/liveness.py — liveness-before-kill
+    - audit_event tool wires events в audit log JSONL
+    - Tests: каждый PreToolUse rule reject'ит; budget hard-cap halts mock workflow
   **safety_gates:**
-    - L3 branch isolation — worker должен быть в worktree feature-branch
+    - L1 PreToolUse hooks (full activation), L2 budget hard-cap (full), L3 branch isolation (full)
   **destructive_actions:** []
-  **checkpoint:** true
+  **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-16 08:30 UTC
+  **started:** 2026-05-16 10:00 UTC
   **workflow:** .claude/skills/auto-loop-spec/workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
@@ -210,6 +191,35 @@
     - Real git_merge (не только mock-mode) — будет hit от S3 (worker worktrees — реальные git репозитории).
     - LLM-driven story splitting (Phase 2 v1) — пост Wave 1a baseline.
 
+- **id:** S3
+  **title:** Core runtime — event loop, DAG planner, worktree, worker spawn (CHECKPOINT)
+  **completed:** 2026-05-16 10:00 UTC
+  **commit:** 7c18728
+  **files_changed:** 8
+  **tests_passed:**
+    - ruff check src tests — PASS (all checks)
+    - mypy --strict src — PASS (50 source files)
+    - pytest — 68 passed (20 новых S3 + 48 prior)
+  **decisions_made:**
+    - EventLoop держит asyncio.PriorityQueue с monotonic seq counter для FIFO; subscriber callbacks dispatch в порядке регистрации (dict insertion order). 13 event types — StrEnum, ровно как §4 спека.
+    - Backstop polling task (SCHEDULED_WAKEUP каждые 300s default) — отдельная asyncio.Task, запускается explicitly через start_backstop_task() чтобы не race с loop init. stop() её корректно отменяет.
+    - TokenBucket: refill-on-demand model (вычисляем при try_consume по разнице last_refill_ts), не background tick — экономнее CPU. capacity и refill_per_second заданы константами per spec defaults (50000 TPM, 50 RPM).
+    - RateLimiter.acquire() — async loop с asyncio.sleep(min(wait_tpm, wait_rpm)). Per-key buckets создаются lazily.
+    - liveness.safe_to_kill rejects pid_sentinel (0/-1)/self_pid (own PID)/not_alive. Защита от kill orchestrator-процессом самого себя.
+    - DagPlanner — @dataclass(slots=True) c cached state. from_target() ленив: читает sprint-status + stories при первом обращении. find_ready применяет три фильтра: deps_done + status in {ready-for-dev, backlog} + touches_files/shared ∩ in_flight = ∅. reserve/release — set ops.
+    - build_graph raises ValueError на cycle (nx.simple_cycles) — fail-fast вместо silent skip.
+    - worker_spawn — autodetect mock vs real: shutil.which("claude") → None → mock. mock=True/False можно forcer'ить через arg. В mock-mode пишутся synthetic worker_spawned + worker_completed JSONL events; в real-mode subprocess stdout стримится через background asyncio.Task → JSONL append. Tolerance на non-JSON stdout (wrap as stdout_line).
+    - _BACKGROUND_TASKS — module-level set, prevents asyncio orphaning subprocess watchers (RUF006 fix). task.add_done_callback(background_tasks.discard) — auto-cleanup.
+    - tail_jsonl_events — async generator, terminates на worker_completed | worker_halt_file. Полезен в тестах + watchdog real-time observation.
+    - spawn_worker tool: добавлен `real` kwarg (default False) — preserves S2 test contract (assert p2["mock"] is True). real=True делегирует в runtime_spawn_worker (mock=None — auto-detect).
+    - ASYNC109 (`timeout` kwarg) в ruff ignore — это convention asyncio.Queue.get; наши event_loop.next/dispatch_one mirror её intentionally.
+    - Mock pilot E2E test: 2 immediately-ready stories из fixture (1-1, 2-1) недостаточно для 3-story acceptance. Cascade approach — spawn ready, write_sprint_status_yaml(status=done), planner.reload(), repeat. Тест driving DAG через 5 rounds до accumulated ≥3 spawns.
+  **deferred_items:**
+    - Worktree из git worktree add — пока worktree это plain mkdir в spawn tool. Реальный `git worktree add` + branch creation — S8 mock pilot E2E.
+    - PreToolUse hooks для blacklisted commands — S4.
+    - Budget hard-cap enforcement (story $30 alarm/$50 halt) — S4 wires в EventLoop subscriber.
+    - audit_event JSONL endpoint — S4 (теперь worker_spawn пишет events, S4 их аудитит).
+
 ## Safety Gates Triggered
 (none)
 
@@ -227,6 +237,8 @@
 [2026-05-16 01:10 UTC] S1 completed (commit dcaadfb). S2 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration.
 [2026-05-16 08:30 UTC] S2 execution: 34 tools реализованы по §17 (5 state + 3 DAG + 4 spawn + 4 control + 3 merge + 3 memory + 3 retro + 5 operational + 2 splitter + 2 escalate). Mock-mode by default — destructive ops (spawn_worker, signals, git_merge на non-repo) emit intent в JSONL + state.db без реального side-effect. Path-traversal защита в memory tools. Catalog auto-generated через ALL_TOOLS + tool_names()/tool_descriptions(). bmad_orchestrator.agent.tools.* убран из mypy override — полная типизация. ASYNC230/240 в ruff ignore (asyncio + stdlib pathlib).  Все gate'ы green: ruff PASS, mypy --strict PASS (46 files), pytest 48/48 PASS (35 новых S2).
 [2026-05-16 08:30 UTC] S2 completed (commit a1762c0). S3 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration.
+[2026-05-16 10:00 UTC] S3 execution: runtime/event_loop.py (EventLoop с 13 StrEnum event types из §4, asyncio.PriorityQueue FIFO с monotonic seq, subscriber dispatch in registration order, 5-min backstop polling task для SCHEDULED_WAKEUP). runtime/ratelimit.py (TokenBucket refill-on-demand + RateLimiter с per-key TPM+RPM, default 50000/50, async acquire loop). runtime/liveness.py (psutil + os.kill(0) fallback для is_alive; safe_to_kill rejects sentinel/self/dead; stalled-detection через last_event_age на JSONL). runtime/dag_planner.py (DagPlanner @dataclass cached state + build_graph cycle-check + filter_wave + ready_stories с shared-files mutex + detect_conflicts; networkx 3.x). runtime/worker_spawn.py (spawn_worker auto-detect mock/real по shutil.which("claude"); mock=synthetic events, real=asyncio create_subprocess_exec claude -p /bmad-auto-dev + stdout-stream → JSONL background task; _BACKGROUND_TASKS module-level set предотвращает GC orphan; tail_jsonl_events async generator terminates на worker_completed). agent/tools/spawn.py: spawn_worker tool с real=False default (preserves S2 contract), real=True делегирует в runtime_spawn_worker. pyproject.toml: ASYNC109 в ruff ignore (timeout kwarg convention). tests/test_s3_runtime.py: 20 тестов (13-event assertion, FIFO, subscriber dispatch, backstop tick, TokenBucket refill, RateLimiter acquire, liveness sentinel/self/stall, DagPlanner mutex/cycle, worker_spawn mock, tail termination, mock pilot E2E cascade с sprint-status writeback). Gates green: ruff PASS, mypy --strict PASS (50 files), pytest 68/68 PASS.
+[2026-05-16 10:00 UTC] S3 completed (commit 7c18728). S4 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration. CHECKPOINT session — но Auto merge=false, поэтому merge на main выполнит пользователь по завершении инициативы.
 
 ## Final Report
 (empty — last session not yet completed)
