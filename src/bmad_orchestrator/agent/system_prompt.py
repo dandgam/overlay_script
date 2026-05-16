@@ -86,13 +86,15 @@ def _tool_and_skill_metadata() -> str:
 
     Full schemas подгружаются через tool-search-tool-2025-10-19 beta.
     """
+    from bmad_orchestrator.agent.skills import metadata_block
     from bmad_orchestrator.agent.tools import tool_descriptions
 
     descs = tool_descriptions()
     lines = ["# Tool catalog (auto-generated from @tool registry)"]
     for name, desc in descs.items():
         lines.append(f"- **{name}** — {desc}")
-    lines.append("\n# Skill catalog\n_TODO (S5): skill metadata injected here._")
+    lines.append("")
+    lines.append(metadata_block())
     return "\n".join(lines)
 
 
