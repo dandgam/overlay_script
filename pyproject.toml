@@ -103,6 +103,10 @@ ignore = [
     "RUF001", # ambiguous unicode char в string literal
     "RUF002", # ambiguous unicode char в docstring
     "RUF003", # ambiguous unicode char в comment
+    # ASYNC230/240 — assume trio/anyio. Мы на asyncio + stdlib pathlib;
+    # sync FS calls в tool handlers — допустимо (small files, mock state).
+    "ASYNC230",
+    "ASYNC240",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -119,11 +123,11 @@ warn_unused_configs = true
 # Strict mode применяется к нашему коду; внешние API-stub'ы покрыты в S2+.
 ignore_missing_imports = true
 
-# Skeleton-стабы (v0.7), которые S2-S8 переписывают с типизацией.
+# Skeleton-стабы (v0.7), которые S5-S8 переписывают с типизацией.
 # Они импортируют claude_agent_sdk @tool decorator который рождает "untyped" cascade.
+# agent.tools.* удалены из override после S2 — там теперь полная типизация.
 [[tool.mypy.overrides]]
 module = [
-    "bmad_orchestrator.agent.tools.*",
     "bmad_orchestrator.bot.handlers",
     "bmad_orchestrator.bot.voice_handler",
     "bmad_orchestrator.bot.voice_providers",
@@ -137,6 +141,10 @@ disallow_incomplete_defs = false
 disallow_any_generics = false
 warn_return_any = false
 warn_unused_ignores = false
+# Bot scaffold stubs use python-telegram-bot's Update.message which is typed as
+# `Message | None`. Production handlers will narrow it explicitly in S6; for the
+# S1/S2 scaffold we accept the union-attr noise.
+disable_error_code = ["union-attr", "arg-type", "misc", "func-returns-value"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

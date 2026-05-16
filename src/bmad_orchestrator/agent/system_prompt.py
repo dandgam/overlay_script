@@ -82,12 +82,18 @@ def _operational_rules(locale: str) -> str:
 
 
 def _tool_and_skill_metadata() -> str:
-    """Краткий catalog 22 tools + 10 skills (только names + descriptions).
+    """Краткий catalog tools (names + descriptions) + skills.
 
     Full schemas подгружаются через tool-search-tool-2025-10-19 beta.
     """
-    # TODO: auto-generate from @tool registry
-    return "TODO: tool + skill catalog"
+    from bmad_orchestrator.agent.tools import tool_descriptions
+
+    descs = tool_descriptions()
+    lines = ["# Tool catalog (auto-generated from @tool registry)"]
+    for name, desc in descs.items():
+        lines.append(f"- **{name}** — {desc}")
+    lines.append("\n# Skill catalog\n_TODO (S5): skill metadata injected here._")
+    return "\n".join(lines)
 
 
 def _few_shot_examples(locale: str) -> str:

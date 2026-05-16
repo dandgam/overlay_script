@@ -72,7 +72,7 @@ async def voice_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = load_settings().voice
     tmp_dir = Path(cfg.audio_temp_dir)
     # S6: переключить на anyio.Path для строгости; sync mkdir в async — приемлемо для tmp dir.
-    tmp_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     audio_path = tmp_dir / f"voice_{uuid.uuid4().hex}.ogg"
 
     try:
