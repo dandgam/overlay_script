@@ -1168,8 +1168,315 @@ BAD покрывает ~30% нашего spec'а. Полная карта в tas
 
 ---
 
-**End of consolidated spec v0.7** — Источник истины для scaffold'а.
+---
+
+## 22. Session Plan (для /auto-loop-spec-long, добавлено 2026-05-16)
+
+> 8 сессий, surface=`backend-python` для всех (greenfield Python project; ближайший аналог в dispatch table). Все сессии code-only, `destructive_actions: []`. Checkpoints на S3, S6, S8.
+
+### S1 — Foundation & SDK scaffold
+- **surface:** backend-python
+- **spec_section:** lines 270-326 (§11 Stack + §11.1 beta headers + §11.2 cache TTL)
+- **depends_on:** []
+- **destructive_actions:** []
+- **checkpoint:** false
+- **acceptance:**
+  - `pyproject.toml` со всеми deps из §11 (anthropic, claude-agent-sdk, networkx, pydantic v2, pydantic-ai, pyyaml, typer, rich, gitpython, structlog, aiosqlite, psutil, watchdog, python-telegram-bot, jinja2, presidio-analyzer, openai-whisper)
+  - `src/bmad_orchestrator/agent/__init__.py` + `system_prompt.py` с `cache_control={"type":"ephemeral","ttl":"1h"}` явно
+  - `ANTHROPIC_BETA_HEADERS` константа: tool-search-tool-2025-10-19, advanced-tool-use-2025-11-20, context-management-2025-06-27, interleaved-thinking-2025-05-14
+  - `state.db` aiosqlite schema: agent_session, budget_tracker, event_queue
+  - `tests/fixtures/` с mock projects + mock stories
+  - `ruff check`, `mypy --strict`, `pytest` PASS
+
+### S2 — Tools layer (24 tools, 9 categories, defer_loading)
+- **surface:** backend-python
+- **spec_section:** lines 643-712 (§17 Operational Tools Catalog)
+- **depends_on:** [S1]
+- **destructive_actions:** []
+- **checkpoint:** false
+- **acceptance:**
+  - 24 tools реализованы: state(5), DAG(3), spawn(4), control(4), merge(3), memory+retro(4), operational(4), splitting(2), escalate(2)... wait это 31 — re-count: 5+3+4+4+3+4+4+2+2 = **31**. Note: §17 утверждает 22, но фактически перечислено больше; уточнить в S2 review.
+  - **Все** с `defer_loading=True` (anti-pattern #1 mitigation, §18.3)
+  - Pydantic v2 schemas для inputs/outputs каждого tool
+  - Mock implementations: DB writes к state.db, file I/O к tests/fixtures/
+  - Tool Search Tool integration (beta header `tool-search-tool-2025-10-19`)
+  - Unit tests на каждый tool (mock-mode invocations PASS)
+
+### S3 — Core runtime: event loop + DAG + worker spawn (CHECKPOINT)
+- **surface:** backend-python
+- **spec_section:** lines 15-79 (§2 Architecture), 106-127 (§4 events), 130-142 (§5 state)
+- **depends_on:** [S2]
+- **destructive_actions:** []
+- **checkpoint:** true
+- **acceptance:**
+  - `runtime/event_loop.py` — event-driven wakeup (13 event types из §4), backstop polling 5min
+  - `runtime/ratelimit.py` — per-worktree token bucket (Anthropic ratelimit)
+  - DAG planner (networkx 3.x) — `build_dag`, `find_ready_stories` с shared-files mutex
+  - `create_worktree` + `spawn_worker` — `claude -p` subprocess, Sonnet 4.6 default
+  - JSONL event tail: `_bmad-output/runs/<wave>/<story>.events.jsonl`
+  - Heartbeat / liveness check через psutil
+  - Mock pilot: на 3 fake stories DAG → ready set → worker spawned → JSONL streamed → completed
+  - **Checkpoint review:** прежде чем S4 — human reviews integration branch
+
+### S4 — Safety: 3-layer + budget + branch isolation
+- **surface:** backend-python
+- **spec_section:** lines 226-234 (§9 Safety), 206-222 (§8 Budget)
+- **depends_on:** [S3]
+- **destructive_actions:** []
+- **checkpoint:** false
+- **acceptance:**
+  - `safety/hooks.py` PreToolUse deny: `rm -rf`, `git push --force`, `git commit --no-verify`, `git reset --hard main`
+  - `safety/budget_guard.py` — story alarm $30/halt $50, batch alarm $200/halt $300; tracks `usage.input_tokens + cache_read + output × price`
+  - `safety/branch_isolation.py` — worker может писать только в свою feature-ветку в worktree
+  - `runtime/liveness.py` — liveness-before-kill (psutil)
+  - Tests: каждый PreToolUse rule reject'ит запрещённую команду; budget hard-cap halts mock workflow на $50/$300
+  - `audit_event` tool wires events в audit log JSONL
+
+### S5 — 12 specialized internal skills (progressive disclosure)
+- **surface:** backend-python
+- **spec_section:** lines 844-993 (§19 Specialized Internal Skills + §19.1 dispatch + §19.2 placement + §19.3 reflexion loop)
+- **depends_on:** [S4]
+- **destructive_actions:** []
+- **checkpoint:** false
+- **acceptance:**
+  - 12 skills × `src/bmad_orchestrator/agent/skills/<name>/SKILL.md` с frontmatter (name, description, when-activates)
+  - Names: dag-planner, worker-dispatcher, merge-gate, elicitation-router, retrospective-writer, intent-router, cost-watchdog, failure-analyst, reflexion-learner, wave-coordinator, proactive-improver, story-splitter
+  - Three-level disclosure: metadata (~100 tokens always-loaded) / body (loaded on dispatch) / references (on-demand)
+  - Skill dispatcher logic — выбор skill по event type
+  - Reflexion loop в `reflexion-learner` (Actor / Evaluator / Self-Reflection per §19.3)
+  - Tests: skill metadata loads <1.5K tokens total; full body loads только при match
+
+### S6 — Telegram bot + voice (Whisper) + PII (Presidio) (CHECKPOINT)
+- **surface:** backend-python
+- **spec_section:** lines 404-588 (§15 Telegram bot + §15.1-15.8 voice + PII)
+- **depends_on:** [S5]
+- **destructive_actions:** []
+- **checkpoint:** true
+- **acceptance:**
+  - `bot/main.py` — python-telegram-bot v22+, async, ConversationHandler + CallbackQueryHandler
+  - chat_id whitelist (env var `TELEGRAM_ALLOWED_CHAT_IDS`), deny остальные
+  - Slash commands: /start, /help, /status, /stop, /model, /budget, /projects, /cancel
+  - Inline buttons для destructive ops (graceful/hard kill, confirm/cancel)
+  - `bot/voice_handler.py` — .ogg download → STT → text routing
+  - `bot/voice_providers.py` — STTProvider ABC + 5 concrete (WhisperLocal default, WhisperAPI, ClaudeAudio, YandexSpeechKit, GoogleSTT) + factory
+  - `bot/pii_detector.py` — Presidio + spaCy `ru_core_news_lg` + custom RU patterns (паспорт, СНИЛС, ИНН)
+  - PII redaction: input check + output scrubbing; safelist для technical IDs
+  - `audit/telegram.jsonl` append-only (original + redacted)
+  - Smoke test: bot stub отвечает на `/start`, voice stub транскрибирует sample .ogg, PII tests на 20-30 RU sample-фразах PASS
+  - **Checkpoint review:** human reviews integration branch перед S7
+
+### S7 — Memory + Retrospective + 9 mandatory retros
+- **surface:** backend-python
+- **spec_section:** lines 145-189 (§6 Learning + §6.1 mandatory retros + §6 артефакты)
+- **depends_on:** [S6]
+- **destructive_actions:** []
+- **checkpoint:** false
+- **acceptance:**
+  - 3 уровня learning: per-story (`<wave>/<story>.lesson.md`), per-wave (`<wave>/wave-lessons.md`), per-phase (`memory/architectural-patterns.md`)
+  - Anthropic Memory Tool integration (beta `context-management-2025-06-27`)
+  - `read_memory`, `write_memory`, `compress_wave_lessons` tools wired
+  - `spawn_retro_worktree(wave)` — fresh `claude -p` subprocess
+  - 9 mandatory retros: Wave 0a/0b/1a/1b/1c/1d (×6) + Epic 1 deep + Epic 7 deep + Phase 5 final
+  - Hard gates: agent физически не может перейти к next wave если retro не сделан (`wave_coordinator` skill)
+  - `proactive-improver` skill вызывается после каждого retro с inline-button suggestions в Telegram
+  - Mock test: write per-story lesson → wave boundary → spawn_retro produces retrospective.md → memory roll-up
+
+### S8 — CLI + TUI dashboard + E2E mock pilot (CHECKPOINT)
+- **surface:** backend-python
+- **spec_section:** lines 359-402 (§14 UX & Operator Interface), 591-642 (§16 Model Selection)
+- **depends_on:** [S7]
+- **destructive_actions:** []
+- **checkpoint:** true
+- **acceptance:**
+  - `cli/main.py` — typer commands: `run`, `status`, `stop`, `model`, `budget` per §14.1
+  - TUI dashboard `cli/tui.py` — rich.Live, refresh 2s, panels (workers/budget/events/eta) per §14.2
+  - Russian primary localization (русские tooltips, error messages, status labels) per §14.3
+  - 3 launch modes: foreground tmux, systemd unit, detached daemon per §14.4
+  - Model selection (CLI + Telegram + per-role config) per §16
+  - `_config/orchestrator-models.yaml` per-role defaults persistence
+  - **E2E mock pilot:** `bmad-orchestrator run --project mock-odyssey --wave 1a --max-parallel 2` runs to completion в mock-mode без падений
+  - All previous tests still PASS (regression matrix)
+  - **Final checkpoint:** ready for real pilot run на Wave 1a после `_bmad-output/` artifacts появятся в Odyssey
+
+### Out of scope (defer to v1)
+- Реальный run на Odyssey Wave 1a (требует Wave 0b complete)
+- TTS (voice output)
+- LLM-driven story splitting (только heuristic в MVP)
+- Multi-project queue
+- Self-modifying skill patches
+
+---
+
+## 22.7 Sandbox layer (FS7, round 3 — 2026-05-16)
+
+**Primary safety для worker subprocess** = OS-level isolation через `bwrap`
+(Bubblewrap). Заменил pattern-based `_scan_bash` как primary safety floor
+после того как 3 round'а fix-loop'ов произвели по 5-6 новых P0 bash-bypass'ов
+каждый (NC1 `bash <<<`, NC2 `(rm -rf x)`, NC3 brace expansion, NC4 xargs,
+NC5 pipe-to-interpreter…). Blacklist на bash text фундаментально неисчерпаем.
+
+### Архитектура
+
+`src/bmad_orchestrator/runtime/sandbox.py`:
+
+| Класс | Назначение |
+|---|---|
+| `Sandbox` (Protocol) | Backend-агностичный интерфейс: `wrap_command(cmd, *, worktree, readonly_paths, network, env) → list[str]` |
+| `BwrapSandbox` | `bwrap`-backed impl. Default policy ниже |
+| `NoSandbox` | Fallback. Возвращает `cmd` без изменений + loud audit warning |
+| `detect_sandbox()` | Factory: `BMAD_SANDBOX` env override → `shutil.which("bwrap")` → fallback |
+
+### Default bwrap policy
+
+```text
+prlimit --nproc=512 --as=8GB --fsize=10GB --nofile=4096 -- \  # FS9 H3+H4 rlimits
+  bwrap \
+    --die-with-parent --new-session \
+    --ro-bind / / \            # entire host FS read-only
+    --proc /proc --dev /dev \  # minimal proc/dev
+    --tmpfs /tmp \             # fresh empty /tmp per worker
+    --tmpfs /sys \             # FS9 H1 — hide kernel info (LSM, dmi, network)
+    --bind {worktree} {worktree} --chdir {worktree} \  # writable: worktree only
+    --unshare-pid --unshare-uts --unshare-ipc --unshare-cgroup-try \
+    --unshare-net \            # network="none" (default) — drops netns
+    --clearenv \               # NO host env inheritance
+    --setenv K V ...           # only allow-listed env vars forwarded
+```
+
+Allow-list для `--setenv`: `PATH HOME USER LANG LC_ALL TZ PWD SHELL TERM` +
+caller-supplied (e.g. `ORCHESTRATOR_WORKER_STORY_ID`). Никаких
+`ANTHROPIC_API_KEY` / `TELEGRAM_*` / `*_TOKEN` — physically не наследуются.
+
+### Wiring points
+
+- `runtime/worker_spawn.py::spawn_worker(use_sandbox=True, sandbox_network="none")` — wraps `claude -p /bmad-auto-dev`. Default network policy `"none"` since FS9 H2 (was `"github_only"` ≡ silently `"full"` because nftables whitelist deferred); pilot caller must pass `sandbox_network="full"` explicitly if git clone needed. Audit event записывает `sandbox_used` + `sandbox_kind`.
+- `agent/tools/retro.py::spawn_retro_worktree` — wraps `claude -p /bmad-retrospective`. Default `network="none"` (retro работает с локальными артефактами).
+
+### Network policy
+
+- `"none"` (default) — `--unshare-net`. Worker полностью без сети.
+- `"full"` — share host netns. Используется когда worker должен делать `git clone` / `pip install`.
+- `"github_only"` — currently treated as `"full"`. nftables-based whitelist (только GitHub + Anthropic endpoints) — **deferred** к v1.
+
+### `_scan_bash` роль после FS7
+
+`agent/safety/hooks.py::_scan_bash` — **defence-in-depth**, не primary:
+
+- Catch'ит known patterns (rm -rf, git push --force, subshells, `git -c core.hooksPath=...`, etc).
+- Audit severity = `info` если sandbox активен (вместо `warning`).
+- Новые bash bypass'ы НЕ добавлять сюда unless они также bypass'ят sandbox.
+- Если bypass'ит sandbox — fix в `runtime/sandbox.py`, не в scanner.
+
+### Fallback behaviour
+
+Если `bwrap` отсутствует:
+
+1. `log.error()` warning.
+2. Audit event `sandbox_unavailable` с `severity="warning"`.
+3. `NoSandbox` возвращается → worker запускается без OS-level изоляции.
+4. `_scan_bash` остаётся как только slabый барьер.
+5. Prod deployment должен иметь `bubblewrap` package установлен (`apt install bubblewrap`).
+
+### Override
+
+`BMAD_SANDBOX=none` — force disable (для CI без bwrap или для отладки). С FS9 H6
+требует двухключевого подтверждения: одновременно с `BMAD_SANDBOX=none` должен
+быть установлен `BMAD_SANDBOX_DISABLE_CONFIRMED=yes-i-accept-risk`. Иначе
+`detect_sandbox()` raises `RuntimeError`. Защищает от случайного отключения
+sandbox через unset/typo в systemd drop-in или child-process env.
+
+`BMAD_SANDBOX=bwrap` — force bwrap (fails-soft к NoSandbox если binary missing + audit).
+
+### Sandbox configuration defaults (FS9 — 2026-05-16)
+
+После FS9 round 4 защита sandbox многослойна, и поведение каждого слоя
+конфигурируется env vars. Default policy безопасна сама по себе; production
+launcher должен дополнительно вынуждать строгий режим через `BMAD_REQUIRE_*`
+env vars.
+
+#### Env vars
+
+| Env var | Default | Behaviour |
+|---|---|---|
+| `BMAD_SANDBOX` | _(unset)_ | `bwrap` if available, else NoSandbox+audit. Override: `bwrap` (force), `none` (disable, requires confirmation token). |
+| `BMAD_SANDBOX_DISABLE_CONFIRMED` | _(unset)_ | Must equal `yes-i-accept-risk` to actually enact `BMAD_SANDBOX=none`. Two-key confirmation guard. |
+| `BMAD_REQUIRE_SANDBOX` | _(unset)_ | `1`/`true`/`yes` → `detect_sandbox()` raises `RuntimeError` if resolved backend is not a real sandbox (i.e. NoSandbox). **Production REQUIRED**. |
+| `BMAD_SANDBOX_MAX_NPROC` | `512` | prlimit `--nproc=` cap (fork-bomb defence). Positive int. |
+| `BMAD_SANDBOX_MAX_AS_BYTES` | `8589934592` (8 GiB) | prlimit `--as=` cap (virtual memory). Positive int (bytes). |
+| `BMAD_SANDBOX_MAX_FSIZE_BYTES` | `10737418240` (10 GiB) | prlimit `--fsize=` cap (max single-file size). Positive int (bytes). |
+| `BMAD_SANDBOX_MAX_NOFILE` | `4096` | prlimit `--nofile=` cap (max open fds). Positive int. |
+| `BMAD_REQUIRE_DB_BRIDGE` | _(unset)_ | `1`/`true`/`yes` → bot `_attach_bridge()` raises `RuntimeError` on DB failure (no silent stub-mode fallback). **Production REQUIRED**. |
+
+#### Production launcher recommendations
+
+Systemd unit / launcher script для orchestrator + bot MUST set:
+
+```ini
+[Service]
+Environment="BMAD_REQUIRE_SANDBOX=1"
+Environment="BMAD_REQUIRE_DB_BRIDGE=1"
+# rlimits — only override if profiling shows defaults too tight
+# Environment="BMAD_SANDBOX_MAX_NPROC=512"
+# Environment="BMAD_SANDBOX_MAX_AS_BYTES=8589934592"
+```
+
+Pre-deployment checklist:
+
+- [ ] `apt install bubblewrap util-linux` (`bwrap` + `prlimit`).
+- [ ] `BMAD_REQUIRE_SANDBOX=1` in launcher env.
+- [ ] `BMAD_REQUIRE_DB_BRIDGE=1` in launcher env.
+- [ ] `BMAD_SANDBOX_DISABLE_CONFIRMED` NOT set anywhere unless deliberately disabling.
+- [ ] StateDB initialised + writable from both orchestrator and bot UIDs (shared session id propagation requires it).
+
+#### Threat model addendum (read isolation)
+
+Sandbox = **WRITE isolation**, не read isolation. Host FS читается worker'ом
+полностью через `--ro-bind / /`. Это by design: worker'у нужно читать
+codebase, configs, planning artefacts, BMad memory. Перед pilot run:
+
+- Strip host of mode-0644 secrets in worker-readable locations (`.env`, API
+  keys, SSH host keys not behind mode-0600).
+- Worker сам shielded от leaks через `--clearenv` + setenv allow-list — он
+  не унаследует `ANTHROPIC_API_KEY` / `TELEGRAM_*` host env vars.
+- Read-leak через `--ro-bind / /` остаётся как known architectural decision;
+  workaround would require explicit mount allow-list (deferred as W1).
+
+#### Resource limits rationale
+
+bwrap не имеет native rlimit flags. Без prlimit wrapper'а worker может:
+
+- Fork-bomb host (no `RLIMIT_NPROC` from sandbox).
+- Allocate untracked memory (no `RLIMIT_AS`).
+- Заполнить tmpfs (no `RLIMIT_FSIZE`, и `/tmp` tmpfs default ≈ 50% RAM на typical Linux).
+- Exhaust fd table (no `RLIMIT_NOFILE`).
+
+`prlimit(1)` устанавливает rlimits через `setrlimit()` перед `execve()`,
+flags наследуются всем процесс-tree (bwrap → bash → child commands).
+Defaults подобраны консервативно: 512 nproc (фактически не лимитирует
+legitimate worker, blocks fork bomb); 8 GiB AS / 10 GiB fsize / 4096 nofile —
+generous для legit workload, hard cap на runaway.
+
+### Limitations / deferred (FS7-A..FS7-E fast-follows)
+
+- `.env`-style files в `/home/...` visible read-only через `--ro-bind /`. Sandbox защищает от **write** outside worktree, но не от **read** — secret hygiene должен обеспечиваться tooling'ом (FS1 secret scrubbing audit log).
+- nftables whitelist для `network="github_only"` — deferred.
+- Seccomp filter для дополнительной syscall restriction — deferred.
+- Multi-process orchestrator (несколько orchestrator daemon'ов на одной DB) — out of scope.
+
+### Tests
+
+`tests/test_fs7_sandbox.py` — 32 теста:
+- Abstraction unit tests (Protocol, wrap_command flags, validation).
+- Factory tests (detect_sandbox priority, audit emission on fallback).
+- Real-bwrap PoC tests (skip-if-no-bwrap): worker не пишет в /etc, пишет в worktree, network unreachable, NC1/NC2/NC4 bypass'ы blocked на FS уровне, env isolation verified.
+
+---
+
+**End of consolidated spec v0.10** — Источник истины для scaffold'а.
 **Changelog:**
+- **v0.10 (2026-05-16, FS9):** §22.7 + Sandbox configuration defaults subsection — H2 sandbox_network default `none`; H3+H4 prlimit rlimits wrapper (nproc=512, AS=8GB, fsize=10GB, nofile=4096) overridable via `BMAD_SANDBOX_MAX_*`; H5 `BMAD_REQUIRE_SANDBOX=1` hard-fail; H6 `BMAD_SANDBOX=none` requires `BMAD_SANDBOX_DISABLE_CONFIRMED=yes-i-accept-risk`; H1 `--tmpfs /sys` kernel info hide; H8 stale `BMAD_ORCHESTRATOR_SESSION_ID` cleanup; H9 `BMAD_REQUIRE_DB_BRIDGE=1` for bot. +18 tests, all 602 PASS. Production launcher MUST set `BMAD_REQUIRE_SANDBOX=1` + `BMAD_REQUIRE_DB_BRIDGE=1`.
+- **v0.9 (2026-05-16, FS7):** §22.7 Sandbox layer — `runtime/sandbox.py` (bwrap-backed) primary safety для worker subprocess. `_scan_bash` demoted до defence-in-depth. 32 new sandbox tests, all 573 PASS.
+- **v0.8 (2026-05-16):** §22 Session Plan — 8 сессий для /auto-loop-spec-long bootstrap.
 - **v0.7 (2026-05-16):** §21 Story Splitting (Stage 3.6 pre-split check) — +40pp first-try PASS, 2-4× wall-clock. §15.8 Voice control через Whisper local. §3 capabilities 14→16. §19 12-й skill `story-splitter`. §4 events `+voice_message_received`, `+story_split_triggered`. Pipeline 11→12 stages. §11 stack +openai-whisper. §10 MVP scope IN: voice + splitting heuristic. §17 +2 tools (`check_should_split`, `split_story`).
 - **v0.6 (2026-05-16):** §19 11-й skill `proactive-improver` (closes gap «накапливает знания но не предлагает применять»). §4 event `monthly_review_scheduled`. §6.1 mandatory proactive push после каждого retro.
 - **v0.5 (2026-05-15):** §20 Related Work (BAD comparison + cherry-picks). Path fix `_bmad/` → `_bmad-output/` (BMad-canonical). Story ID slug format `1-2-tenant-signup`. StoryStatus 5-state enum. MAX_PARALLEL=3. Pipeline 9→11 stages (ATDD + test-review).

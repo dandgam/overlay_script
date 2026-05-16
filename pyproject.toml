@@ -96,18 +96,49 @@ select = [
     "ASYNC", # async checks
 ]
 ignore = [
-    "E501", # line too long — managed by formatter
-    "S101", # assert in tests — fine
+    "E501",   # line too long — managed by formatter
+    "S101",   # assert in tests — fine
+    # Russian prose в docstring/комментариях — design constraint (CLAUDE.md).
+    # Identifiers и code-strings остаются ASCII; ruff false-positive на Кириллицу.
+    "RUF001", # ambiguous unicode char в string literal
+    "RUF002", # ambiguous unicode char в docstring
+    "RUF003", # ambiguous unicode char в comment
+    # ASYNC230/240 — assume trio/anyio. Мы на asyncio + stdlib pathlib;
+    # sync FS calls в tool handlers — допустимо (small files, mock state).
+    "ASYNC230",
+    "ASYNC240",
+    # ASYNC109 — `timeout` kwarg is the asyncio.Queue.get convention;
+    # event_loop.next/dispatch_one mirror it intentionally.
+    "ASYNC109",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "B"]
+# imports/from_bad/** — staging area для копий из другого проекта; refactor в S2-S8.
+"src/bmad_orchestrator/imports/from_bad/**" = ["S", "UP042", "B"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+# Optional runtime deps — установятся в CI, локально могут отсутствовать.
+# Strict mode применяется к нашему коду; внешние API-stub'ы покрыты в S2+.
+ignore_missing_imports = true
+
+# Skeleton-стабы, которые поздние сессии переписывают с типизацией.
+# bot.* удалён из override после S6, cli.* удалён после S8.
+[[tool.mypy.overrides]]
+module = [
+    "bmad_orchestrator.imports.from_bad.*",
+]
+disallow_untyped_decorators = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_any_generics = false
+warn_return_any = false
+warn_unused_ignores = false
+disable_error_code = ["union-attr", "arg-type", "misc", "func-returns-value"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

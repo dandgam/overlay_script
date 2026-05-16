@@ -40,3 +40,14 @@ confirm:
   cancel: "Cancel"
   approve: "✓ Confirm"
   reject: "✗ Reject"
+
+agent:
+  idle: "waiting for events"
+  pause_requested: "pause requested — letting current workers finish"
+  resume_requested: "resuming"
+  stopping: "stopping"
+  starting: "starting on wave {wave}"
+
+cli:
+  no_logs: "no JSONL logs for worker {worker}"
+  no_retro: "no retrospective for wave {wave}"

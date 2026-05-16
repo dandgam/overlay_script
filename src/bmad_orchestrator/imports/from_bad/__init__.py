@@ -14,8 +14,8 @@ Attribution: Marie Stephen Leo (sole author)
 
 __all__ = [
     "activity_hook",
-    "gh_client",
-    "watchdog_fsm",
-    "merge_gate_prompt",
     "dag_planner_prompt",
+    "gh_client",
+    "merge_gate_prompt",
+    "watchdog_fsm",
 ]

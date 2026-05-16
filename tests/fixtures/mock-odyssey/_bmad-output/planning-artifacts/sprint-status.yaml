@@ -1,0 +1,16 @@
+# sprint-status — mock-odyssey (BMad-canonical v6.6.0 schema)
+wave: "1a"
+status: in-progress
+epics:
+  "1":
+    status: in-progress
+    stories:
+      "1-1-tenant-signup":     ready-for-dev
+      "1-2-tenant-activate":   backlog
+      "1-3-tenant-disable":    backlog
+  "2":
+    status: backlog
+    stories:
+      "2-1-stripe-webhook":    backlog
+retro:
+  wave_1a: optional
