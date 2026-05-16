@@ -39,29 +39,6 @@
 
 ### Pending
 
-- **id:** FS3
-  **title:** Budget aggregator + atomic concurrency + retro overwrite protection + subprocess timeouts
-  **surface:** backend-python
-  **spec_section:** 285-380
-  **depends_on:** [FS2]
-  **acceptance:**
-    - runtime/budget.py: TokenUsage dataclass + MODEL_PRICING_USD_PER_MTOK (Opus 4.7, Sonnet 4.6, Haiku 4.5) + usd_cost(Decimal) + NaN/inf/negative guard
-    - state/db.py::upsert_budget: additive (SET spent_usd = budget_tracker.spent_usd + excluded.spent_usd); BEGIN IMMEDIATE transaction
-    - BudgetGuard.enforce_*: transactional read+update в одной BEGIN IMMEDIATE
-    - BudgetGuard.enforce_day(spent_today_usd, daily_limit_usd) — новый метод, wired в orchestrator main loop
-    - NaN/inf/negative spent_usd → halt + audit critical
-    - memory/levels.py record_*_lesson: exclusive create (open("x")); refuse overwrite; append_retro_artifact для legit append с timestamp suffix
-    - memory/gates.py can_promote_wave: content schema check (frontmatter required, min 200 chars)
-    - все await proc.communicate() в tools/merge.py, state.py, retro.py, runtime/worker_spawn.py через asyncio.wait_for(timeout=300); proc.kill() + audit on timeout
-    - state/db.py claim_next_event: atomic UPDATE ... RETURNING (или BEGIN IMMEDIATE + SELECT + UPDATE)
-    - tests/test_fs3_budget_concurrency.py 20+ tests: concurrent gather → exactly one passes; additive upsert; inf → halt; retro overwrite → FileExistsError; subprocess timeout → fire 300s
-  **safety_gates:**
-    - L2 budget hard-cap (race-free)
-    - L2 retro hard gate (content-validated, not size-based)
-  **destructive_actions:** []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** FS4
   **title:** Real-mode SDK wiring + system_prompt impl + defer_loading + bot cross-process bridge (CHECKPOINT)
   **surface:** backend-python
@@ -89,29 +66,42 @@
 
 ### Current
 
-- **id:** FS2
-  **title:** Safety hooks hardening (shlex parse) + merge gate wiring + main-merge signed token + callback whitelist (CHECKPOINT)
+- **id:** FS3
+  **title:** Budget aggregator + atomic concurrency + retro overwrite protection + subprocess timeouts
   **surface:** backend-python
-  **spec_section:** 185-280
-  **depends_on:** [FS1]
+  **spec_section:** 285-380
+  **depends_on:** [FS2]
+  **started:** 2026-05-16 17:55 UTC
+  **workflow:** workflows/backend-python.md (adapted — stdlib edits, no new gateway)
   **acceptance:**
-    - _scan_filesystem_write: relative paths resolve против cwd/worktree; wire validate_worker_write_path
-    - _scan_bash: shlex.split + canonical flag parser + split составных команд (;/&&/||/|)
-    - Deny matrix: rm -r+-f (вкл. долгие флаги), git push -f/+refspec, git commit --no-verify (вкл. -n combined + env GIT_COMMIT_NO_VERIFY=*), git reset --hard на protected, $(...)/backticks/bash -c/eval/exec/source, git merge → main/master
-    - git_merge tool: вызвать validate_merge_target; refuse target=main без signed token
-    - BMAD_ALLOW_MAIN_MERGE → one-shot signed token .claude/main-merge-token.json (TTL 300s + used flag)
-    - bot callback whitelist {stop:, proposal:, merge:, confirm:, cancel:}; unknown → ignored
-    - tests/test_fs2_safety_hardening.py 30+ PoC bypass tests PASS (all → deny)
+    - runtime/budget.py: TokenUsage dataclass + MODEL_PRICING_USD_PER_MTOK (Opus 4.7, Sonnet 4.6, Haiku 4.5) + usd_cost(Decimal) + NaN/inf/negative guard
+    - state/db.py::upsert_budget: additive (SET spent_usd = budget_tracker.spent_usd + excluded.spent_usd); BEGIN IMMEDIATE transaction
+    - BudgetGuard.enforce_*: transactional read+update в одной BEGIN IMMEDIATE
+    - BudgetGuard.enforce_day(spent_today_usd, daily_limit_usd) — новый метод, wired в orchestrator main loop
+    - NaN/inf/negative spent_usd → halt + audit critical
+    - memory/levels.py record_*_lesson: exclusive create (open("x")); refuse overwrite; append_retro_artifact для legit append с timestamp suffix
+    - memory/gates.py can_promote_wave: content schema check (frontmatter required, min 200 chars)
+    - все await proc.communicate() в tools/merge.py, state.py, retro.py, runtime/worker_spawn.py через asyncio.wait_for(timeout=300); proc.kill() + audit on timeout
+    - state/db.py claim_next_event: atomic UPDATE ... RETURNING (или BEGIN IMMEDIATE + SELECT + UPDATE)
+    - tests/test_fs3_budget_concurrency.py 20+ tests: concurrent gather → exactly one passes; additive upsert; inf → halt; retro overwrite → FileExistsError; subprocess timeout → fire 300s
   **safety_gates:**
-    - L1 hardened PreToolUse (token-based, not substring) — full activation
-    - L3 branch isolation wired into git_merge tool
+    - L2 budget hard-cap (race-free)
+    - L2 retro hard gate (content-validated, not size-based)
   **destructive_actions:** []
-  **checkpoint:** true
+  **checkpoint:** false
   **estimated_retries_allowed:** 3
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** FS2
+  **completed:** 2026-05-16 17:55 UTC
+  **commit:** 4df0e96
+  **files_changed:** 8 (+1201 -81)
+  **tests:** 91 new (test_fs2_safety_hardening.py) + updates to test_s2_tools.py & test_s4_safety.py — 366 total PASS, 0 fail
+  **closed_blockers:** B2, B3, B4, C5, M3, M8
+  **summary:** Safety hooks hardening. _scan_bash перепиcан с shlex.shlex(punctuation_chars=";&|") + canonical flag parser (combined shorts -rfu → -r -f -u, long=value normalize). Sub-command split на ;/&&/|||| + strip env-prefix + strip sudo wrapper + skip git global flags (-c/-C/--git-dir=/--namespace=/--exec-path=/--config-env=). Deny matrix: rm -rf (вкл. --recursive=true), git push -f/+refspec/HEAD:main, git commit --no-verify (вкл. -nm + env GIT_*_NO_VERIFY=*), git reset --hard, git clean -f, subshell vectors ($(...), backticks, ${...}, <(...), bash -c, eval, exec, source). _scan_filesystem_write: removed relative-path early-return; resolves против tool_input.cwd → BMAD_WORKER_WORKTREE env; missing → deny cwd_unknown; wires validate_worker_write_path. BMAD_ALLOW_MAIN_MERGE env заменён на one-shot signed token .claude/main-merge-token.json (secrets.token_urlsafe(32) + compare_digest + TTL 300s + used flag + 0o600). Hook делает read-only has_active_token, tool burns token через consume_token. git_merge tool refuses target=main без signed_token; non-main targets через validate_merge_target. Bot callback whitelist {stop:, proposal:, merge:, confirm:, cancel:}; unknown prefix → log + audit drop.
 
 - **id:** FS1
   **completed:** 2026-05-16 17:05 UTC
@@ -147,6 +137,18 @@
   **rationale:** Spec wording позволял regex backtrack: ` /var/lib/foo@host.com` → backtracks to ` /var/lib`, post-match position has `/` next, `[^/]*` matches empty, `@` ≠ `/` → lookahead succeeds → PATH_LIKE matches → EMAIL detection inside the path span gets suppressed by safelist mask. Start-of-pattern `(?!\S*@)` rejects the entire token whenever `@` exists later in the same non-whitespace sequence.
   **impact:** EMAIL detection no longer suppressed by email-bearing path tokens. Pure paths (`/var/lib/foo`) still match.
 
+- **date:** 2026-05-16 17:55 UTC
+  **session:** FS2
+  **decision:** Заменить `BMAD_ALLOW_MAIN_MERGE` env-флаг на one-shot signed token в файле `.claude/main-merge-token.json` (TTL 300s + used flag + 0o600).
+  **rationale:** Env vars наследуются дочерними процессами, persist через session, видны через `/proc/PID/environ`. Signed token: (1) exclusive create + chmod 0o600 — viewable только owner; (2) TTL 300s — auto-expire даже если оператор забыл revoke; (3) used=true flag — single-use semantics, никакой replay даже внутри TTL; (4) secrets.compare_digest — constant-time compare закрывает timing leaks; (5) revoke_token() удаляет файл атомарно. Совместимо с `Auto merge: false` (operator явно генерит token перед manual merge).
+  **impact:** Любой merge в main теперь требует генерации валидного токена перед operation. Hook делает read-only `has_active_token()` проверку (чтобы allow всю последовательность `git checkout main && git merge --no-ff ...`); сам `git_merge` tool сжигает токен через `consume_token()` на финальном merge step. Token-path можно переопределить через `BMAD_MAIN_MERGE_TOKEN_PATH` env (тесты).
+
+- **date:** 2026-05-16 17:55 UTC
+  **session:** FS2
+  **decision:** Subshell vectors (`$(...)`, backticks, `${...}`, `<(...)`) проверяются substring-scan'ом по raw command string ДО shlex tokenize.
+  **rationale:** shlex с posix=True снимает quotes — `echo "$(rm -rf /)"` после tokenize становится `echo $(rm -rf /)`. Но bash расширяет command substitution внутри double quotes — поэтому даже quoted `$(...)` опасен. Substring-scan по сырой строке ловит ВСЕ варианты включая literal-string кейсы где quoting "защитил" бы expansion. False positives возможны (echo с literal `$(` в single quotes), но conservative deny приемлемее для PreToolUse.
+  **impact:** Любая команда содержащая `$(`, ```, `${`, `<(` сразу denied с pattern_id `subshell_*`, regardless of quoting context. Известный side-effect: blocks legitimate `printf '$(date)'` — но такие cases должны идти через ad-hoc operator override (generate-token-style mechanism в будущем).
+
 ## Journal
 
 [2026-05-16 04:30 UTC] bootstrap: manual создание tracker + integration/orchestrator_agent_security_fixes FROM integration/orchestrator_agent + backup/orchestrator_agent_security_fixes-pre-2026-05-16. 4 fix-сессии запланировано (все surface=backend-python). Runtime=loop_wrapper, Delay=600s, Auto merge=false. Spec: spec/spec_orchestrator_agent_security_fixes.md v0.1.
@@ -156,6 +158,10 @@
 [2026-05-16 17:05 UTC] FS1 completed (commit 5d2bef9): B6/B7/B8/H5/M10/H13 closed. 28 new tests + 247 prior → 275 PASS. Ruff clean. 9 files changed (+554 -51). Side-effect: fixed pre-existing circular import (agent.safety.audit ↔ agent.tools._common) via lazy import — added to Decisions Log. Auto merge=false → no main merge. Runtime=loop_wrapper → exit cleanly, wrapper handles next iteration.
 
 [2026-05-16 17:05 UTC] FS2 promoted to Current — workflow=backend-python. Targets: agent/safety/hooks.py (shlex/token parse), agent/tools/merge.py + branch_validator.py (signed-token main-merge gate), bot/handlers.py (callback whitelist) + tests/test_fs2_safety_hardening.py 30+ PoC bypass tests.
+
+[2026-05-16 17:55 UTC] FS2 completed (commit 4df0e96): B2/B3/B4/C5/M3/M8 closed. 91 new tests + 275 prior → 366 PASS, 0 fail. Ruff clean. 8 files changed (+1201 -81). Highlights: shlex.shlex(punctuation_chars=";&|") tokenize закрывает substring-bypass family (echo a; rm -rf /); canonical flag parser ловит rm --recursive=true / -fR / -rfu; git -c key=val push --force теперь parse'ит global flags; BMAD_ALLOW_MAIN_MERGE env заменён signed-token файлом с TTL+used+0o600; B2 относительные пути ресolved через cwd → worktree env, missing → deny cwd_unknown; M8 callback whitelist {stop:,proposal:,merge:,confirm:,cancel:} + audit drop. Auto merge=false → no main merge. Runtime=loop_wrapper → exit cleanly.
+
+[2026-05-16 17:55 UTC] FS3 promoted to Current — workflow=backend-python (adapted: stdlib edits, no new gateway). Targets: runtime/budget.py (TokenUsage + MODEL_PRICING + usd_cost + NaN/inf/negative guard), state/db.py (additive upsert_budget + BEGIN IMMEDIATE + atomic claim_next_event), agent/safety/budget_guard.py (transactional enforce + enforce_day), memory/levels.py (exclusive-create retro), memory/gates.py (content schema check), agent/tools/merge.py + state.py + retro.py + runtime/worker_spawn.py (asyncio.wait_for(timeout=300) на все proc.communicate()) + tests/test_fs3_budget_concurrency.py.
 
 ## Final Report
 (empty — last session not yet completed)
