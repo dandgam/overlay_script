@@ -115,7 +115,12 @@ def run(
     watch: bool = typer.Option(False, "--watch", help="Foreground TUI (§14.4)"),
     daemon: bool = typer.Option(False, "--daemon", help="Background daemon (§14.4)"),
     mock: bool = typer.Option(
-        False, "--mock", help="Mock-mode E2E pilot — no real spawns",
+        True, "--mock/--real",
+        help=(
+            "Mock-mode E2E pilot — no real spawns. Default ON (N3 FS6); "
+            "use --real for real-mode (requires ANTHROPIC_API_KEY + claude "
+            "binary, currently raises NotImplementedError until Wave 1a)."
+        ),
     ),
 ) -> None:
     """Запустить оркестратор на указанной wave."""

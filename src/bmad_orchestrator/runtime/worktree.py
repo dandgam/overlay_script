@@ -18,4 +18,4 @@ def make_worktree_path(target_project: Path, n: int) -> Path:
     return target_project.parent / f"{target_project.name}-wt-{n}"
 
 
-# TODO: async git worktree add / remove via gitpython or subprocess
+# v1 follow-up: async git worktree add / remove via gitpython or subprocess

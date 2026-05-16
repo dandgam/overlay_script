@@ -85,8 +85,14 @@ async def detect_wave_boundary(args: dict[str, Any]) -> dict[str, Any]:
             statuses.append(str(st))
     all_done = bool(statuses) and all(s == "done" for s in statuses)
 
-    retro_path = _retro_path_for(wave, "wave")
-    retro_done = retro_path.exists() and retro_path.stat().st_size > 0
+    # N4 (FS6) — content-schema check (frontmatter + body) via is_retro_done,
+    # not `st_size > 0`. The seed stub written by spawn_retro_worktree (~100
+    # chars, frontmatter + TODO) used to slip past the size check and falsely
+    # mark the wave as complete.
+    from bmad_orchestrator.agent.memory.gates import is_retro_done
+    from bmad_orchestrator.agent.memory.schedule import RetroId, RetroLevel
+
+    retro_done = is_retro_done(RetroId(RetroLevel.WAVE, wave))
 
     return json_ok(
         {
@@ -143,12 +149,24 @@ async def spawn_retro_worktree(args: dict[str, Any]) -> dict[str, Any]:
             code="claude_missing",
         )
 
+    # N7 (FS6) — retro subprocess must NOT inherit secret-bearing env vars
+    # (ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, etc). Reuse the worker spawn
+    # allow-list so the retro subagent runs in the same locked-down env as a
+    # regular dev worker.
+    from bmad_orchestrator.runtime.worker_spawn import _build_worker_env
+
+    retro_env = _build_worker_env({
+        "ORCHESTRATOR_WAVE": wave,
+        "ORCHESTRATOR_LEVEL": level,
+    })
+
     proc = await asyncio.create_subprocess_exec(
         claude_bin,
         "-p",
         f"/bmad-retrospective {wave} {level}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=retro_env,
     )
 
     async def _wait() -> None:

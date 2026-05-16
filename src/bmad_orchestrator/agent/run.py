@@ -41,7 +41,9 @@ tools cover the workflow until SDK exposes server-managed tool blocks.
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -88,13 +90,15 @@ async def run_orchestrator(
     max_parallel: int = 2,
     *,
     models: ModelConfig | None = None,
-    mock: bool = False,
+    mock: bool = True,
     event_loop: EventLoop | None = None,
 ) -> EventLoop:
     """Main orchestrator loop. Returns the EventLoop instance.
 
-    ``mock=True`` → DAG cascade only (no SDK). Used in tests / CI without
-    ``ANTHROPIC_API_KEY``.
+    ``mock=True`` (DEFAULT, N3 FS6) → DAG cascade only (no SDK). Used in tests
+    / CI without ``ANTHROPIC_API_KEY``. Real-mode wiring is deferred to Wave
+    1a pilot — making mock the default avoids the historical footgun where
+    omitting ``--mock`` caused a confusing ``NotImplementedError``.
 
     ``mock=False`` → validates options against the real SDK and raises
     ``NotImplementedError`` because the full event-driven loop is deferred to
@@ -242,13 +246,62 @@ async def _run_mock_pilot(
     rounds = 0
     max_rounds = 6  # cap для unit-теста — 4 stories обычно дрова за 3 round'a
 
-    while rounds < max_rounds:
+    # N2 (FS6) — daily cap pre-check per spawn cycle. Without a bound
+    # state.db the atomic ``enforce_and_reserve_day`` cannot accumulate across
+    # calls, so the mock pilot tracks a running daily total locally and feeds
+    # it into the regular ``enforce_day`` evaluator. ``BMAD_DAILY_LIMIT_USD``
+    # overrides ``settings.budget.daily_limit_usd``.
+    daily_limit_override = os.environ.get("BMAD_DAILY_LIMIT_USD")
+    if daily_limit_override:
+        try:
+            daily_limit = float(daily_limit_override)
+        except ValueError:
+            log.warning(
+                "bmad_daily_limit_usd_invalid",
+                value=daily_limit_override,
+                fallback=budget.cfg.daily_limit_usd,
+            )
+        else:
+            budget.cfg.daily_limit_usd = daily_limit
+    today_utc = datetime.now(UTC).date().isoformat()
+    daily_spent_usd = 0.0
+    daily_reserve = budget.cfg.story_alarm_usd / 6.0  # mock spend ≈ $5/story
+
+    daily_halt_reached = False
+    while rounds < max_rounds and not daily_halt_reached:
         ready = [s for s in planner.find_ready(max_n=max_parallel * 2) if s["id"] not in spawned]
         if not ready:
             break
 
         batch = ready[:max_parallel]
         for story in batch:
+            # N2 (FS6) — enforce_day BEFORE story-level reserve. Halt one
+            # spawn cycle before the daily cap is breached so the orchestrator
+            # stops cleanly rather than overruns.
+            projected_daily = daily_spent_usd + daily_reserve
+            day_res = await budget.enforce_day(projected_daily, today_utc)
+            if day_res.level == "halt":
+                log.warning(
+                    "daily_budget_halt",
+                    projected_usd=projected_daily,
+                    halt_threshold=day_res.halt_threshold,
+                    day=today_utc,
+                )
+                await bus.emit(
+                    EventType.BUDGET_THRESHOLD_HIT,
+                    scope="day",
+                    level="halt",
+                    spent_usd=projected_daily,
+                    alarm_threshold=day_res.alarm_threshold,
+                    halt_threshold=day_res.halt_threshold,
+                    corrupted=day_res.corrupted,
+                    story_id=story["id"],
+                    day=today_utc,
+                )
+                daily_halt_reached = True
+                break
+            daily_spent_usd = projected_daily
+
             # C5 (round 2) — atomic check-and-reserve BEFORE spawn. Without
             # this, two concurrent ``get_budget → spawn`` pairs could both
             # observe ``spent < halt`` and overcommit. ``enforce_and_reserve_story``

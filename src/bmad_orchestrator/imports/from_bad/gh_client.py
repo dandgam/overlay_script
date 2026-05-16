@@ -21,8 +21,43 @@ import os
 import shutil
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
+
+# N5 (FS6) — SSRF guard. The urllib fallback used to pass any URL through to
+# ``urlopen``, which permitted file://, localhost, and arbitrary hosts when
+# caller-controlled. Restricting to the canonical GitHub hosts closes the
+# attack surface; the gh CLI path is unaffected because it never opens an
+# untrusted URL.
+ALLOWED_GH_HOSTS: frozenset[str] = frozenset({
+    "api.github.com",
+    "github.com",
+    "raw.githubusercontent.com",
+    "codeload.github.com",
+    "uploads.github.com",
+})
+
+
+def _assert_url_safe(url: str) -> None:
+    """Validate URL against the GitHub host allow-list. Raise ValueError on miss.
+
+    Rejects file://, http:// (non-https), localhost, RFC1918, and any host
+    not in ``ALLOWED_GH_HOSTS``.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError as exc:
+        raise ValueError(f"ssrf_blocked: unparseable url {url!r}") from exc
+    if parsed.scheme != "https":
+        raise ValueError(f"ssrf_blocked: scheme must be https, got {parsed.scheme!r}")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError(f"ssrf_blocked: missing host in {url!r}")
+    if host not in ALLOWED_GH_HOSTS:
+        raise ValueError(
+            f"ssrf_blocked: host {host!r} not in ALLOWED_GH_HOSTS"
+        )
 
 
 def gh_or_curl(
@@ -36,6 +71,11 @@ def gh_or_curl(
     Function name retained for back-compat; the actual fallback no longer
     invokes curl. Returns (exit_code_like, body_text). 0 on success, HTTP
     status code on HTTP error, 1 on transport error.
+
+    N5 (FS6): if the gh CLI path is unavailable, the urllib fallback enforces
+    the ``ALLOWED_GH_HOSTS`` allow-list on ``curl_url`` BEFORE issuing the
+    request — file://, http://, localhost, and non-GitHub hosts raise
+    ``ValueError("ssrf_blocked: ...")``.
     """
     if shutil.which("gh"):
         try:
@@ -50,6 +90,11 @@ def gh_or_curl(
                 return 0, result.stdout
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
+
+    # N5 — SSRF guard applies only to the urllib fallback (gh CLI handles its
+    # own auth + URL composition). Raise BEFORE building headers so callers
+    # cannot leak the bearer token to an attacker-controlled host.
+    _assert_url_safe(curl_url)
 
     token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN") or os.environ.get("GH_TOKEN")
     if not token:

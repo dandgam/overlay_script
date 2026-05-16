@@ -14,6 +14,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bmad_orchestrator.agent.betas import ANTHROPIC_BETA_HEADERS
 
+# N1 (FS6) — worker spawn defaults live here, not in runtime/worker_spawn.py,
+# so other modules can import them without triggering the runtime ↔ agent.tools
+# import chain (worker_spawn → agent.tools._common → agent.tools.__init__ →
+# agent.tools.spawn → worker_spawn). Spec §5.6.1 Option A.
+DEFAULT_MODEL: str = "claude-sonnet-4-6"
+DEFAULT_BUDGET_CAP_USD: float = 30.0
+
 
 class ModelConfig(BaseModel):
     """Per-role model routing. См. spec §16.3."""

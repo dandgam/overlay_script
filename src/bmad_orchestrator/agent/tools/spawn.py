@@ -27,13 +27,11 @@ from bmad_orchestrator.agent.tools._common import (
     runs_dir,
     worktree_root,
 )
-from bmad_orchestrator.runtime.worker_spawn import (
-    DEFAULT_BUDGET_CAP_USD,
-    DEFAULT_MODEL,
-)
-from bmad_orchestrator.runtime.worker_spawn import (
-    spawn_worker as runtime_spawn_worker,
-)
+from bmad_orchestrator.config import DEFAULT_BUDGET_CAP_USD, DEFAULT_MODEL
+
+# N1: lazy import runtime.worker_spawn.spawn_worker inside the tool function
+# body — top-level import recreated the circular chain even after moving the
+# constants out (Option A alone is insufficient; Option B closes the loop).
 
 
 def _worker_event(worktree: str, event_type: str, **payload: Any) -> Path:
@@ -133,6 +131,10 @@ async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
     # ``fallback_reason`` populated — the response payload then carries
     # ``fallback_reason`` and ``real_requested=True`` so the agent can decide
     # whether to raise / escalate / retry.
+    from bmad_orchestrator.runtime.worker_spawn import (
+        spawn_worker as runtime_spawn_worker,
+    )
+
     handle = await runtime_spawn_worker(
         worktree=worktree,
         story_id=story_id,

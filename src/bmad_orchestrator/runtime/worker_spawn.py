@@ -35,10 +35,9 @@ from bmad_orchestrator.agent.tools._common import (
     now_iso,
     worker_jsonl_path,
 )
+from bmad_orchestrator.config import DEFAULT_BUDGET_CAP_USD, DEFAULT_MODEL
 
 CLAUDE_BIN_DEFAULT = "claude"
-DEFAULT_MODEL = "claude-sonnet-4-6"
-DEFAULT_BUDGET_CAP_USD = 30.0
 DEFAULT_SKILL_INVOCATION = "/bmad-auto-dev"
 
 # FS3 H15: Worker subprocesses run user stories that can take ~30 min each on
