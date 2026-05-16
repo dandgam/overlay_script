@@ -39,24 +39,6 @@
 
 ### Pending
 
-- **id:** S5
-  **title:** 12 specialized internal skills (progressive disclosure)
-  **surface:** backend-python
-  **spec_section:** 844-993
-  **depends_on:** [S4]
-  **acceptance:**
-    - 12 skills × src/bmad_orchestrator/agent/skills/<name>/SKILL.md с frontmatter
-    - Names: dag-planner, worker-dispatcher, merge-gate, elicitation-router, retrospective-writer, intent-router, cost-watchdog, failure-analyst, reflexion-learner, wave-coordinator, proactive-improver, story-splitter
-    - Three-level disclosure: metadata (~100 tokens always-loaded) / body / references
-    - Skill dispatcher logic — выбор skill по event type
-    - Reflexion loop в reflexion-learner (Actor / Evaluator / Self-Reflection per §19.3)
-    - Tests: skill metadata loads <1.5K tokens total; full body loads только при match
-  **safety_gates:**
-    - L1 PreToolUse — sanity check что skill body load не пытается выйти за `agent/skills/`
-  **destructive_actions:** []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S6
   **title:** Telegram bot + voice (Whisper) + PII (Presidio) (CHECKPOINT)
   **surface:** backend-python
@@ -122,24 +104,24 @@
 
 ### Current
 
-- **id:** S4
-  **title:** Safety — 3-layer hooks + budget guard + branch isolation
+- **id:** S5
+  **title:** 12 specialized internal skills (progressive disclosure)
   **surface:** backend-python
-  **spec_section:** 226-234
-  **depends_on:** [S3]
+  **spec_section:** 844-993
+  **depends_on:** [S4]
   **acceptance:**
-    - safety/hooks.py PreToolUse deny: rm -rf, git push --force, git commit --no-verify, git reset --hard main
-    - safety/budget_guard.py — story alarm $30/halt $50, batch alarm $200/halt $300
-    - safety/branch_isolation.py — worker может писать только в свою feature-ветку в worktree
-    - runtime/liveness.py — liveness-before-kill
-    - audit_event tool wires events в audit log JSONL
-    - Tests: каждый PreToolUse rule reject'ит; budget hard-cap halts mock workflow
+    - 12 skills × src/bmad_orchestrator/agent/skills/<name>/SKILL.md с frontmatter
+    - Names: dag-planner, worker-dispatcher, merge-gate, elicitation-router, retrospective-writer, intent-router, cost-watchdog, failure-analyst, reflexion-learner, wave-coordinator, proactive-improver, story-splitter
+    - Three-level disclosure: metadata (~100 tokens always-loaded) / body / references
+    - Skill dispatcher logic — выбор skill по event type
+    - Reflexion loop в reflexion-learner (Actor / Evaluator / Self-Reflection per §19.3)
+    - Tests: skill metadata loads <1.5K tokens total; full body loads только при match
   **safety_gates:**
-    - L1 PreToolUse hooks (full activation), L2 budget hard-cap (full), L3 branch isolation (full)
+    - L1 PreToolUse — sanity check что skill body load не пытается выйти за `agent/skills/`
   **destructive_actions:** []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-16 10:00 UTC
+  **started:** 2026-05-16 11:30 UTC
   **workflow:** .claude/skills/auto-loop-spec/workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
@@ -220,6 +202,30 @@
     - Budget hard-cap enforcement (story $30 alarm/$50 halt) — S4 wires в EventLoop subscriber.
     - audit_event JSONL endpoint — S4 (теперь worker_spawn пишет events, S4 их аудитит).
 
+- **id:** S4
+  **title:** Safety — 3-layer hooks + budget guard + branch isolation + audit_event
+  **completed:** 2026-05-16 11:30 UTC
+  **commit:** fcc3dd3
+  **files_changed:** 9
+  **tests_passed:**
+    - ruff check src tests — PASS (all checks)
+    - mypy --strict src — PASS (52 source files)
+    - pytest — 110 passed (42 новых S4 + 68 prior)
+  **decisions_made:**
+    - hooks._scan_bash — комбо regex (rm-rf whitespace tolerant) + phrase substring (push --force/-f/--force-with-lease, commit --no-verify, clean -f/-fd/-df) + regex для `git reset --hard <main|master|origin/main|origin/master>` или bare `git reset --hard`. Phrase-list + regex покрывают все варианты упомянутые в spec §9.1 без false-positive на безобидные подобные строки.
+    - main-merge guard: `git checkout main` или `git merge ... main` deny по умолчанию; allow только если caller выставил `BMAD_ALLOW_MAIN_MERGE=1` (вызывается из auto-loop-spec workflow когда `Auto merge: true`). Этот флаг — последний предохранитель против случайного autonomous merge в main.
+    - filesystem escape check на Edit/Write/NotebookEdit/MultiEdit: absolute path должен быть под `target_project` или `orchestrator_home` (resolved); relative paths — allow (tool сам резолвит через cwd). Защита от случайного `/etc/passwd` overwrite worker-процессом.
+    - safety/audit.py: sync `record_audit` (open(..., 'a') append) — никакой async overhead в PreToolUse hook'е (которые могут быть hot path). `BMAD_AUDIT_LOG` env override — тесты используют чтобы изолировать запись.
+    - BudgetGuard refactor: BudgetResult dataclass с level∈{ok,alarm,halt} вместо двух bool flags — позволяет switch на уровне выше. enforce_story/enforce_batch — async (могут emit'ить event); check_story/check_batch — sync (для TUI dashboard). Halt+alarm одновременно пишутся в audit log + event_loop.
+    - branch_isolation: validate_worker_write_path — `Path.resolve()` нормализует .. и symlinks перед `relative_to(worktree_root)`. Без этого `wt1/../secrets.txt` обошёл бы простую `startswith()` проверку.
+    - audit_event как 35-й tool (был 34): спец-параметры event_type+summary+payload (свободная вложенная dict). Тест-кейс: `test_audit_event_tool_appends_jsonl` проверяет и tool_names() reg, и реальную запись JSONL.
+    - test_budget_halts_mock_workflow — end-to-end demo: subscriber на EventLoop ловит BUDGET_THRESHOLD_HIT(level=halt) → sets asyncio.Event → loop останавливается. Закрывает acceptance «budget hard-cap halts mock workflow».
+    - test_s2_tools.py обновлён 34 → 35 (audit_event добавлен в каталог).
+  **deferred_items:**
+    - Прикручивание `security_check_hook` + `audit_tool_output` к `ClaudeAgentOptions(hooks=...)` в agent/run.py — финальная wiring в S5 (там же оркестратор-агент впервые реально запускается).
+    - Budget aggregator из state.db (token_usage таблица) — нужен для `enforce_*` чтобы получать актуальный `spent_usd` без передачи извне. Реализация в S8 (CLI/TUI budget command).
+    - PostToolUse hook сейчас просто пишет факт вызова в audit; tool_result body summarization (`message_preview` for chat) — отдельный enhancement в S6 (telegram bot).
+
 ## Safety Gates Triggered
 (none)
 
@@ -239,6 +245,8 @@
 [2026-05-16 08:30 UTC] S2 completed (commit a1762c0). S3 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration.
 [2026-05-16 10:00 UTC] S3 execution: runtime/event_loop.py (EventLoop с 13 StrEnum event types из §4, asyncio.PriorityQueue FIFO с monotonic seq, subscriber dispatch in registration order, 5-min backstop polling task для SCHEDULED_WAKEUP). runtime/ratelimit.py (TokenBucket refill-on-demand + RateLimiter с per-key TPM+RPM, default 50000/50, async acquire loop). runtime/liveness.py (psutil + os.kill(0) fallback для is_alive; safe_to_kill rejects sentinel/self/dead; stalled-detection через last_event_age на JSONL). runtime/dag_planner.py (DagPlanner @dataclass cached state + build_graph cycle-check + filter_wave + ready_stories с shared-files mutex + detect_conflicts; networkx 3.x). runtime/worker_spawn.py (spawn_worker auto-detect mock/real по shutil.which("claude"); mock=synthetic events, real=asyncio create_subprocess_exec claude -p /bmad-auto-dev + stdout-stream → JSONL background task; _BACKGROUND_TASKS module-level set предотвращает GC orphan; tail_jsonl_events async generator terminates на worker_completed). agent/tools/spawn.py: spawn_worker tool с real=False default (preserves S2 contract), real=True делегирует в runtime_spawn_worker. pyproject.toml: ASYNC109 в ruff ignore (timeout kwarg convention). tests/test_s3_runtime.py: 20 тестов (13-event assertion, FIFO, subscriber dispatch, backstop tick, TokenBucket refill, RateLimiter acquire, liveness sentinel/self/stall, DagPlanner mutex/cycle, worker_spawn mock, tail termination, mock pilot E2E cascade с sprint-status writeback). Gates green: ruff PASS, mypy --strict PASS (50 files), pytest 68/68 PASS.
 [2026-05-16 10:00 UTC] S3 completed (commit 7c18728). S4 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration. CHECKPOINT session — но Auto merge=false, поэтому merge на main выполнит пользователь по завершении инициативы.
+[2026-05-16 11:30 UTC] S4 execution: agent/safety/hooks.py — PreToolUse `security_check_hook` с regex+phrase scan (rm -rf whitespace-tolerant, push --force/-f/--force-with-lease, commit --no-verify/-n, clean -f/-fd/-df, reset --hard main/master/origin/* или bare, checkout/merge main без BMAD_ALLOW_MAIN_MERGE=1) + filesystem-escape check для Edit/Write/NotebookEdit/MultiEdit (absolute path должен лежать под target_project или orchestrator_home, resolved). PostToolUse hook логирует факт вызова. agent/safety/audit.py — sync record_audit append-only JSONL (BMAD_AUDIT_LOG env override для тестов). agent/safety/budget_guard.py — BudgetResult с level∈{ok,alarm,halt}, async enforce_story/enforce_batch emit'ит BUDGET_THRESHOLD_HIT в EventLoop + audit log; sync check_* для TUI. agent/safety/branch_isolation.py — добавлен validate_worker_write_path (Path.resolve() анти-traversal). agent/tools/audit.py — 35-й tool `audit_event` (event_type+summary+payload). tests/test_s4_safety.py — 42 теста (deny rm-rf/force-push/--no-verify/--reset-hard, allow benign, main-merge guard с/без флага, FS escape, budget thresholds story/batch, enforce emits event, ok не emit, halt пишется в audit, end-to-end mock workflow halt через subscriber, validate_merge_target с/без approval, worker_write_path inside/escape/traversal, audit_event tool reg + JSONL write, empty event_type reject, raw record_audit JSONL lines). test_s2_tools.py обновлён 34→35. Gates: ruff PASS, mypy --strict PASS (52 files), pytest 110/110 PASS.
+[2026-05-16 11:30 UTC] S4 completed (commit fcc3dd3). S5 promoted Pending → Current. Runtime=loop_wrapper: no ScheduleWakeup, wrapper handles next iteration.
 
 ## Final Report
 (empty — last session not yet completed)
