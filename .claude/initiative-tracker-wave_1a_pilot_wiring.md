@@ -57,6 +57,34 @@
 
 ### Completed
 
+- **id:** W1
+  **title:** Real-mode event loop core — replace NotImplementedError + CLI flags + sandbox guard (CHECKPOINT)
+  **surface:** backend-python
+  **spec_section:** 100-180
+  **started:** 2026-05-16 16:33 UTC
+  **finished:** 2026-05-16 17:05 UTC
+  **commit_hash:** 13737de
+  **commit_message:** feat(sdk): W1 — real-mode event loop core + CLI caps + sandbox guard
+  **files_changed:**
+    - src/bmad_orchestrator/agent/run.py
+    - src/bmad_orchestrator/cli/main.py
+    - tests/test_fs4_real_mode_wiring.py (modified)
+    - tests/test_w1_real_pilot.py (new)
+  **diff_stats:** 4 files changed, 1005 insertions(+), 30 deletions(-)
+  **tests_passed:** 640 (613 baseline + 27 new W1 tests)
+  **retry_count:** 0
+  **outcome:** SUCCESS
+  **dod_evidence:**
+    - `run_orchestrator(mock=False)` теперь dispatch'ит в `_run_real_pilot` вместо `raise NotImplementedError` (agent/run.py:152)
+    - `_run_real_pilot` реализован: DAG loop со spawn'ом worker'ов через `runtime_spawn_worker(mock=False, sandbox_network="full")`, tail JSONL, bridge `worker_completed` → bus
+    - CLI flags `--max-stories N` (default 50) + `--max-spend-usd N` (default 50.0) добавлены в `cli/main.py::run`; прокинуты через daemon/watch/direct пути
+    - Production guard: `detect_sandbox()` at entry; `BMAD_REQUIRE_SANDBOX=1` + `NoSandbox` → `RuntimeError` (FS9 H5 inherited)
+    - tests/test_w1_real_pilot.py — 27 acceptance тестов (CLI defaults, max-stories cap, max-spend cap, sandbox required, mock path unchanged, fake claude PATH shim)
+    - Grep validation: `raise NotImplementedError` in agent/run.py = 0 (фиксил line 152); `async def _run_real_pilot` = 1; `max-stories\|max-spend-usd` в cli/main.py ≥ 2
+    - pytest: 640 PASS (613 baseline + 27 new); ruff check clean; mypy --strict pre-existing main_merge_token.py:40 only (не в W1 scope)
+    - **W1 attempt count:** 1 (clean first-attempt success; 32min wall-clock)
+  **notable_findings:** EventLoop backstop task cancellation bug — `EventLoop.start_backstop_task` runner wraps `await self._stopped.wait()` в `with suppress(asyncio.CancelledError)` внутри `while not self._stopped.is_set()` loop. Pytest-asyncio teardown cancels never escape suppress, task spins forever after fixture teardown. W1 tests work around via `await bus.stop()` в `_drain` helper. Out of W1 scope; carried forward (W2-W5 followed same drain discipline, no flakes). Recommended fix: next initiative touching event_loop.py (likely parallelism-presets-menu) tighten runner so cancel can propagate when `_stopped` unset.
+
 - **id:** W2
   **title:** Intent-router LLM dispatch — wire human_query_subscriber to Anthropic Messages API (CHECKPOINT)
   **surface:** backend-python
