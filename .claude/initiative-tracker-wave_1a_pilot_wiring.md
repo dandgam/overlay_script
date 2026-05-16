@@ -51,52 +51,6 @@
 
 ### Pending
 
-- **id:** W1
-  **title:** Real-mode event loop core — replace NotImplementedError + CLI flags + sandbox guard (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 100-180
-  **depends_on:** []
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - Implement `async def _run_real_pilot(bus, *, project, wave, max_parallel, max_stories, max_spend_usd, budget, state_db, session_id, models, options)` in `src/bmad_orchestrator/agent/run.py`
-    - Replace `raise NotImplementedError` at line 152 with call to `_run_real_pilot(...)`
-    - Add CLI flags `--max-stories N` (default 50) + `--max-spend-usd N` (default 50.0) to `cli/main.py::run`
-    - Production guard: `BMAD_REQUIRE_SANDBOX=1` + NoSandbox → RuntimeError in real path
-    - `tests/test_w1_real_pilot.py` — 25 tests (fake claude PATH shim, max-stories cap, max-spend cap, sandbox guard, mock path unchanged)
-    - `grep -c "raise NotImplementedError" src/bmad_orchestrator/agent/run.py` == 0
-    - `grep -c "async def _run_real_pilot" src/bmad_orchestrator/agent/run.py` == 1
-    - `pytest tests/ -q` — 638 PASS (613 baseline + 25 new); ruff/mypy clean
-  **safety_gates:**
-    - L1: No `--no-verify`, no `git push --force`, no `git reset --hard` — git commit discipline (project CLAUDE.md hard rule)
-    - L2: deny-list `runtime/sandbox.py`, `runtime/worker_spawn.py`, `agent/safety/budget_guard.py` — security-critical, frozen after round 5
-    - L3: branch isolation — integration/wave_1a_pilot_wiring only
-
-- **id:** W2
-  **title:** Intent-router LLM dispatch — wire human_query_subscriber to Anthropic Messages API (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 200-280
-  **depends_on:** [W1]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - Replace stub `log.warning("human_query_intent_router_deferred", ...)` at `agent/run.py:506` with real `AsyncAnthropic().messages.create(...)` call
-    - Load intent-router skill body as cached system block (`cache_control: {"type": "ephemeral"}`)
-    - Parse `tool_use` blocks from response → dispatch through `mcp_server.handle_tool_call(...)`
-    - Cost accounting: `usd_cost(models.routine, TokenUsage(...))` → `budget.attribute_usd(scope="intent_router", spent=...)`
-    - Daily cap halt blocks dispatch + emits BUDGET_THRESHOLD_HIT(halt)
-    - Stub fallback when no `ANTHROPIC_API_KEY` (CI / tests без secret)
-    - `tests/test_w2_intent_router.py` — 20 tests (real dispatch routes tool_use, cache hit on 2nd call, daily cap halt, stub fallback)
-    - `grep -c "AsyncAnthropic\|client.messages.create" src/bmad_orchestrator/agent/run.py` ≥ 1
-    - `grep -c "cache_control" src/bmad_orchestrator/agent/run.py` ≥ 1
-    - `pytest tests/ -q` — 658 PASS; ruff/mypy clean
-  **safety_gates:**
-    - L1: Никаких hardcoded API keys (CLAUDE.md security baseline)
-    - L2: deny-list freeze (как W1)
-    - L3: branch isolation
-
 - **id:** W3
   **title:** Cost watchdog real polling — WorkerCostTracker + adaptive story reserve (CHECKPOINT)
   **surface:** backend-python
@@ -172,13 +126,70 @@
     - L3: branch isolation; Final session — manual merge через human review (Auto merge=false)
 
 ### Current
-(none — next wake promotes W1 from Pending)
+
+- **id:** W2
+  **title:** Intent-router LLM dispatch — wire human_query_subscriber to Anthropic Messages API (CHECKPOINT)
+  **surface:** backend-python
+  **spec_section:** 200-280
+  **depends_on:** [W1]
+  **destructive_actions:** []
+  **checkpoint:** true
+  **estimated_retries_allowed:** 3
+  **started:** 2026-05-16 17:07 UTC
+  **workflow:** workflows/backend-python.md
+  **retry_count:** 0
+  **worker_branches:** []
+  **acceptance:**
+    - Replace stub `log.warning("human_query_intent_router_deferred", ...)` at `agent/run.py:506` with real `AsyncAnthropic().messages.create(...)` call
+    - Load intent-router skill body as cached system block (`cache_control: {"type": "ephemeral"}`)
+    - Parse `tool_use` blocks from response → dispatch through `mcp_server.handle_tool_call(...)`
+    - Cost accounting: `usd_cost(models.routine, TokenUsage(...))` → `budget.attribute_usd(scope="intent_router", spent=...)`
+    - Daily cap halt blocks dispatch + emits BUDGET_THRESHOLD_HIT(halt)
+    - Stub fallback when no `ANTHROPIC_API_KEY` (CI / tests без secret)
+    - `tests/test_w2_intent_router.py` — 20 tests (real dispatch routes tool_use, cache hit on 2nd call, daily cap halt, stub fallback)
+    - `grep -c "AsyncAnthropic\|client.messages.create" src/bmad_orchestrator/agent/run.py` ≥ 1
+    - `grep -c "cache_control" src/bmad_orchestrator/agent/run.py` ≥ 1
+    - `pytest tests/ -q` — 658 PASS; ruff/mypy clean
+  **safety_gates:**
+    - L1: Никаких hardcoded API keys (CLAUDE.md security baseline)
+    - L2: deny-list freeze (как W1)
+    - L3: branch isolation
 
 ### Completed
-(none)
+
+- **id:** W1
+  **title:** Real-mode event loop core — replace NotImplementedError + CLI flags + sandbox guard (CHECKPOINT)
+  **surface:** backend-python
+  **spec_section:** 100-180
+  **started:** 2026-05-16 23:30 UTC
+  **finished:** 2026-05-16 17:07 UTC (next-day continuation after compaction)
+  **commit_hash:** 13737de
+  **commit_message:** feat(sdk): W1 — real-mode event loop core + CLI caps + sandbox guard
+  **files_changed:**
+    - src/bmad_orchestrator/agent/run.py
+    - src/bmad_orchestrator/cli/main.py
+    - tests/test_fs4_real_mode_wiring.py
+    - tests/test_w1_real_pilot.py (new)
+  **diff_stats:** 4 files changed, 1005 insertions(+), 30 deletions(-)
+  **tests_passed:** 640 (613 baseline + 27 new W1 tests)
+  **retry_count:** 0
+  **outcome:** SUCCESS
+  **dod_evidence:**
+    - `_run_real_pilot` implemented in `agent/run.py:519` with DAG loop, spawn_worker, tail_jsonl, bridge worker_completed → bus events
+    - `raise NotImplementedError` removed from `run_orchestrator` — replaced with dispatch to `_run_real_pilot`
+    - CLI flags `--max-stories 50` (default) and `--max-spend-usd 50.0` (default) added to `cli/main.py::run` and propagated to daemon/watch/direct paths
+    - Production guard `detect_sandbox()` at `_run_real_pilot` entry → RuntimeError when `BMAD_REQUIRE_SANDBOX=1` + NoSandbox
+    - tests/test_w1_real_pilot.py — 27 acceptance tests (CLI flags, grep, signature, sandbox guard pass/fail, fake-spawn end-to-end, WAVE_BOUNDARY_REACHED, start_backstop called, max_stories cap 0/1/2, max_spend_usd cap halt + reason=max_spend_usd_cap, mock regression, daemon args propagation)
+    - tests/test_fs4_real_mode_wiring.py — old `test_run_orchestrator_real_mode_raises_not_implemented` renamed and rewritten to assert dispatch to `_run_real_pilot` with caps forwarded
+    - grep validation: `raise NotImplementedError` = 0; `async def _run_real_pilot` = 1; `max_stories` in cli/main.py = 4; `max_spend_usd` in cli/main.py = 4
+    - pytest: 640 passed in ~10s; ruff clean; mypy pre-existing main_merge_token.py:40 error confirmed unrelated to W1 via git stash baseline check
+
+### Notable findings during W1 (carry into W2+)
+
+- **EventLoop backstop task cancellation bug** discovered during W1 test work: `EventLoop.start_backstop_task` runner wraps `await self._stopped.wait()` in `with suppress(asyncio.CancelledError)` inside a `while not self._stopped.is_set()` loop. Pytest-asyncio teardown cancels never escape the suppress, so the task spins forever after fixture teardown and hangs the next test in the session. W1 tests work around it by calling `await bus.stop()` in the `_drain` helper and after every direct `_run_real_pilot(...)` invocation. **Out of W1 scope to fix** — but: W2-W4 tests must use the same drain/stop discipline OR W3 (event_loop adjacent surface) should consider tightening the runner so cancel can propagate when `_stopped` is unset. Document this in a follow-up if W3 doesn't address it.
 
 ## Safety Gates Triggered
-(none yet)
+(none — W1 was code-only, no destructive actions, no deny-list hits)
 
 ## Blockers / Pauses
 (none yet)
@@ -197,6 +208,14 @@
   **rationale:** Round 5 hotfix уже поднял nproc default до 16384 (`runtime/sandbox.py:61`) — типичные хосты (~3000 user procs) покрыты. Per-UID counting остаётся fundamental issue, но без real pilot data нельзя оценить ROI миграции.
   **impact:** Если pilot ловит EAGAIN burst — открыть отдельную follow-up инициативу для cgroup migration. Memo `project_backlog_sandbox_cgroup_migration.md` остаётся в backlog.
 
+- **date:** 2026-05-16 (W1)
+  **session:** W1
+  **decision:** `_run_real_pilot` дизайн — bus-emit-only (no direct subscriber wiring в этой сессии). Worker spawn использует `runtime_spawn_worker` через `from ..runtime.worker_spawn import spawn_worker as runtime_spawn_worker` import; JSONL bridged через `_tail_and_emit_completion(bus, handle, story_id)`. Каскад W2 (intent-router subscriber) и W4 (code_review_subscriber + merge_to_integration_subscriber) подключаются позже через bus.on() — `_run_real_pilot` остаётся «producer» only.
+  **rationale:** Изолирует W1 от W2/W4 контракта и упрощает testability — fake spawn в tests inject'ит JSONL события напрямую в bus.queue без реального subprocess.
+  **impact:** W2/W4 могут подключаться к WORKER_COMPLETED без модификации `_run_real_pilot`. Cost-tracker (W3) понадобится поправить `_tail_and_emit_completion` чтобы parse usage blocks — это ожидаемое касание в W3 scope, не deviation.
+
 ## Journal
 
 [2026-05-16 bootstrap] bootstrap: tracker + backup + integration branch созданы, 5 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
+[2026-05-16 23:30 UTC] W1 start: promoted to Current; surface=backend-python; workflow=workflows/backend-python.md; baseline 613 PASS confirmed
+[2026-05-16 17:07 UTC] W1 done, runtime=loop_wrapper — wrapper handles next iteration. Commit 13737de; 640 PASS (613 baseline + 27 new); ruff clean; mypy pre-existing only. W2 promoted to Current.
