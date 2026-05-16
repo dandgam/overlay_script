@@ -1,19 +1,22 @@
 """Retrospective tools (spec §6.1 + §17).
 
-detect_wave_boundary, spawn_retro_worktree, gen_wave2_prd_draft.
+Tools:
+- `detect_wave_boundary` — hard-gate awareness (`all_stories_done` + `retro_done`).
+- `spawn_retro_worktree` — mock by default; `real=True` форкает `claude -p
+  /bmad-retrospective <wave> <level>` фоновым subprocess (background task,
+  fire-and-forget; completion detected via artifact polling).
+- `gen_wave2_prd_draft` — пишет skeleton PRD под planning-artifacts/.
 
-Hard gates: agent физически не может перейти к next wave если retrospective.md
-не существует. detect_wave_boundary возвращает {complete: bool, retro_done: bool}
-— wave_coordinator skill использует это.
-
-Mock-mode:
-- detect_wave_boundary — все stories=done в sprint-status И retrospective.md exists.
-- spawn_retro_worktree — синтетический subagent id; writes seed retrospective.md.
-- gen_wave2_prd_draft — пишет skeleton PRD под planning-artifacts/.
+Hard gate semantics (spec §6.1): агент физически не может перейти к next wave
+если retrospective.md отсутствует. `detect_wave_boundary` возвращает
+`retro_done` отдельным полем — `wave_coordinator` skill consume'ит.
 """
 
 from __future__ import annotations
 
+import asyncio
+import shutil
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import tool
@@ -23,10 +26,38 @@ from bmad_orchestrator.agent.tools._common import (
     error,
     get_settings,
     json_ok,
-    memory_dir,
     now_iso,
     read_sprint_status_yaml,
 )
+
+# Module-level set keeps background subprocess watchers from being GC'd
+# (RUF006). spawn_worker.py uses the same pattern.
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _retro_path_for(wave: str, level: str) -> Path:
+    """Compute canonical retro artifact path via agent.memory (lazy import to
+    avoid agent.tools ↔ agent.memory import cycle)."""
+    from bmad_orchestrator.agent.memory.gates import retro_artifact_path
+    from bmad_orchestrator.agent.memory.schedule import RetroId, RetroLevel
+
+    if level == "wave":
+        retro_id = RetroId(RetroLevel.WAVE, wave)
+    elif level == "epic":
+        retro_id = RetroId(RetroLevel.EPIC, wave)
+    else:
+        retro_id = RetroId(RetroLevel.PHASE, "5")
+    return retro_artifact_path(retro_id)
+
+
+def _retro_slug_for(wave: str, level: str) -> str:
+    from bmad_orchestrator.agent.memory.schedule import RetroId, RetroLevel
+
+    if level == "wave":
+        return RetroId(RetroLevel.WAVE, wave).slug
+    if level == "epic":
+        return RetroId(RetroLevel.EPIC, wave).slug
+    return RetroId(RetroLevel.PHASE, "5").slug
 
 
 @tool(
@@ -47,8 +78,8 @@ async def detect_wave_boundary(args: dict[str, Any]) -> dict[str, Any]:
             statuses.append(str(st))
     all_done = bool(statuses) and all(s == "done" for s in statuses)
 
-    retro_path = memory_dir() / "per-wave" / f"{wave}-retrospective.md"
-    retro_done = retro_path.exists()
+    retro_path = _retro_path_for(wave, "wave")
+    retro_done = retro_path.exists() and retro_path.stat().st_size > 0
 
     return json_ok(
         {
@@ -63,33 +94,71 @@ async def detect_wave_boundary(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "spawn_retro_worktree",
-    "Spawn ephemeral retrospective worktree (fresh `claude -p /bmad-retrospective`).",
-    {"wave": str, "level": str},
+    "Spawn ephemeral retrospective worktree (mock by default; real=True spawns `claude -p /bmad-retrospective`).",
+    {"wave": str, "level": str, "real": bool},
 )
 async def spawn_retro_worktree(args: dict[str, Any]) -> dict[str, Any]:
     wave = str(args.get("wave", "")).strip()
     level = str(args.get("level", "wave"))
+    real = bool(args.get("real", False))
     if not wave:
         return error("missing 'wave'", code="invalid_arg")
     if level not in ("wave", "epic", "phase"):
         return error(f"invalid level: {level!r}", code="invalid_arg")
 
-    out = memory_dir() / "per-wave" / f"{wave}-retrospective.md"
+    out = _retro_path_for(wave, level)
+    slug = _retro_slug_for(wave, level)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if not out.exists():
-        out.write_text(
-            f"---\nwave: {wave}\nlevel: {level}\ncreated: {now_iso()}\n---\n\n"
-            "# Retrospective seed\n\n_TODO: agent must fill from per-story lessons._\n",
-            encoding="utf-8",
+
+    if not real:
+        if not out.exists():
+            out.write_text(
+                f"---\nwave: {wave}\nlevel: {level}\ncreated: {now_iso()}\n---\n\n"
+                "# Retrospective seed\n\n"
+                "_TODO: agent must fill from per-story lessons._\n",
+                encoding="utf-8",
+            )
+        subagent_id = f"retro-{slug}-{abs(hash((wave, level))) % 10_000:04d}"
+        return json_ok(
+            {
+                "wave": wave,
+                "level": level,
+                "retrospective_path": str(out),
+                "subagent_id": subagent_id,
+                "mock": True,
+            }
         )
-    subagent_id = f"retro-{wave}-{abs(hash((wave, level))) % 10_000:04d}"
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        return error(
+            "`claude` binary not found in PATH; cannot spawn real retro worktree",
+            code="claude_missing",
+        )
+
+    proc = await asyncio.create_subprocess_exec(
+        claude_bin,
+        "-p",
+        f"/bmad-retrospective {wave} {level}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def _wait() -> None:
+        await proc.wait()
+
+    task = asyncio.create_task(_wait())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
     return json_ok(
         {
             "wave": wave,
             "level": level,
             "retrospective_path": str(out),
-            "subagent_id": subagent_id,
-            "mock": True,
+            "subagent_id": f"retro-{slug}-{proc.pid}",
+            "mock": False,
+            "pid": proc.pid,
         }
     )
 
