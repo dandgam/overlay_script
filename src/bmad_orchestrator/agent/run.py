@@ -61,6 +61,7 @@ from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system
 from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
+from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
 from bmad_orchestrator.runtime.sandbox import detect_sandbox
@@ -581,10 +582,12 @@ async def _run_real_pilot(
             budget.cfg.daily_limit_usd = daily_limit
     today_utc = datetime.now(UTC).date().isoformat()
     daily_spent_usd = 0.0
-    # Placeholder reserve — W3 will replace with adaptive cost from
-    # WorkerCostTracker history. Until then we use the same heuristic the mock
-    # pilot uses so behaviour is symmetric across paths.
-    story_reserve = budget.cfg.story_alarm_usd / 6.0
+    # W3 — adaptive per-story reservation. ``adaptive_story_reserve`` returns
+    # ``story_alarm_usd / 2`` until the first worker reports a finalised cost,
+    # then switches to ``min(story_alarm_usd, p95(last_3))``. Recomputed inside
+    # the round loop so updates from completed workers flow into the next
+    # ``enforce_and_reserve_story`` call.
+    worker_model = models.dev
 
     bus.start_backstop_task()
 
@@ -607,6 +610,8 @@ async def _run_real_pilot(
 
         handles: list[WorkerHandle] = []
         for story in batch:
+            story_reserve_decimal = budget.adaptive_story_reserve()
+            story_reserve = float(story_reserve_decimal)
             projected_daily = daily_spent_usd + story_reserve
 
             # Local user-supplied hard cap (W1.2 --max-spend-usd).
@@ -654,7 +659,7 @@ async def _run_real_pilot(
                 break
             daily_spent_usd = projected_daily
 
-            res = await budget.enforce_and_reserve_story(story["id"], story_reserve)
+            res = await budget.enforce_and_reserve_story(story["id"], story_reserve_decimal)
             if not res.allowed:
                 await bus.emit(
                     EventType.BUDGET_THRESHOLD_HIT,
@@ -683,7 +688,12 @@ async def _run_real_pilot(
 
         if handles:
             await asyncio.gather(
-                *[_tail_and_emit_completion(h, bus) for h in handles]
+                *[
+                    _tail_and_emit_completion(
+                        h, bus, budget=budget, model=worker_model
+                    )
+                    for h in handles
+                ]
             )
 
         snap = read_sprint_status_yaml()
@@ -695,8 +705,15 @@ async def _run_real_pilot(
         planner.reload()
         rounds += 1
 
-        # Per-batch budget aggregate (placeholder ≈ $5/story; replaced in W3).
-        await budget.enforce_batch(spent_usd=story_reserve * len(spawned), wave=wave)
+        # Per-batch budget aggregate — sum of realised story costs (W3) with a
+        # fallback to the adaptive reserve when no real cost has landed yet.
+        recent_costs = list(budget._recent_story_costs)
+        batch_spent = (
+            float(sum(recent_costs))
+            if recent_costs
+            else float(budget.adaptive_story_reserve()) * len(spawned)
+        )
+        await budget.enforce_batch(spent_usd=batch_spent, wave=wave)
 
     await bus.emit(
         EventType.WAVE_BOUNDARY_REACHED,
@@ -713,17 +730,43 @@ async def _run_real_pilot(
     )
 
 
-async def _tail_and_emit_completion(handle: WorkerHandle, bus: EventLoop) -> None:
+async def _tail_and_emit_completion(
+    handle: WorkerHandle,
+    bus: EventLoop,
+    *,
+    budget: BudgetGuard | None = None,
+    model: str | None = None,
+) -> None:
     """Tail a worker's JSONL until terminal event; bridge to bus.
 
     The generator returns after seeing ``worker_completed`` or
     ``worker_halt_file``. We re-emit only the success / failure terminal to
     keep the bus surface narrow — intermediate ``claude_event`` / ``stdout_line``
     rows stay in the JSONL for forensics but don't fan out to subscribers.
+
+    W3 — when ``budget`` and ``model`` are supplied, every event is fed through
+    a :class:`WorkerCostTracker` so the running cost is attributed to the day
+    cap via :meth:`BudgetGuard.attribute_usd` (scope ``worker:<story_id>``) and
+    the realised total is pushed back into the adaptive reservation via
+    :meth:`BudgetGuard.record_story_cost`. Tests that drive this helper with
+    pure mock-mode handles can omit both and get the legacy bridge-only path.
     """
+    tracker: WorkerCostTracker | None = None
+    if budget is not None and model:
+        tracker = WorkerCostTracker(model=model)
+
     async for ev in tail_jsonl_events(handle.jsonl_path):
+        if tracker is not None and budget is not None:
+            delta = tracker.feed(ev)
+            if delta > 0:
+                await budget.attribute_usd(
+                    scope=f"worker:{handle.story_id}", spent=delta
+                )
         event_type = ev.get("event_type")
         if event_type == "worker_completed":
+            if tracker is not None and budget is not None:
+                _emit_worker_cost_final(tracker, handle.story_id)
+                budget.record_story_cost(tracker.total_cost)
             await bus.emit(
                 EventType.WORKER_COMPLETED,
                 story_id=handle.story_id,
@@ -735,6 +778,9 @@ async def _tail_and_emit_completion(handle: WorkerHandle, bus: EventLoop) -> Non
             )
             return
         if event_type == "worker_halt_file":
+            if tracker is not None and budget is not None:
+                _emit_worker_cost_final(tracker, handle.story_id)
+                budget.record_story_cost(tracker.total_cost)
             await bus.emit(
                 EventType.WORKER_HALT_FILE,
                 story_id=handle.story_id,
@@ -742,6 +788,20 @@ async def _tail_and_emit_completion(handle: WorkerHandle, bus: EventLoop) -> Non
                 jsonl=str(handle.jsonl_path),
             )
             return
+
+
+def _emit_worker_cost_final(tracker: WorkerCostTracker, story_id: str) -> None:
+    """Structured ``worker_cost_final`` log emitted on terminal event (W3)."""
+    log.info(
+        "worker_cost_final",
+        story_id=story_id,
+        total_usd=str(tracker.total_cost),
+        cache_hit_ratio=round(tracker.cache_hit_ratio, 4),
+        input_tokens=tracker.cumulative.input_tokens,
+        cache_read_tokens=tracker.cumulative.cache_read_input_tokens,
+        cache_write_tokens=tracker.cumulative.cache_creation_input_tokens,
+        output_tokens=tracker.cumulative.output_tokens,
+    )
 
 
 # ── HUMAN_QUERY / HUMAN_RESPONSE subscriber (W2 — intent-router dispatch) ────

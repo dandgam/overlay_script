@@ -20,6 +20,7 @@ FS3 hardening (B5):
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
@@ -115,6 +116,13 @@ class BudgetGuard:
         # before issuing the next API call.
         self._attributed_per_scope: dict[str, Decimal] = {}
         self._attributed_total: Decimal = Decimal("0")
+        # W3 — adaptive per-story reservation. ``_run_real_pilot`` calls
+        # :meth:`record_story_cost` after each worker completes; the next
+        # spawn round consults :meth:`adaptive_story_reserve` instead of the
+        # bootstrap heuristic (``story_alarm_usd / 6``). Capped at maxlen=3
+        # so transient outliers (very long stories) don't permanently inflate
+        # the reservation — only the most recent stories matter.
+        self._recent_story_costs: deque[Decimal] = deque(maxlen=3)
 
     def attach_state_db(self, state_db: StateDB, session_id: int) -> None:
         """Late-binding helper — wire the guard to a shared StateDB after init."""
@@ -313,6 +321,38 @@ class BudgetGuard:
     def attributed_for(self, scope: str) -> Decimal:
         """Snapshot — cumulative ``attribute_usd`` spend for one scope."""
         return self._attributed_per_scope.get(scope, Decimal("0"))
+
+    # ── adaptive story reservation (W3) ───────────────────────────────────────
+
+    def record_story_cost(self, cost: Decimal | float) -> None:
+        """Push a finalised per-story cost into the rolling window (max 3).
+
+        Called by ``_run_real_pilot`` after :class:`WorkerCostTracker`
+        finalises a worker. NaN / inf / negative are silently dropped — the
+        reservation falls back to the conservative half-cap default.
+        """
+        if not is_finite_spend(cost):
+            return
+        decimal_cost = Decimal(str(cost))
+        if decimal_cost <= 0:
+            return
+        self._recent_story_costs.append(decimal_cost)
+
+    def adaptive_story_reserve(self) -> Decimal:
+        """Reservation for the next ``enforce_and_reserve_story`` call.
+
+        - Empty history (first ever story this session) → conservative
+          ``story_alarm_usd / 2`` so reservations don't dwarf the actual
+          spend before a single data point is available.
+        - With ≥1 historical cost → ``min(story_alarm_usd, p95(last 3))``.
+          For a window of ≤3 items, the p95 reduces to ``max(...)`` — the
+          intent is a worst-case reservation, not an average.
+        """
+        cap = Decimal(str(self.cfg.story_alarm_usd))
+        if not self._recent_story_costs:
+            return cap / Decimal(2)
+        observed = max(self._recent_story_costs)
+        return min(cap, observed)
 
     # Sync probes для unit-тестов / TUI dashboard.
     def check_story(self, spent_usd: float) -> BudgetResult:
