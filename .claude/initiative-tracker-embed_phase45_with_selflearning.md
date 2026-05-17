@@ -43,26 +43,6 @@
 
 ### Pending
 
-- **id:** E6
-  **title:** L2 Live tuning — adaptive thresholds (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 365-410
-  **depends_on:** [E5]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - Extend BudgetGuard pattern:
-      - _recent_p0_counts (deque maxlen=10)
-      - _recent_test_counts (deque maxlen=10)
-      - _recent_review_iterations (deque maxlen=10)
-    - WORKER_COMPLETED → update deques
-    - Threshold auto-adjusts: median + 1.5×IQR (robust to outliers)
-    - Atomic write to skills/policy/code-review-gates.yaml
-    - Bounds guard: threshold movements > 50% require human approval (escalate)
-    - 25 tests
-    - `pytest tests/ -q` — 913 PASS
-
 - **id:** E7
   **title:** L3 Per-project memory (CHECKPOINT)
   **surface:** backend-python
@@ -115,28 +95,53 @@
 
 ### Current
 
-- **id:** E5
-  **title:** 4 code-review gates implementation (CHECKPOINT)
+- **id:** E6
+  **title:** L2 Live tuning — adaptive thresholds (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 295-360
-  **depends_on:** [E2, E3]
+  **spec_section:** 365-410
+  **depends_on:** [E5]
   **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
   **started:** (pending — next wake promotes)
-  **workflow:** direct (extend code_review_subscriber + tests — pattern from E1-E4)
+  **workflow:** direct (extend BudgetGuard + atomic YAML write + tests — pattern confirmed by E1-E5)
   **retry_count:** 0
   **worker_branches:** []
   **acceptance:**
-    - Extend code_review_subscriber (agent/run.py W4):
-      - **P0-count gate**: count review P0 vs fixed P0; reject if `fixed < found * threshold` (threshold from policy/code-review-gates.yaml)
-      - **Compliance gate**: scan tags [152-ФЗ], [187-ФЗ], any in policy → mandatory fix, defer запрещён → HUMAN_QUERY escalation
-      - **Test-coverage gate**: count test files vs spec'ed N_tests; reject if `todo!()` placeholders > threshold
-      - **Quarterly sweep**: on wave_boundary_reached если completed_stories % 50 == 0 → emit COMPLIANCE_SWEEP_NEEDED
-    - 35 tests
-    - `pytest tests/ -q` — 888 PASS
+    - Extend BudgetGuard pattern:
+      - _recent_p0_counts (deque maxlen=10)
+      - _recent_test_counts (deque maxlen=10)
+      - _recent_review_iterations (deque maxlen=10)
+    - WORKER_COMPLETED → update deques
+    - Threshold auto-adjusts: median + 1.5×IQR (robust to outliers)
+    - Atomic write to skills/policy/code-review-gates.yaml
+    - Bounds guard: threshold movements > 50% require human approval (escalate)
+    - 25 tests
+    - `pytest tests/ -q` — 913 PASS
 
 ### Completed
+
+- **id:** E5
+  **title:** 4 code-review gates implementation (CHECKPOINT)
+  **completed:** 2026-05-17 13:36 UTC wake-5 (auto-loop-spec)
+  **commit:** d11a4cb
+  **files_changed:** 4 (+1006 / -10)
+  **tests_passed:** 888 PASS (= 853 baseline + 35 new E5 tests)
+  **decisions_made:**
+    - Workflow=direct (extend code_review_subscriber + add quarterly_sweep_subscriber + tests). Pattern固定 for entire initiative since wake-2: backend-python.md targets FastAPI gateways, none of E1-E9 produce one. E5 = pure runtime extension of existing subscriber.
+    - **Compliance gate escalates HUMAN_QUERY directly, skipping CODE_REVIEW_VERDICT entirely.** Spec language («defer запрещён → HUMAN_QUERY escalation») mandates that compliance hits not flow through merge_to_integration_subscriber's regular request_changes path (which offers approve_override). New action list ["mandatory_fix", "abandon"] — no escape hatch via override. Tests assert "approve_override" not in actions.
+    - **P0 + test-coverage gates override approve → reject only.** Non-approve verdicts (request_changes, reject, error) pass through unchanged — those already trigger escalation in merge_to_integration_subscriber, and forcing a gate verdict-override on top would double-escalate the same finding. Test `test_e5_subscriber_gates_skip_when_verdict_not_approve` asserts this.
+    - **Test-coverage gate disabled when expected_n_tests=0** (no spec'ed count → cannot judge coverage). Real wiring (W1 pilot) will populate expected_n_tests from BMad story metadata; until then the gate stays inert for backwards compat. The `todo!()` sub-check still trips on any positive count regardless of expected_n_tests — different semantics but spec lumps them in one gate.
+    - **ReviewMetrics is frozen dataclass + _merge_metrics is pure function** (accumulates across multiple JSONL events). Accepts both `metrics: {...}` sub-object and top-level fields на events. Type coercion: invalid ints → 0, negative ints clamped, single string compliance tag becomes 1-tuple. Tests cover all coercion paths.
+    - **Gates loaded via _load_review_gates(cfg)** с three-tier resolution: `cfg.gates_override` (test injection + future L2 live tuning) → `load_policy().code_review_gates` (on-disk YAML) → `CodeReviewGates.model_validate({})` (defaults on policy-missing). Tests cover all three tiers explicitly.
+    - **`CodeReviewGates.model_validate({})` instead of `CodeReviewGates()`** for the defaults fallback — mypy --strict + pydantic v2 without `pydantic.mypy` plugin treats Field-defaulted constructor args as required at the type level. `model_validate` bypasses constructor type check while preserving pydantic default coercion. No runtime difference.
+    - **gate_reasons in CODE_REVIEW_VERDICT payload only when gates trip** — keeps the happy-path payload identical to W4 (`emitted[0].payload["verdict"] == "approve"` без extra keys). Existing W4 tests pass unchanged.
+    - **quarterly_sweep_subscriber skips completed_stories=0** — `0 % N == 0` mathematically but a sweep at zero stories is meaningless. Test `test_e5_quarterly_sweep_skips_zero_stories` makes this invariant explicit.
+    - **36 → 35 tests**: planned 36 (8 extraction + 10 gates + 3 load + 2 configure + 8 subscriber + 4 sweep + 1 event-type-registration), trimmed registration test as redundant с extended test_event_loop_has_all_spec_types in test_s3_runtime.py (which already asserts compliance_sweep_needed in ALL_EVENT_TYPES). Lands exactly на 888 PASS per spec acceptance (853 + 35 = 888).
+  **deferred_items:**
+    - Live tuning of thresholds (rolling stats + auto-adjust via median + 1.5×IQR + atomic YAML write) — E6 explicitly.
+    - Per-story expected_n_tests wiring from BMad story metadata — W1/wave_1a_pilot_wiring must populate `worker_completed.payload.expected_n_tests` (or include in review JSONL metrics event). Until then test-coverage gate is inert in production runs.
+    - Auto-fix coverage attribution: current gate compares p0_found vs p0_fixed both reported by review skill. If a P0 is found but the skill doesn't run auto-fix (e.g., scope deferred), p0_fixed stays 0. Future tuning may distinguish "fixed in same review" vs "deferred to follow-up story" — out of scope for E5.
 
 - **id:** E4
   **title:** `bmad-orchestrator skill-update <source>` CLI (CHECKPOINT)
@@ -283,6 +288,24 @@
   **rationale:** Failed upgrades must leave the repo in its original state — otherwise a half-applied state is worse than no apply. Tested via `test_update_skills_apply_conflict_rolls_back_writes_report` which asserts both invariants together (byte-for-byte SKILL.md restoration + .bmad-version unchanged).
   **impact:** Operators can safely re-run `bmad-orchestrator skill-update --apply` after fixing a conflicting patch; previous run's failure left no on-disk residue except the conflict report (which is the diagnostic artifact, not state).
 
+- **date:** 2026-05-17 wake-5
+  **session:** E5
+  **decision:** Compliance gate escalates HUMAN_QUERY directly, skipping CODE_REVIEW_VERDICT entirely; action list ["mandatory_fix", "abandon"] — no `approve_override`.
+  **rationale:** Spec §E5 language («defer запрещён → HUMAN_QUERY escalation») mandates a hard stop for 152-ФЗ / 187-ФЗ findings. Flowing through the regular request_changes path would offer the operator approve_override, which the spec explicitly forbids. A second, narrower action list disambiguates compliance violations from ordinary review escalations in the operator chat.
+  **impact:** Future compliance work (E7 per-project memory tracks compliance_findings_count; E8 lesson_parser may surface compliance proposals) can rely on the «compliance_violation» verdict tag as a distinct signal. merge_to_integration_subscriber NEVER sees these events — confirmed by the test asserting only HUMAN_QUERY is emitted from the subscriber.
+
+- **date:** 2026-05-17 wake-5
+  **session:** E5
+  **decision:** P0 + test-coverage gates only override `approve` → `reject`; non-approve verdicts pass through unchanged.
+  **rationale:** A `request_changes` or `reject` verdict already triggers HUMAN_QUERY in merge_to_integration_subscriber. Layering a gate-driven override on top would double-escalate the same finding (operator gets one query about the original verdict + another about the gate trip). Cleaner contract: gates are an «approve safety net», not a parallel verdict source.
+  **impact:** E6 live tuning (which adjusts gate thresholds based on recent stats) only affects the approve-path. Reviewers can still mark a story reject for non-gate reasons (architecture, naming, scope) without competing signal from the gates.
+
+- **date:** 2026-05-17 wake-5
+  **session:** E5
+  **decision:** Test-coverage gate disabled when `expected_n_tests == 0`; `todo!()` sub-check trips on ANY positive count regardless.
+  **rationale:** expected_n_tests is per-story metadata that BMad currently does not surface to the review skill. Until W1/wave_1a_pilot_wiring populates it (likely via worker_completed payload or review-skill input), defaulting the gate to disabled keeps the production path safe. The `todo!()` sub-check needs no story metadata — placeholders in test files are an unambiguous quality signal that should trip the gate independently.
+  **impact:** Until expected_n_tests is wired, the test-coverage gate is effectively the «no todo!() placeholders» gate. After wiring, the gate becomes bi-modal. Tracker E6 deferred_items lists the wiring as a W1 follow-up.
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
@@ -302,3 +325,7 @@
 [2026-05-17 13:21 UTC wake-4] E4 execution: runtime/skill_update.py (BmadVersion + DiffSummary/PatchResult/UpdateResult + 4 error types + read/diff/apply/report/update/status helpers), cli/main.py (skill-update + skill-status subcommands), 20 tests covering version IO + diff + patch check/apply + conflict report + update_skills (dry-run + apply + preservation + rollback) + status + CLI round-trip on mock BMad upgrade
 [2026-05-17 13:21 UTC wake-4] E4 verification: pytest 853 PASS (833 + 20 = 853 ✓ matches acceptance); ruff clean on E4 files; mypy --strict clean on skill_update.py + cli/main.py
 [2026-05-17 13:21 UTC wake-4] E4 committed ad2360a (4 files, +1083 / -2); E4 → Completed, E5 → Current; loop_wrapper runtime + Auto merge=false → no main merge, no ScheduleWakeup, wrapper drives next iteration
+[2026-05-17 13:36 UTC wake-5] E5 promoted Pending → Current; workflow=direct (extend code_review_subscriber + add quarterly_sweep_subscriber + tests — pattern locked since wake-2)
+[2026-05-17 13:36 UTC wake-5] E5 execution: EventType.COMPLIANCE_SWEEP_NEEDED (16th); ReviewMetrics + _extract_metrics_from_event + _merge_metrics; _gate_p0_threshold / _gate_compliance / _gate_test_coverage pure functions; _load_review_gates три-tier resolver (override → policy YAML → defaults); code_review_subscriber gates wiring (compliance → HUMAN_QUERY mandatory_fix, P0+test-coverage → override approve→reject с gate_reasons); quarterly_sweep_subscriber (WAVE_BOUNDARY % N == 0); 35 new tests
+[2026-05-17 13:36 UTC wake-5] E5 verification: pytest 888 PASS (853 + 35 = 888 ✓ matches acceptance); ruff clean on touched files; mypy --strict clean on agent/run.py + runtime/event_loop.py
+[2026-05-17 13:36 UTC wake-5] E5 committed d11a4cb (4 files, +1006 / -10); E5 → Completed, E6 → Current; loop_wrapper runtime + Auto merge=false → no main merge, no ScheduleWakeup, wrapper drives next iteration
