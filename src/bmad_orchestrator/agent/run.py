@@ -110,6 +110,7 @@ async def run_orchestrator(
     event_loop: EventLoop | None = None,
     max_stories: int = 50,
     max_spend_usd: float = 50.0,
+    stories: tuple[str, ...] | None = None,
 ) -> EventLoop:
     """Main orchestrator loop. Returns the EventLoop instance.
 
@@ -171,6 +172,7 @@ async def run_orchestrator(
         session_id=session_id,
         models=models,
         options=options,
+        story_filter=stories,
     )
     return bus
 
@@ -537,6 +539,7 @@ async def _run_real_pilot(
     session_id: int | None,
     models: ModelConfig,
     options: dict[str, Any],
+    story_filter: tuple[str, ...] | None = None,
 ) -> None:
     """Real-mode E2E pilot (W1).
 
@@ -558,6 +561,7 @@ async def _run_real_pilot(
     _ = detect_sandbox()
 
     from bmad_orchestrator.agent.tools._common import (
+        list_stories,
         read_sprint_status_yaml,
         write_sprint_status_yaml,
     )
@@ -580,6 +584,30 @@ async def _run_real_pilot(
     spawned: list[str] = []
     rounds = 0
     max_rounds = 6
+
+    # Manual story-filter mode: caller specified exact story IDs via
+    # ``run_orchestrator(stories=...)`` (typically from CLI ``--story <id>``).
+    # Bypass the DAG planner because its dependency resolution may not match
+    # the target project's BMad layout when ``story_filter`` is explicit.
+    # Operator owns dependency correctness — intended for one-shot smoke
+    # pilots on a single known-ready story.
+    manual_stories: list[dict[str, Any]] = []
+    if story_filter:
+        all_stories = list_stories()
+        by_id = {s["id"]: s for s in all_stories}
+        missing = [sid for sid in story_filter if sid not in by_id]
+        if missing:
+            raise RuntimeError(
+                f"--story {missing!r} not found in target project's stories dir "
+                f"({len(all_stories)} stories present). Check the id spelling."
+            )
+        manual_stories = [by_id[sid] for sid in story_filter]
+        log.info(
+            "story_filter_active",
+            count=len(manual_stories),
+            ids=[s["id"] for s in manual_stories],
+            dag_planner_bypassed=True,
+        )
 
     daily_limit_override = os.environ.get("BMAD_DAILY_LIMIT_USD")
     if daily_limit_override:
@@ -611,7 +639,13 @@ async def _run_real_pilot(
         and len(spawned) < max_stories
         and daily_spent_usd < max_spend_usd
     ):
-        ready = [s for s in planner.find_ready(max_n=max_parallel * 2) if s["id"] not in spawned]
+        if manual_stories:
+            ready = [s for s in manual_stories if s["id"] not in spawned]
+        else:
+            ready = [
+                s for s in planner.find_ready(max_n=max_parallel * 2)
+                if s["id"] not in spawned
+            ]
         if not ready:
             break
 

@@ -130,6 +130,14 @@ def run(
         50.0, "--max-spend-usd",
         help="Soft cap на дневной spend в USD (default 50.0)",
     ),
+    story: list[str] = typer.Option(  # noqa: B008 — typer pattern
+        [], "--story",
+        help=(
+            "Запустить только эту story (можно повторить --story). "
+            "Bypass'ит DAG planner — оператор отвечает за dependency-correctness. "
+            "Полезно для smoke pilot на одной known-ready story."
+        ),
+    ),
 ) -> None:
     """Запустить оркестратор на указанной wave."""
     models_cfg = _resolve_models(
@@ -149,6 +157,8 @@ def run(
                 "--max-parallel", str(max_parallel),
                 "--max-stories", str(max_stories),
                 "--max-spend-usd", str(max_spend_usd)]
+        for sid in story:
+            args.extend(["--story", sid])
         if mock:
             args.append("--mock")
         else:
@@ -183,6 +193,7 @@ def run(
                 project=project, wave=wave, max_parallel=max_parallel,
                 models=models_cfg, mock=mock,
                 max_stories=max_stories, max_spend_usd=max_spend_usd,
+                stories=tuple(story) if story else None,
             )
 
         async def _supervised() -> None:
@@ -207,6 +218,7 @@ def run(
             project=project, wave=wave, max_parallel=max_parallel,
             models=models_cfg, mock=mock,
             max_stories=max_stories, max_spend_usd=max_spend_usd,
+            stories=tuple(story) if story else None,
         )
     )
 

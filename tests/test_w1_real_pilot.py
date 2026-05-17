@@ -233,6 +233,86 @@ def test_w1_run_orchestrator_real_dispatches_with_caps(
     assert captured["max_spend_usd"] == 7.5
 
 
+# ── --story flag (manual story-filter mode, bypasses DAG planner) ────────────
+
+
+def test_w1_cli_run_has_story_flag() -> None:
+    sig = inspect.signature(cli_main.run)
+    assert "story" in sig.parameters
+
+
+def test_w1_cli_run_help_shows_story_flag() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli_main.app, ["run", "--help"])
+    assert result.exit_code == 0
+    assert "--story" in result.stdout
+
+
+def test_w1_run_orchestrator_forwards_stories_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``stories=(...)`` must flow into ``_run_real_pilot(story_filter=...)``."""
+    captured: dict[str, Any] = {}
+
+    async def _stub(bus: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(run_module, "_run_real_pilot", _stub)
+
+    import asyncio
+    asyncio.run(run_orchestrator(
+        project="x", wave="1a", mock=False,
+        stories=("3.2", "3.3"),
+    ))
+    assert captured["story_filter"] == ("3.2", "3.3")
+
+
+def test_w1_run_orchestrator_no_stories_passes_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _stub(bus: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(run_module, "_run_real_pilot", _stub)
+
+    import asyncio
+    asyncio.run(run_orchestrator(project="x", wave="1a", mock=False))
+    assert captured["story_filter"] is None
+
+
+@pytest.mark.asyncio
+async def test_w1_story_filter_missing_id_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """``--story <unknown_id>`` must raise RuntimeError before any spawn."""
+    from bmad_orchestrator.config import ModelConfig
+    from bmad_orchestrator.runtime.event_loop import EventLoop
+    from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard
+    from bmad_orchestrator.config import BudgetConfig
+
+    # Empty stories dir → any --story id is missing.
+    monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(tmp_path))
+    monkeypatch.setenv("BMAD_SANDBOX", "none")
+    monkeypatch.setenv("BMAD_SANDBOX_DISABLE_CONFIRMED", "yes-i-accept-risk")
+
+    bus = EventLoop()
+    budget = BudgetGuard(BudgetConfig(), event_loop=bus)
+    try:
+        with pytest.raises(RuntimeError, match=r"--story.*not found"):
+            await _run_real_pilot(
+                bus,
+                project="proj", wave="w",
+                max_parallel=1, max_stories=1, max_spend_usd=10.0,
+                budget=budget, state_db=None, session_id=None,
+                models=ModelConfig(), options={},
+                story_filter=("does-not-exist",),
+            )
+    finally:
+        await bus.stop()
+
+
 # ── BMAD_REQUIRE_SANDBOX guard ───────────────────────────────────────────────
 
 
