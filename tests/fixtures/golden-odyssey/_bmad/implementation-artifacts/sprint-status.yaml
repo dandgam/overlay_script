@@ -1,0 +1,29 @@
+# Golden snapshot of /home/server/odyssey/_bmad/implementation-artifacts/sprint-status.yaml
+# (subset, captured 2026-05-17 for B2 integration tests).
+#
+# Properties exercised:
+# * Upstream BMad ``development_status:`` wrapper.
+# * Embedded prose comments after the status token (`done  # ...`).
+# * ``in-progress NEEDS-FIX via bmad-code-review`` multi-token status.
+# * Retrospective key that must be silently dropped by the parser.
+# * Story IDs in kebab-with-prose form (`3-1-lifecycle-state-machine`).
+# * Letter-suffixed IDs (`1-17b-mv-fallback-conditional`).
+# * Epic-3 has two `done` + one `ready-for-dev` + several `backlog` stories,
+#   so :py:meth:`DagPlanner.find_ready` must surface the `ready-for-dev` one.
+generated: 2026-05-13
+last_updated: 2026-05-17
+project: Odyssey
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad/implementation-artifacts
+development_status:
+  story-0-0-legal-consultation-152-187-fz: backlog
+  epic-1: done
+  1-1-rust-workspace-scaffold: done
+  1-17b-mv-fallback-conditional: deferred
+  epic-1-retrospective: done
+  epic-3: in-progress
+  3-1-lifecycle-state-machine: done  # 2026-05-17: manual override after review
+  3-2-dpa-click-accept-v1: in-progress NEEDS-FIX via bmad-code-review
+  3-3-hard-block-trigger-enforcement: ready-for-dev
+  3-4-free-tier-auto-activate: backlog
