@@ -219,8 +219,8 @@ async def test_deletion_safety_wired_before_code_review(
         await bus.stop()
 
     # P1=4 subscribers (deletion+review+merge+sweep), P2 adds build_check=5,
-    # P3 adds stage5_completeness=6.
-    assert len(bus._subs) == 6
+    # P3 adds stage5_completeness=6, P5 adds security_review=7.
+    assert len(bus._subs) == 7
     funcs = [getattr(s, "func", s) for s in bus._subs]
     assert funcs[0] is stage5_completeness_subscriber, (
         f"Patch S subscriber must be wired first; got {funcs[0]!r}"

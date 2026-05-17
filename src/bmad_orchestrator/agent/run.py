@@ -94,6 +94,14 @@ from bmad_orchestrator.runtime.project_memory import (
     save_project_memory,
 )
 from bmad_orchestrator.runtime.sandbox import detect_sandbox
+from bmad_orchestrator.runtime.security_review import (
+    SECURITY_REVIEW_SKILL_INVOCATION,
+    parse_security_verdict_from_event,
+    security_review_subscriber,
+)
+from bmad_orchestrator.runtime.security_review import (
+    VERDICT_ERROR as SECURITY_VERDICT_ERROR,
+)
 from bmad_orchestrator.runtime.stage5_completeness import stage5_completeness_subscriber
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
@@ -657,10 +665,25 @@ async def _run_real_pilot(
     # Patch R (2026-05-18): commit recovery is embedded INSIDE
     # merge_to_integration_subscriber (auto-commits residue before ff-merge,
     # not a new subscriber).
+    # Patch X (2026-05-18): security_review_subscriber sits AFTER code_review
+    # and BEFORE merge — on CODE_REVIEW_VERDICT(approve) for security-critical
+    # stories it spawns the 4-hunter `/bmad-security-review`. BLOCK mutates
+    # verdict→reject + appends gate_reasons so the merge subscriber (next in
+    # chain) naturally skips.
     bus.on(cast(EventCallback, partial(stage5_completeness_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(build_check_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(deletion_safety_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
+    bus.on(
+        cast(
+            EventCallback,
+            partial(
+                security_review_subscriber,
+                bus=bus,
+                runner=_real_security_review_runner,
+            ),
+        )
+    )
     bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
 
@@ -1881,6 +1904,54 @@ async def _spawn_code_review_worker(
         else:
             os.environ["BMAD_CURRENT_WAVE"] = original_wave
     return handle
+
+
+async def _spawn_security_review_worker(
+    *,
+    worktree: str,
+    story_id: str,
+    wave: str,
+) -> WorkerHandle:
+    """Spawn ``claude -p /bmad-security-review --auto`` in ``worktree``.
+
+    Same JSONL-namespace trick as :func:`_spawn_code_review_worker` — the
+    ``BMAD_CURRENT_WAVE`` env var is pivoted to a security-scoped namespace so
+    the hunter stream lands at
+    ``runs_dir / <wave>__security_<story_id> / <basename>.events.jsonl`` without
+    clobbering the dev worker's or the code-review's JSONL.
+    """
+    original_wave = os.environ.get("BMAD_CURRENT_WAVE")
+    os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__security_{story_id}"
+    try:
+        handle = await runtime_spawn_worker(
+            worktree=worktree,
+            story_id=story_id,
+            branch=f"feature/{story_id}",
+            skill_invocation=SECURITY_REVIEW_SKILL_INVOCATION,
+            sandbox_network="none",
+        )
+    finally:
+        if original_wave is None:
+            os.environ.pop("BMAD_CURRENT_WAVE", None)
+        else:
+            os.environ["BMAD_CURRENT_WAVE"] = original_wave
+    return handle
+
+
+async def _real_security_review_runner(
+    worktree: Path, story_id: str, wave: str
+) -> tuple[str, str]:
+    """Production runner — spawn the security-review worker, aggregate verdict."""
+    handle = await _spawn_security_review_worker(
+        worktree=str(worktree), story_id=story_id, wave=wave
+    )
+    verdict = SECURITY_VERDICT_ERROR
+    findings = ""
+    async for ev in tail_jsonl_events(handle.jsonl_path):
+        extracted = parse_security_verdict_from_event(ev)
+        if extracted is not None:
+            verdict, findings = extracted
+    return verdict, findings
 
 
 async def code_review_subscriber(event: Event, bus: EventLoop) -> None:

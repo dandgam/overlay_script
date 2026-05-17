@@ -137,10 +137,11 @@ async def _drain(bus: EventLoop) -> list[Event]:
 async def test_p0_1_real_pilot_wires_three_subscribers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """``_run_real_pilot`` must register exactly 6 subscribers on the bus
+    """``_run_real_pilot`` must register exactly 7 subscribers on the bus
     (stage5_completeness [Patch S] + build_check [Patch N] + deletion_safety
-    [Patch C] + code_review + merge_to_integration + quarterly_sweep).
-    Pre-call ``len(bus._subs) == 0``; post-call ``len(bus._subs) == 6``.
+    [Patch C] + code_review + security_review [Patch X] + merge_to_integration
+    + quarterly_sweep).
+    Pre-call ``len(bus._subs) == 0``; post-call ``len(bus._subs) == 7``.
     """
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
     target = _make_target_with_stories(tmp_path)  # zero stories → empty DAG
@@ -159,8 +160,8 @@ async def test_p0_1_real_pilot_wires_three_subscribers(
     finally:
         await bus.stop()
 
-    assert len(bus._subs) == 6, (
-        f"Expected 6 subscribers wired after _run_real_pilot, "
+    assert len(bus._subs) == 7, (
+        f"Expected 7 subscribers wired after _run_real_pilot, "
         f"got {len(bus._subs)}"
     )
 

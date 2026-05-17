@@ -1,0 +1,58 @@
+# Security review trigger policy — Patch X canonical port (2026-05-18).
+#
+# On CODE_REVIEW_VERDICT (verdict=approve), security_review_subscriber decides
+# whether to spawn the 4-hunter `/bmad-security-review` skill. Match rules below
+# are OR'd: ANY trigger hit → security-critical story → review runs.
+#
+# Verdicts from the hunter run:
+#   * APPROVE          → no mutation; merge proceeds. SECURITY_REVIEW_PASSED.
+#   * MERGE_WITH_FIXES → no mutation; merge proceeds. SECURITY_REVIEW_PASSED.
+#   * BLOCK            → mutate CODE_REVIEW_VERDICT payload['verdict']='reject',
+#                        append 'security_review_block' to gate_reasons, emit
+#                        HUMAN_QUERY. merge_to_integration_subscriber skips.
+#
+# Reference: Odyssey handoff 2026-05-17 § 4.1 Patch X candidate
+# (/home/server/odyssey/spec/handoffs/handoff-bmad-phase4-gaps-2026-05-17.md).
+#
+# Schema (validated by bmad_orchestrator.runtime.security_review.SecurityReviewPolicy):
+#   enabled: bool                       — master switch. Default true.
+#   security_critical_epics: list[int]  — epics that always trigger review.
+#                                         Default: [3, 4, 5, 7, 9, 10].
+#   security_critical_keywords: list[str] — case-insensitive substrings scanned
+#                                         in story spec body AND in the worker
+#                                         git diff. Hit on either source.
+#   block_actions: list[str]            — HUMAN_QUERY actions enumerated on BLOCK.
+#   escalation_text: str                — prepended to HUMAN_QUERY body.
+
+enabled: true
+
+security_critical_epics:
+  - 3
+  - 4
+  - 5
+  - 7
+  - 9
+  - 10
+
+security_critical_keywords:
+  - auth
+  - jwt
+  - rls
+  - dpa
+  - crypto
+  - billing
+  - pii
+  - audit
+  - hmac
+  - argon
+  - session
+
+block_actions:
+  - abandon
+  - manual_security_fix
+
+escalation_text: |
+  Security review (4-hunter parallel) returned BLOCK on this story. The Stage 6
+  code review approved, but Injection / Auth Bypass / Crypto / Data Leak hunters
+  found a P0-class finding. Merge to integration has been halted (verdict
+  reverted to reject). Inspect the findings below before resuming the wave.
