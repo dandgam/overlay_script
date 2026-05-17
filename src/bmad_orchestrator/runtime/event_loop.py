@@ -9,6 +9,11 @@ Spec §4 events:
     monthly_review_scheduled, voice_message_received, story_split_triggered,
     phase4_complete, human_response, scheduled_wakeup_5min.
 
+Initiative #2C extension (sub-story life-cycle) — see runtime/sub_story_executor.py
++ runtime/auto_split.py. Bridge translates executor ``on_event`` dicts into typed
+event-bus emissions so downstream observers (telemetry, code-review timing, retro)
+can subscribe without depending on the executor's callback contract.
+
 Backstop: `start_backstop_task()` запускает фоновый таск который раз в N секунд
 (default 300s = 5min) emits SCHEDULED_WAKEUP — гарантирует пробуждение даже если
 ни одного «настоящего» event'а не пришло.
@@ -42,6 +47,10 @@ class EventType(StrEnum):
     MONTHLY_REVIEW_SCHEDULED = "monthly_review_scheduled"
     VOICE_MESSAGE_RECEIVED = "voice_message_received"
     STORY_SPLIT_TRIGGERED = "story_split_triggered"
+    SUB_STORY_STARTED = "sub_story_started"
+    SUB_STORY_COMPLETED = "sub_story_completed"
+    SUB_STORY_SQUASH_DONE = "sub_story_squash_done"
+    SUB_STORY_SQUASH_SKIPPED = "sub_story_squash_skipped"
     PHASE4_COMPLETE = "phase4_complete"
     HUMAN_QUERY = "human_query"
     HUMAN_RESPONSE = "human_response"

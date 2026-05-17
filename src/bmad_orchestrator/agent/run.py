@@ -68,6 +68,12 @@ from bmad_orchestrator.agent.skills import load_body as load_skill_body
 from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
 from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.runtime.auto_split import (
+    AutoSplitOutcome,
+    DecomposeFn,
+    auto_split_and_execute,
+    auto_split_enabled,
+)
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
 from bmad_orchestrator.runtime.build_check import build_check_subscriber
 from bmad_orchestrator.runtime.commit_recovery import recover_pre_merge
@@ -129,6 +135,31 @@ from bmad_orchestrator.state.db import StateDB
 SESSION_ENV_VAR = "BMAD_ORCHESTRATOR_SESSION_ID"
 
 log = structlog.get_logger(__name__)
+
+
+# Initiative #2C — auto-split pipeline hook. Module-level callable so tests can
+# swap in a stub via ``set_decomposer`` without monkey-patching environment.
+# Default ``None`` keeps the auto-split path inert even when ``BMAD_AUTO_SPLIT=1``
+# is set in env — production callers must wire a real ``claude -p`` decomposer
+# (or a multi-LLM router) before opting in. Until then large stories fall
+# through to the legacy single-worker pipeline.
+_DECOMPOSER: DecomposeFn | None = None
+
+
+def set_decomposer(fn: DecomposeFn | None) -> None:
+    """Inject (or clear) the auto-split decomposer used by ``_run_real_pilot_body``.
+
+    Production: wire a callable that spawns ``claude -p --model opus`` and pipes
+    the rendered prompt to its stdin. Tests: pass a synchronous async stub that
+    returns canned JSON.
+    """
+    global _DECOMPOSER
+    _DECOMPOSER = fn
+
+
+def get_decomposer() -> DecomposeFn | None:
+    """Return the currently-installed decomposer (or ``None``)."""
+    return _DECOMPOSER
 
 
 # 5 always-on tools per spec FS4 B11. Names match @tool registrations exactly
@@ -990,6 +1021,66 @@ async def _run_real_pilot_body(
                 worktree=wt,
                 branch=branch_name,
             )
+            # Initiative #2C — auto-split diversion. Opt-in via ``BMAD_AUTO_SPLIT=1``
+            # AND a registered decomposer (``set_decomposer``). When both gates are
+            # open and ``evaluate_split`` says ``split``, the parent story flows
+            # through decomposer → sub-story executor → squash instead of the
+            # legacy single-worker spawn. On success a synthetic
+            # ``WORKER_COMPLETED`` event is emitted so downstream subscribers
+            # (code-review → security-review → merge-to-integration) treat the
+            # squashed parent commit as if a single worker had produced it.
+            # On any failure the diversion falls through to the legacy spawn so
+            # the story is not lost.
+            auto_split_outcome: AutoSplitOutcome | None = None
+            if auto_split_enabled() and _DECOMPOSER is not None:
+                try:
+                    auto_split_outcome = await auto_split_and_execute(
+                        story=story,
+                        worktree=wt,
+                        branch=branch_name,
+                        base_sha=base_sha,
+                        decompose_fn=_DECOMPOSER,
+                        bus=bus,
+                        spawn_kwargs={
+                            "mock": False,
+                            "sandbox_network": "full",
+                            "embedded_skills_root": settings.skills_resolution_root,
+                            "allowed_worktree_root": worktree_root,
+                        },
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "auto_split_failed_falling_back",
+                        story_id=story["id"],
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    auto_split_outcome = None
+                if auto_split_outcome is not None and auto_split_outcome.succeeded:
+                    squashed_sha = (
+                        auto_split_outcome.squash.squashed_sha
+                        if auto_split_outcome.squash
+                        else ""
+                    )
+                    await bus.emit(
+                        EventType.WORKER_COMPLETED,
+                        story_id=story["id"],
+                        worktree=str(wt),
+                        jsonl="",
+                        exit_code=0,
+                        status="success",
+                        mock=False,
+                        auto_split=True,
+                        sub_ids=list(auto_split_outcome.sub_ids),
+                        squashed_sha=squashed_sha,
+                    )
+                    spawned.append(story["id"])
+                    log.info(
+                        "auto_split_completed",
+                        story_id=story["id"],
+                        sub_ids=list(auto_split_outcome.sub_ids),
+                        squashed_sha=squashed_sha,
+                    )
+                    continue
             # Initiative #1 Task 1.3+1.4 — when running >1 worker in parallel,
             # opt in to per-worker HOME snapshot + cgroup scope so concurrent
             # ``claude -p`` processes don't race on shared ``~/.claude*`` state

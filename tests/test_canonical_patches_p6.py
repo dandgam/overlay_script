@@ -390,17 +390,23 @@ async def test_all_seven_canonical_subscribers_wired_in_correct_order(
     assert getattr(funcs[6], "__name__", "") == "quarterly_sweep_subscriber"
 
 
-def test_event_type_inventory_count_is_nineteen() -> None:
-    """Post-Phase-0 the EventType enum carries exactly 19 entries.
+def test_event_type_inventory_count_is_twenty_three() -> None:
+    """Post-Initiative-2C the EventType enum carries exactly 23 entries.
 
-    Bumped from 17 in Phase 0 (spec_parallelism_initiatives) with the
-    addition of ``WORKER_SILENT_FAILURE`` (Task 0.2 silent-failure detection)
-    and ``COST_TRACKING_UNAVAILABLE`` (Task 0.3 subscription-mode honesty).
+    Inventory history:
+      * 17 — pre-Phase-0 baseline.
+      * +2 (Phase 0) — ``WORKER_SILENT_FAILURE`` (Task 0.2 silent-failure
+        detection) and ``COST_TRACKING_UNAVAILABLE`` (Task 0.3 subscription
+        mode honesty). Total 19.
+      * +4 (Initiative #2C) — ``SUB_STORY_STARTED`` /
+        ``SUB_STORY_COMPLETED`` / ``SUB_STORY_SQUASH_DONE`` /
+        ``SUB_STORY_SQUASH_SKIPPED`` (auto-split orchestration emits these
+        through the bus bridge in ``runtime/auto_split.py``). Total 23.
     A future addition MUST update this assertion in the same commit so the
     inventory drift is reviewed.
     """
-    assert len(ALL_EVENT_TYPES) == 19, (
-        f"Expected 19 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    assert len(ALL_EVENT_TYPES) == 23, (
+        f"Expected 23 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 
