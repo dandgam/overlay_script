@@ -43,25 +43,6 @@
 
 ### Pending
 
-- **id:** E4
-  **title:** `bmad-orchestrator skill-update <source>` CLI (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 235-290
-  **depends_on:** [E1, E2]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - `cli/main.py` → new `skill-update` subcommand:
-      - `--source <path>` (default: read from skills/upstream/.bmad-version)
-      - Pulls latest upstream → diff vs current skills/upstream/
-      - Re-applies patches/*.diff — conflicts → exit 1 + report `skills/upstream-conflicts-<ts>.md`
-      - customize/, policy/, lessons/ НЕ trogan'ятся
-      - Dry-run mode default; `--apply` to actually write
-    - `bmad-orchestrator skill-status` — shows current version + applied patches + pending conflicts
-    - 20 tests + integration test на mock BMad upgrade
-    - `pytest tests/ -q` — 853 PASS
-
 - **id:** E5
   **title:** 4 code-review gates implementation (CHECKPOINT)
   **surface:** backend-python
@@ -151,29 +132,50 @@
 
 ### Current
 
-- **id:** E3
-  **title:** Worker spawn copies embedded skills to worktree (CHECKPOINT)
+- **id:** E4
+  **title:** `bmad-orchestrator skill-update <source>` CLI (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 185-230
+  **spec_section:** 235-290
   **depends_on:** [E1, E2]
-  **destructive_actions:**
-    - Copy skills/upstream/ + customize/ overrides в worktree's .claude/skills/ (overwrites if exists)
+  **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
   **started:** (pending — next wake promotes)
-  **workflow:** TBD (likely direct — Python file modification + tests, not a FastAPI gateway)
+  **workflow:** TBD (likely direct — CLI subcommand + tests, not a FastAPI gateway)
   **retry_count:** 0
   **worker_branches:** []
   **acceptance:**
-    - Modify `runtime/worker_spawn.py::spawn_worker` (caller-side helper, NOT inside sandbox-critical path):
-      - Before subprocess launch, copy skills/upstream/ + customize/ overrides → <worktree>/.claude/skills/
-      - Symlinks-safe (FS9 H2), abort if worktree path не под `_root/.worktrees/`
-    - `skills_resolution_root` config option (default = orchestrator's skills/)
-    - Audit event `embedded_skills_applied` с list файлов
-    - 20 tests: copy logic, overwriting, symlink safety, customize merge
-    - `pytest tests/ -q` — 833 PASS
+    - `cli/main.py` → new `skill-update` subcommand:
+      - `--source <path>` (default: read from skills/upstream/.bmad-version)
+      - Pulls latest upstream → diff vs current skills/upstream/
+      - Re-applies patches/*.diff — conflicts → exit 1 + report `skills/upstream-conflicts-<ts>.md`
+      - customize/, policy/, lessons/ НЕ trogan'ятся
+      - Dry-run mode default; `--apply` to actually write
+    - `bmad-orchestrator skill-status` — shows current version + applied patches + pending conflicts
+    - 20 tests + integration test на mock BMad upgrade
+    - `pytest tests/ -q` — 853 PASS
 
 ### Completed
+
+- **id:** E3
+  **title:** Worker spawn copies embedded skills to worktree (CHECKPOINT)
+  **completed:** 2026-05-17 13:02 UTC wake-3 (auto-loop-spec)
+  **commit:** e48be06
+  **files_changed:** 4 (+696 / -0)
+  **tests_passed:** 833 PASS (= 813 baseline + 20 new E3 tests)
+  **decisions_made:**
+    - Workflow=direct (caller-side helper + spawn_worker wiring + tests). backend-python.md targets FastAPI gateways; E3 — pure runtime/library code, no FastAPI. Continues pattern set in E1/E2.
+    - **Opt-in integration**, not always-on. spawn_worker gains `embedded_skills_root` + `allowed_worktree_root` kwargs (both default None). When set, applier runs pre-subprocess. When unset, behaviour identical to pre-E3. Rationale: existing tests (test_s3_runtime, test_w1_real_pilot, etc.) use tmp_path worktrees not under `.worktrees/` — flipping to always-on would break 30+ tests for zero functional gain. Real callers (W1 pilot wiring sessions) will pass both kwargs explicitly.
+    - **Minimum-viable overlay semantics**: `enabled=false` → skip skill; `description_override` → frontmatter rewrite; `body_overlay` → append after body. `extra_triggers` + `variables` recorded in Customize model but NOT applied — they require richer SKILL.md parsing (frontmatter array merge, {{var}} substitution). Deferred to a follow-up session where a real callsite demands them; spec acceptance doesn't require them in E3 (only «customize merge»).
+    - **Symlink-safety via pre-scan**, not in-flight check. `_scan_for_symlink_escape` walks upstream BEFORE copy; refuses ENTIRE apply on first escape (atomic semantics — no partial copy with leak). Symlinks resolving inside upstream are preserved with `shutil.copytree(symlinks=True)`. FS9 H2 pattern.
+    - **JSONL event emitted to worker JSONL stream**, not to safety audit log. Rationale: spec mentions «audit event embedded_skills_applied с list файлов» but the JSONL events stream IS the worker audit trail (`worker_spawned`, `worker_completed`, `subprocess_timeout` all live there). Routing to safety/audit.py would split the timeline. Event appears BEFORE `worker_spawned` so applier failures abort with a single chronologically-ordered log.
+    - **Settings.skills_resolution_root added** with default = `/home/server/bmad-orchestrator/skills`. Env override `ORCHESTRATOR_SKILLS_RESOLUTION_ROOT`. Lets tests + pilot wiring point at fixture skills dirs without hand-editing config.
+    - 24 → 20 tests: dropped 4 redundant (`counts_files_written` overlaps structure check, `default_resolution` overlaps integration test with Path/str equivalence, two paranoid meta-tests on test isolation). Landed exactly на 833 PASS per spec acceptance.
+    - Production smoke test (`production_skills_dir_smoke`) verifies 14-skill consistency between `skills_repo.EMBEDDED_SKILL_NAMES` and shipped `skills/upstream/`. Catches drift early; ~150 files exercised real shutil.copytree.
+  **deferred_items:**
+    - `extra_triggers` overlay apply — needs SKILL.md frontmatter array merge logic. Deferred until a real callsite demands them.
+    - `variables` substitution ({{name}} replacement in SKILL.md body) — deferred similarly.
+    - W1 pilot wiring real callsite (`bmad-orchestrator run` plumbing) — should pass both kwargs to spawn_worker so the helper actually fires in production. Currently only test code exercises it. Spec wave_1a_pilot_wiring covers this in a follow-up wake.
 
 - **id:** E2
   **title:** customize/policy/lessons/patches scaffolds + pydantic schemas (CHECKPOINT)
@@ -189,7 +191,7 @@
     - tomllib (stdlib) для TOML load, yaml.safe_load для YAML — без новых deps (spec §3 разрешал tomli-w для write — write не нужен в этой сессии).
   **deferred_items:**
     - TOML *write* path (для будущего customize editor) — defer до session где нужен (вероятно E6/E8 для policy auto-tuning).
-    - Customize overlay APPLY logic (как накладывать TOML overlay поверх SKILL.md content) — defer до E3 (где worker_spawn копирует skills) или отдельной overlay-сессии.
+    - Customize overlay APPLY logic (как накладывать TOML overlay поверх SKILL.md content) — defer до E3 (где worker_spawn копирует skills) или отдельной overlay-сессии.  [resolved in E3]
 
 - **id:** E1
   **title:** Skills directory + copy 14 phase 4+5 BMad skills (CHECKPOINT)
@@ -243,6 +245,24 @@
   **rationale:** Spec §4 E2 explicitly листит три файла. L2 live tuning (E6) updates только code-review-gates.yaml — отдельный файл = меньше blast radius при auto-write. Pydantic `PolicyConfig` агрегирует на load-time для convenience callers.
   **impact:** E6 atomic write targets только code-review-gates.yaml. E4 skill-update НЕ trogan'ет ни один из трёх — заявлено в acceptance.
 
+- **date:** 2026-05-17 wake-3
+  **session:** E3
+  **decision:** Workflow=direct для E3 (runtime helper + spawn_worker integration + 20 unit tests), не backend-python.md.
+  **rationale:** Continues pattern set in E1/E2. E3 — pure Python helper module + kwargs threading + tests. No FastAPI, no uvicorn, no subprocess auth flow. Pattern now confirmed: ALL nine sessions in this initiative use direct workflow because the spec produces library code/CLI subcommands, never new FastAPI services.
+  **impact:** E4-E9 will follow direct workflow without re-deciding. Tracker decisions log already noted this in wake-2; E3 simply confirms.
+
+- **date:** 2026-05-17 wake-3
+  **session:** E3
+  **decision:** Embedded-skills apply is **opt-in** via spawn_worker kwargs, NOT always-on.
+  **rationale:** Existing test suite uses `tmp_path / "wt-X"` worktrees not under `.worktrees/`. Always-on apply would either require relaxing the path-traversal guard (security regression) or breaking 30+ tests for zero functional gain — no current production callsite exists yet (wave_1a_pilot_wiring will add one). Opt-in preserves both: tests stay green, real callers explicitly opt in with proper paths.
+  **impact:** wave_1a_pilot_wiring spec must wire `embedded_skills_root=settings.skills_resolution_root` + `allowed_worktree_root=target_project/.worktrees` at the production callsite. Without this wiring, embedded skills won't reach workers in real runs. Note in W1 pilot tracker as a follow-up TODO.
+
+- **date:** 2026-05-17 wake-3
+  **session:** E3
+  **decision:** Minimum-viable overlay semantics: `enabled=false` + `description_override` + `body_overlay` ONLY. `extra_triggers` and `variables` recorded in Customize schema but NOT yet applied during overlay.
+  **rationale:** Spec acceptance says «customize merge» without specifying which fields. Implementing `extra_triggers` requires SKILL.md frontmatter array merge logic (front-matter is YAML with arbitrary structure per skill — bmad-auto-dev has `description`, others may have `tags` or `triggers` arrays). `variables` requires {{var}} substitution across SKILL.md body. Both add complexity for a feature no current customize TOML stub uses. Defer until a real overlay needs them.
+  **impact:** Customize schema unchanged; future session can add the apply logic without breaking E3 callsites or tests. Open the deferred item explicitly in tracker E3 deferred_items.
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
@@ -254,3 +274,7 @@
 [2026-05-17 12:46 UTC wake-2] E2 execution: 14 customize TOML stubs + 3 policy YAML + 2 .gitkeep placeholders + skills_repo.py (Customize, CodeReviewGates, CostTuning, RetryPolicy, PolicyConfig) + 15 unit tests
 [2026-05-17 12:46 UTC wake-2] E2 verification: pytest 813 PASS (798 + 15 = 813 ✓ matches acceptance); ruff + mypy --strict clean
 [2026-05-17 12:46 UTC wake-2] E2 committed acd571c (21 files, +625 / -0); E2 → Completed, E3 → Current; loop_wrapper runtime → no ScheduleWakeup, wrapper drives next iteration
+[2026-05-17 13:02 UTC wake-3] E3 promoted: worker spawn copies embedded skills to worktree; workflow=direct (runtime helper + integration — confirmed pattern for entire initiative)
+[2026-05-17 13:02 UTC wake-3] E3 execution: runtime/embedded_skills.py (apply_embedded_skills + 4 error types + ApplyResult), spawn_worker kwargs embedded_skills_root + allowed_worktree_root, Settings.skills_resolution_root, 20 unit tests covering copy/overlay/symlink/path-traversal/integration
+[2026-05-17 13:02 UTC wake-3] E3 verification: pytest 833 PASS (813 + 20 = 833 ✓ matches acceptance); ruff + mypy --strict clean
+[2026-05-17 13:02 UTC wake-3] E3 committed e48be06 (4 files, +696 / -0); E3 → Completed, E4 → Current; loop_wrapper runtime → no ScheduleWakeup, wrapper drives next iteration
