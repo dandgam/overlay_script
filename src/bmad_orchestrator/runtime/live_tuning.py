@@ -75,14 +75,17 @@ def _iqr(samples: tuple[float, ...]) -> float:
 def _within_bounds(
     current: float, proposed: float, max_movement_fraction: float
 ) -> bool:
-    """Bounds-guard predicate: ``|Δ| ≤ max_fraction * max(|current|, |proposed|, ε)``.
+    """Bounds-guard predicate: ``|Δ| ≤ max_fraction * max(|current|, ε)``.
 
-    Using ``max(...)`` (not ``min(...)``) prevents a zero-current threshold
-    from accepting arbitrary jumps — the fraction is relative to the larger
-    of the two endpoints, with ``_EPS`` as a floor to avoid 0/0.
+    P1-3 — scale is the **current** threshold (not the larger of current /
+    proposed). Anchoring on ``proposed`` lets a single noisy median sample
+    accept arbitrarily large jumps (0.5 → 0.8 = 60 %, but bounded against
+    0.8 it passes). Anchoring on current makes the predicate honest:
+    «movement must stay within ``max_fraction`` of where we are today».
+    ``_EPS`` keeps a zero-current threshold from accepting infinite drift.
     """
     delta = abs(proposed - current)
-    scale = max(abs(current), abs(proposed), _EPS)
+    scale = max(abs(current), _EPS)
     return delta <= max_movement_fraction * scale
 
 

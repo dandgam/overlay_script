@@ -620,6 +620,48 @@ def policy_apply(
         raise typer.Exit(code=1)
 
 
+@app.command(name="policy-rollback")
+def policy_rollback(
+    project: str = typer.Argument(..., help="Project slug (e.g. odyssey)"),
+    proposal_id: str = typer.Argument(
+        ...,
+        help=(
+            "Backup timestamp stamped onto the .yaml.bak-<ts> file "
+            "(value of `proposal_id` in the policy_proposal_applied audit entry)."
+        ),
+    ),
+    skills_root: Path = typer.Option(  # noqa: B008 — typer pattern
+        _DEFAULT_SKILLS_ROOT,
+        "--skills-root",
+        help="Root of orchestrator skills dir (default: <repo>/skills).",
+    ),
+) -> None:
+    """Restore a previously-applied policy YAML from its on-disk backup.
+
+    Located by ``skills/policy/<name>.yaml.bak-<proposal-id>``. Writes the
+    restored payload through :func:`runtime.lesson_parser._atomic_yaml_write`
+    so concurrent live-tuning writers see a complete file at all times.
+    Emits a ``policy_proposal_rolled_back`` audit entry on success.
+    """
+    from bmad_orchestrator.runtime.lesson_parser import (
+        PolicyApplyError,
+        rollback_policy,
+    )
+
+    _ = project  # accepted for symmetry with policy-apply; backups are project-agnostic.
+    try:
+        restored, backup = rollback_policy(
+            skills_root=skills_root, proposal_id=proposal_id
+        )
+    except PolicyApplyError as exc:
+        console.print(f"[red]rollback failed:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    console.print(
+        f"[green]restored[/green] {restored.name} from "
+        f"[cyan]{backup.name}[/cyan]"
+    )
+
+
 @app.command(name="skill-status")
 def skill_status_cmd(
     skills_root: Path = typer.Option(  # noqa: B008 — typer pattern

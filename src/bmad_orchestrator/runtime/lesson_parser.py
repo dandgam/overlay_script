@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -62,6 +64,14 @@ _POLICY_MODELS: dict[PolicyTarget, type[BaseModel]] = {
 _PROPOSAL_HEADER_RE = re.compile(
     r"^##\s+Policy\s+proposal:\s*([a-z0-9-]+)\.([a-zA-Z_][a-zA-Z0-9_]*)\s*$"
 )
+
+# P1-1 — DoS caps for lesson markdown ingestion. Hostile or accidentally
+# pathological lesson files (single 100 MB line, gigabyte file) must fail loud
+# before they reach the regex / YAML loader. Limits picked so that even the
+# most verbose real retrospectives (~10 KB, few dozen proposals) stay well
+# under cap.
+_MAX_LINE_LEN: int = 8192
+_MAX_FILE_BYTES: int = 1_048_576  # 1 MiB
 
 
 class LessonParserError(Exception):
@@ -133,9 +143,26 @@ def parse_lesson_markdown(text: str, *, source: Path) -> list[LessonProposal]:
     :class:`LessonProposalInvalidError` — the parser does not silently drop
     suspect blocks.
     """
+    src_str = str(source)
+
+    # P1-1 — DoS cap: reject oversize buffers BEFORE splitlines() materialises
+    # a megabyte-long list of pathologically long lines.
+    encoded_len = len(text.encode("utf-8"))
+    if encoded_len > _MAX_FILE_BYTES:
+        raise LessonProposalInvalidError(
+            f"{src_str}: lesson markdown exceeds {_MAX_FILE_BYTES} bytes "
+            f"({encoded_len} bytes); reject as DoS-shaped input"
+        )
+
     proposals: list[LessonProposal] = []
     lines = text.splitlines()
-    src_str = str(source)
+
+    for idx, line in enumerate(lines, start=1):
+        if len(line) > _MAX_LINE_LEN:
+            raise LessonProposalInvalidError(
+                f"{src_str}:{idx}: line exceeds {_MAX_LINE_LEN} chars "
+                f"({len(line)} chars); reject as DoS-shaped input"
+            )
 
     i = 0
     while i < len(lines):
@@ -227,6 +254,13 @@ def parse_lessons_dir(lessons_dir: Path) -> list[LessonProposal]:
         return []
     out: list[LessonProposal] = []
     for md in sorted(lessons_dir.glob("*.md")):
+        # P1-1 — stat() the file first; avoid reading multi-GB blob into RAM.
+        size = md.stat().st_size
+        if size > _MAX_FILE_BYTES:
+            raise LessonProposalInvalidError(
+                f"{md}: lesson file size {size} bytes exceeds "
+                f"{_MAX_FILE_BYTES}; reject as DoS-shaped input"
+            )
         text = md.read_text(encoding="utf-8")
         out.extend(parse_lesson_markdown(text, source=md))
     return out
@@ -375,6 +409,123 @@ def _load_policy_yaml(path: Path) -> dict[str, Any]:
     return raw
 
 
+# P1-2 — policy YAML backup + rollback ────────────────────────────────────
+
+# Keep at most this many ``.yaml.bak-<ts>`` per policy file.  Older backups
+# are unlinked after each successful apply so the policy directory does not
+# grow unbounded over the lifetime of a project.
+_POLICY_BACKUP_KEEP: int = 3
+_POLICY_BACKUP_RE = re.compile(r"^(?P<name>[a-z0-9-]+)\.yaml\.bak-(?P<ts>[0-9TZ-]+)$")
+
+
+def _backup_timestamp(now: datetime | None = None) -> str:
+    """UTC timestamp suitable for both directory filenames and CLI args."""
+    when = now or datetime.now(UTC)
+    return when.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _policy_backup_path(policy_path: Path, ts: str) -> Path:
+    """Resolve the backup path for a given policy file + timestamp."""
+    return policy_path.with_name(f"{policy_path.name}.bak-{ts}")
+
+
+def _list_policy_backups(policy_path: Path) -> list[Path]:
+    """All backups for ``policy_path`` ordered oldest→newest by timestamp suffix."""
+    parent = policy_path.parent
+    if not parent.is_dir():
+        return []
+    prefix = f"{policy_path.name}.bak-"
+    backups = [p for p in parent.iterdir() if p.name.startswith(prefix)]
+    backups.sort(key=lambda p: p.name)
+    return backups
+
+
+def _prune_old_backups(policy_path: Path, *, keep: int = _POLICY_BACKUP_KEEP) -> None:
+    backups = _list_policy_backups(policy_path)
+    if len(backups) <= keep:
+        return
+    for old in backups[: len(backups) - keep]:
+        try:
+            old.unlink()
+        except OSError:
+            # Best-effort: a failed prune is not worth aborting the apply.
+            pass
+
+
+def _snapshot_backup(policy_path: Path, ts: str) -> Path | None:
+    """Copy the current policy file aside as ``.bak-<ts>``.
+
+    Returns ``None`` if there is nothing to back up (first-ever apply on a
+    fresh policy file). Caller MUST invoke this *before* writing the new
+    policy contents so the on-disk copy still represents the pre-change
+    state.
+    """
+    if not policy_path.exists():
+        return None
+    backup_path = _policy_backup_path(policy_path, ts)
+    shutil.copy2(policy_path, backup_path)
+    return backup_path
+
+
+def rollback_policy(
+    *, skills_root: Path, proposal_id: str
+) -> tuple[Path, Path]:
+    """Restore the policy file pointed to by ``proposal_id``.
+
+    ``proposal_id`` is the timestamp suffix that ``apply_proposal`` stamped
+    onto the backup file (``<policy>.yaml.bak-<id>``). Scans every policy
+    YAML under ``skills_root/policy`` for a matching backup; restores it
+    into the original policy path via :func:`_atomic_yaml_write`. Returns
+    ``(restored_policy_path, backup_used_path)``.
+
+    Raises :class:`PolicyApplyError` when no matching backup exists.
+    """
+    policy_dir = skills_root / "policy"
+    if not policy_dir.is_dir():
+        raise PolicyApplyError(
+            f"policy directory missing under skills_root: {policy_dir}"
+        )
+    suffix = f".bak-{proposal_id}"
+    matches: list[Path] = []
+    for backup in policy_dir.iterdir():
+        if backup.is_file() and backup.name.endswith(suffix):
+            matches.append(backup)
+    if not matches:
+        raise PolicyApplyError(
+            f"no backup found under {policy_dir} matching proposal_id "
+            f"{proposal_id!r}"
+        )
+    if len(matches) > 1:
+        names = sorted(p.name for p in matches)
+        raise PolicyApplyError(
+            f"ambiguous proposal_id {proposal_id!r}: matched {names}"
+        )
+    backup = matches[0]
+    original_name = backup.name[: -len(suffix)]  # strip ".bak-<ts>"
+    restored = backup.with_name(original_name)
+    try:
+        payload = yaml.safe_load(backup.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise PolicyApplyError(
+            f"backup YAML not valid at {backup}: {e}"
+        ) from e
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise PolicyApplyError(
+            f"backup YAML must be a mapping at {backup}, got {type(payload).__name__}"
+        )
+    _atomic_yaml_write(restored, payload)
+    record_audit(
+        "policy_proposal_rolled_back",
+        summary=f"restored {restored.name} from backup {backup.name}",
+        proposal_id=proposal_id,
+        policy_path=str(restored),
+        backup_path=str(backup),
+    )
+    return restored, backup
+
+
 def apply_proposal(
     proposal: LessonProposal, *, skills_root: Path
 ) -> AppliedProposal:
@@ -404,7 +555,15 @@ def apply_proposal(
         ) from e
 
     payload = validated.model_dump(mode="python")
+
+    # P1-2 — snapshot the pre-apply YAML to ``<name>.yaml.bak-<ts>`` BEFORE
+    # overwriting. Operators get a deterministic rollback target keyed by the
+    # same ``ts`` that surfaces in the audit entry; ``_prune_old_backups``
+    # caps the on-disk fan-out.
+    backup_ts = _backup_timestamp()
+    backup_path = _snapshot_backup(path, backup_ts)
     _atomic_yaml_write(path, payload)
+    _prune_old_backups(path)
 
     audit = record_audit(
         "policy_proposal_applied",
@@ -419,6 +578,8 @@ def apply_proposal(
         rationale=proposal.rationale,
         source_file=proposal.source_file,
         policy_path=str(path),
+        proposal_id=backup_ts,
+        backup_path=str(backup_path) if backup_path is not None else None,
     )
     return AppliedProposal(proposal=proposal, policy_path=path, audit_entry=audit)
 
@@ -476,5 +637,6 @@ __all__ = [
     "parse_lessons_dir",
     "policy_file_path",
     "proposals_yaml_path",
+    "rollback_policy",
     "save_proposals_yaml",
 ]

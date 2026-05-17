@@ -205,8 +205,9 @@ def test_e6_evaluate_clamps_proposed_to_unit_interval() -> None:
     )
     assert prop is not None
     assert prop.proposed_value == 1.0
-    # Movement 0.5 vs scale max(0.5, 1.0)=1.0 → exactly 50% → within bounds.
-    assert prop.within_bounds is True
+    # P1-3: scale now anchored on current (0.5), not max(current, proposed).
+    # Movement 0.5 vs 0.5 * 0.5 = 0.25 → 100 % drift, out of bounds.
+    assert prop.within_bounds is False
 
 
 def test_e6_evaluate_out_of_bounds_marks_not_within() -> None:
@@ -463,12 +464,14 @@ def test_e6_subscriber_persists_yaml_after_min_samples(
     reset_gate_config: None,
 ) -> None:
     bg = _budget()
-    # Pre-seed BudgetGuard with MIN_SAMPLES_FOR_TUNING-1 coverage samples so the
-    # 5th story triggers a tuning write. Each sample is 0.85 (small drift from
-    # the current 0.8 threshold → within 50% bound → safe to write).
+    # Pre-seed 4 samples at 0.7 — current threshold is 0.8 — so median 0.7 is a
+    # LOOSEN (proposed < current) → silent apply is allowed.  Tightening
+    # (e.g. 0.8 → 0.9) now escalates HUMAN_QUERY instead of writing (P1-7), so
+    # this test was rewritten to exercise the loosening branch where YAML
+    # persistence is still automatic.
     for _ in range(MIN_SAMPLES_FOR_TUNING - 1):
         bg.record_review_metrics(
-            p0_found=10, p0_fixed=9, test_files_count=0, expected_n_tests=0
+            p0_found=10, p0_fixed=7, test_files_count=0, expected_n_tests=0
         )
 
     gates = CodeReviewGates.model_validate({"p0_threshold": 0.8})
@@ -486,7 +489,7 @@ def test_e6_subscriber_persists_yaml_after_min_samples(
     review_jsonl = tmp_path / "review.jsonl"
     _write_jsonl(
         review_jsonl,
-        [_approve_event({"p0_found": 10, "p0_fixed": 9}), _TERMINAL_EVENT],
+        [_approve_event({"p0_found": 10, "p0_fixed": 7}), _TERMINAL_EVENT],
     )
     handle = _make_handle(str(tmp_path / "wt"), "S-tune", review_jsonl)
 
@@ -504,9 +507,9 @@ def test_e6_subscriber_persists_yaml_after_min_samples(
     )
     asyncio.run(code_review_subscriber(event, bus))
 
-    # Now 5 samples in window — yaml should reflect new median.
+    # Loosen 0.8 → 0.7 is silent-applied; yaml reflects new median.
     persisted = yaml.safe_load(gates_yaml.read_text(encoding="utf-8"))
-    assert persisted["p0_threshold"] == pytest.approx(0.9)
+    assert persisted["p0_threshold"] == pytest.approx(0.7)
 
 
 def test_e6_subscriber_escalates_human_query_on_bounds_breach(
