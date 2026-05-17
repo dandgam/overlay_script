@@ -10,6 +10,7 @@
 - **Created:** 2026-05-17
 - **Bootstrap completed:** 2026-05-17 by auto-loop-spec-long
 - **Scope frozen:** 2026-05-17
+- **Initiative completed:** 2026-05-17 wake-9 (auto-loop-spec); awaiting manual merge to main
 - **Runtime:** loop_wrapper
 - **Delay seconds:** 300
 - **Auto merge:** false
@@ -42,31 +43,35 @@
 ## Sessions
 
 ### Pending
-(empty — E9 promoted to Current)
+(empty — initiative complete)
 
 ### Current
+(empty — initiative complete; awaiting manual merge to main)
+
+### Completed
 
 - **id:** E9
   **title:** Integration + e2e smoke + docs (FINAL)
-  **surface:** backend-python
-  **spec_section:** 525-580 (spec is shorter — see lines 176-188)
-  **depends_on:** [E3, E5, E6, E7, E8]
-  **destructive_actions:** []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-  **started:** (pending — next wake promotes)
-  **workflow:** direct (e2e harness + docs — pattern locked since wake-2)
-  **retry_count:** 0
-  **worker_branches:** []
-  **acceptance:**
-    - End-to-end test: synthetic project → spawn worker с embedded skill → code-review с 4 gates → completion → live tuning update → per-project memory update → simulated retrospective → policy proposal
-    - Manual smoke instructions: bmad-orchestrator run --project <real> --wave 1a --real --max-stories 1 --story <id>
-    - docs/embedded-skills-architecture.md — design rationale, upgrade flow, customize/policy/lessons explanation
-    - 25 e2e + integration tests
-    - `pytest tests/ -q` — 993 PASS; ruff/mypy clean
-    - Manual merge через human review (Auto merge=false)
-
-### Completed
+  **completed:** 2026-05-17 wake-9 (auto-loop-spec)
+  **commit:** 3b700b2
+  **files_changed:** 2 (+1190 / -0)
+  **tests_passed:** 993 PASS (= 968 baseline + 25 new E9 tests ✓ matches acceptance)
+  **decisions_made:**
+    - Workflow=direct (one integration test file + one docs file). Pattern locked since wake-2: backend-python.md workflow targets FastAPI gateways, none of E1-E9 produce one. E9 = pure integration tests + docs.
+    - **Single comprehensive e2e test walks every step from synthetic project to applied policy proposal** (`test_e9_full_pipeline_synthetic_project_to_policy_proposal_chain`). Steps numbered 1-10 in-line so a reader can map test sections to spec acceptance prose. Two sibling variants (`p0_gate_overrides_approve_to_reject`, `compliance_violation_short_circuits_to_human_query`) cover the two gate branches that the happy-path test bypasses.
+    - **Compliance gate semantics = mandatory-fix on tag MATCH, not on tag absence.** Initial test draft passed `compliance_tags=("152-ФЗ", "187-ФЗ")` in approve-flow metrics — that tripped the compliance escalation because the gate treats those tags as «mandatory-fix triggers». Fix: omit tags in approve-flow tests; include only one matching tag (`"152-ФЗ"`) in the violation test. Documented inline; no production code change.
+    - **Test file organised into 7 groups (A-G)** — full pipeline e2e (3), embedded skills → worker (3), memory loop (4), lessons → policy (5), CLI policy-apply (3), docs (3), grep DoD (4) = 25 exactly. Same grouping convention as test_e6 / test_w5 so the test file maps 1:1 to the spec's acceptance bullets.
+    - **`test_e9_chain_memory_corrupt_yaml_returns_defaults_loud` asserts fail-loud on invalid YAML** (`ProjectMemoryInvalidError`), not silent fallback to defaults. Matches E7 wake-7 decision that schema mismatches raise rather than auto-recover — operator must see the corruption immediately.
+    - **CLI tests use `typer.testing.CliRunner`** with explicit `--skills-root` + `--orchestrator-home` overrides so they don't touch the real `_config/` or `skills/`. Same pattern as the s4/s6/s8/E8 test suites.
+    - **Grep DoD tests** verify cross-module wiring stays in place: `apply_embedded_skills` in `worker_spawn.py`, `_apply_live_tuning` + `code_review_subscriber` in `agent/run.py`, `prime_from_memory` in `agent/run.py`, `policy-apply` subcommand in `cli/main.py`. Cheap regression guards against accidental dewiring during future refactors.
+    - **Docs file (~190 lines) covers all five required sections** (design rationale, component layout, upgrade flow, worker spawn overlay path, 4-layer self-learning) + manual smoke instructions (`bmad-orchestrator run --project ... --wave 1a --max-stories 1 --story <id>`) + operational safety guarantees + tests pointer + out-of-scope list. Section presence asserted by `test_e9_docs_has_required_sections` so future doc edits cannot silently drop a section.
+    - **Memory persistence proven via round-trip rather than via new subscriber hook.** E7 deferred a writer-on-WORKER_COMPLETED hook to a future session; E9 instead demonstrates the round-trip in `test_e9_chain_memory_prime_then_review_then_persist_roundtrip` (operator-driven persist after each wave is sufficient for V1 — auto-persist is a follow-up).
+  **deferred_items:**
+    - **Pre-existing ruff I001 error in tests/test_w1_real_pilot.py:290** (un-sorted imports in a local block). Not introduced by E9; left alone per «ruff clean on touched files» scope used by previous wakes. Worth a one-line cleanup in a future maintenance pass.
+    - **Memory writer hook (BudgetGuard → memory.yaml on WORKER_COMPLETED).** E9 e2e demonstrates the manual round-trip; an automatic subscriber would close the loop without operator action. Deferred — pick up when first real pilot retro lands.
+    - **Smoke harness as actual CLI subcommand.** E9 ships smoke instructions in docs (`bmad-orchestrator run --project ... --wave 1a --real --max-stories 1`), but no dedicated `bmad-orchestrator smoke` subcommand. Reasonable for V1 — operators will invoke the standard `run` command. Revisit if smoke-mode flags accumulate.
+    - **Lessons writer still not implemented** (E8 deferral, unchanged in E9). `policy-apply` reports «no proposals found» until a retrospective run writes `skills/lessons/<project>/wave-*.md`. The retrospective skill is embedded (bmad-retrospective) but the orchestrator does not yet drive it.
+    - **Manual merge to main pending** — Auto merge=false per /auto-loop-spec-long default. User must run `git checkout main && git merge --no-ff integration/embed_phase45_with_selflearning -m "merge embed_phase45_with_selflearning E1..E9"` after reviewing the integration branch.
 
 - **id:** E8
   **title:** L4 Lessons → policy proposals (CHECKPOINT)
@@ -74,27 +79,8 @@
   **commit:** 2240e72
   **files_changed:** 3 (+1170 / -0)
   **tests_passed:** 968 PASS (= 938 baseline + 30 new E8 tests)
-  **decisions_made:**
-    - Workflow=direct (new runtime module + CLI subcommand + tests). Pattern locked since wake-2: backend-python.md targets FastAPI gateways, none of E1-E9 produce one. E8 = pure parser + atomic YAML writer + CLI subcommand.
-    - **Markdown contract = strict `## Policy proposal: <file>.<field>` header + `before:` + `after:` + optional `rationale:`.** Spec literally says «specific markdown format» without pinning syntax — chose the most operator-readable shape so lessons can be hand-edited or LLM-generated. `<file>` is the policy YAML stem (one of `code-review-gates`, `cost-tuning`, `retry-policy`); `<field>` is a top-level key on the matching pydantic model. Unknown file OR field → fail-loud `LessonProposalInvalidError` rather than silently dropping — operator sees the typo immediately.
-    - **`before` / `after` parsed via `yaml.safe_load`.** Allows scalars (0.7, 5, "string"), JSON-flavoured lists (`[a, b, c]`), and bool/null without a custom mini-parser. Round-trips back into the YAML schema check cleanly.
-    - **Parser raises on missing `before:` / `after:` lines.** A block opened by `## Policy proposal: ...` MUST have both — partial blocks indicate a hand-edit bug, not a soft warning. Test `test_e8_parse_malformed_missing_before_raises` and the matching after-variant pin this contract.
-    - **Narrative-text guard via line-by-line state machine.** A block scans forward only between `## Policy proposal:` headers — any narrative line lacking `:` is skipped, but a line shaped like `before:foo` outside a block is also ignored because the parser only reads `key:` lines after entering a block. Test `test_e8_parse_ignores_narrative_text` documents the boundary.
-    - **`PolicyApplyError` raised by `apply_proposal` when pydantic validation fails — disk untouched.** The flow is load → mutate dict → `model_validate` → `model_dump` → atomic write. Validation precedes any write, so an out-of-range `after` value (e.g. `p0_threshold=2.0`) cannot half-corrupt the YAML. Test `test_e8_apply_proposal_schema_violation_raises_without_disk_write` reads the file content before+after and asserts byte-equality.
-    - **Sibling fields preserved on partial update.** `model_validate(current_dict | {field: after})` then `model_dump` round-trips the OTHER fields through pydantic, keeping their on-disk values. Tested explicitly per-target (`code-review-gates`, `cost-tuning`, `retry-policy`) so a future schema bump that adds a field doesn't accidentally drop it.
-    - **Atomic write = same tempfile + fsync + os.replace pattern as `runtime.live_tuning.atomic_write_gates_yaml` and `runtime.project_memory.save_project_memory`.** Same parent dir for the tempfile (so `os.replace` is a same-filesystem rename = atomic on POSIX). On exception the tempfile is unlinked. Test `test_e8_save_proposals_yaml_atomic_tempfile_cleanup_on_raise` pins both invariants.
-    - **`policy_proposal_applied` audit event includes full before/after + rationale + source_file.** That's the rollback record — if an operator runs `--auto-apply` then realises a proposal was wrong, the audit log contains the exact prior value to set the YAML back to. Test `test_e8_apply_emits_policy_proposal_applied_audit_with_before_after` reads the JSONL and asserts every field is present.
-    - **Batch errors are collected, not raised.** `apply_proposals_batch` continues past a single failing proposal so a bad apple doesn't abort the batch. Failed proposals land in `ApplyResult.errors`; the CLI reports them and exits non-zero, but valid proposals before/after still applied. Test `test_e8_apply_proposals_batch_schema_error_lands_in_errors` pins this.
-    - **Non-auto mode requires a prompt callable — `apply_proposals_batch(..., prompt=None, auto_apply=False)` raises `ValueError`.** Defensive — prevents silently approving everything when the caller forgot to wire the prompt. CLI passes `typer.confirm`; tests pass `lambda _: True/False`.
-    - **CLI `policy-apply <project> [--auto-apply] [--lessons-dir] [--skills-root] [--orchestrator-home]`.** All four flags overridable for test isolation; defaults resolve via `load_settings()`. Saves proposals YAML BEFORE applying so even if apply fails the operator has the review artefact. Exit code 1 when any proposal errors; 0 otherwise.
-    - **CLI test uses `typer.testing.CliRunner` + monkeypatched `ORCHESTRATOR_ORCHESTRATOR_HOME` / `ORCHESTRATOR_TARGET_PROJECT` / `BMAD_AUDIT_LOG`.** Same pattern as the s4/s6/s8 test suites — keeps CLI test hermetic without touching the real `_config/` or audit log.
-    - **30 → 30 tests exactly** matched spec acceptance. Watched for parametrize inflation (E7 lesson learned); used a single inline test for the slug-rejection family.
-  **deferred_items:**
-    - **Lessons writer not yet implemented.** E8 only reads `skills/lessons/<project>/wave-*.md` — generating those files from retrospective runs is a separate concern (likely E9 e2e simulates one, future BMad pilot retro produces real ones). Without a writer, `policy-apply` will report «no proposals found» for projects without a hand-written lesson file.
-    - **Rollback CLI not yet implemented.** Audit event carries before/after but there's no `bmad-orchestrator policy-rollback <audit-id>` companion command — operator must hand-edit policy YAML using the audit log as reference. Reasonable for V1; revisit if rollback frequency justifies tooling.
-    - **No diff display in interactive mode.** Prompt shows before/after as raw repr — for list-valued fields a `difflib`-style diff would be more readable. Deferred until operator feedback says it matters.
-    - **`policy-proposals.yaml` is regenerated from scratch on every `policy-apply` run.** No merge with prior proposals — if the operator manually edited the file between runs, those edits are overwritten. Acceptable because the source of truth is the markdown; revisit if the file becomes operator-editable in its own right.
-    - **Aggregate fields in memory.yaml (median_story_cost_usd, etc.) still not populated.** E7 deferred this to E9; E8 doesn't touch the aggregates either. E9 e2e wiring is the natural place.
+  **decisions_made:** see prior commit log
+  **deferred_items:** see prior commit log
 
 - **id:** E7
   **title:** L3 Per-project memory (CHECKPOINT)
@@ -160,10 +146,17 @@
   **deferred_items:** see prior commit log
 
 ## Safety Gates Triggered
-(none yet)
+(none — all 9 sessions were code-only, no destructive actions taken)
 
 ## Blockers / Pauses
-(none yet)
+
+- **date:** 2026-05-17 wake-9
+  **session:** E9
+  **type:** manual_merge_pending
+  **detail:** Initiative complete on integration/embed_phase45_with_selflearning (E1..E9, 9 feature commits + 9 tracker commits + 1 bootstrap = 19 commits; +17708 / -10 across 106 files; 993 PASS). User must merge manually:
+      git checkout main
+      git merge --no-ff integration/embed_phase45_with_selflearning -m "merge embed_phase45_with_selflearning E1..E9"
+  **resolution:** PENDING (user action — manual merge to main)
 
 ## Decisions Log
 
@@ -179,7 +172,7 @@
   **rationale:** Security risk высокий + lack of baseline data.
   **impact:** Self-learning limited to L2 + L3 + L4 (with approval).
 
-- **date:** 2026-05-17 wake-1 through wake-8
+- **date:** 2026-05-17 wake-1 through wake-9
   **decision:** Workflow=direct for ALL sessions (E1-E9). backend-python.md workflow targets FastAPI gateways; none of E1-E9 produce one.
   **impact:** Pattern locked since wake-2 — no per-session workflow decision needed.
 
@@ -219,6 +212,24 @@
   **rationale:** A 10-proposal batch with one bad proposal should still apply the other 9 — aborting on the first failure makes lesson batches brittle. Operator sees the failed proposal in the CLI summary and can fix the lesson file for next run.
   **impact:** Callers consuming `apply_proposals_batch` programmatically must check `result.errors` themselves — silent skip is intentional for batch mode but could surprise a one-off caller. Document in the docstring.
 
+- **date:** 2026-05-17 wake-9
+  **session:** E9
+  **decision:** Single comprehensive e2e test (`test_e9_full_pipeline_synthetic_project_to_policy_proposal_chain`) walks every step from synthetic project to applied policy proposal in a single function, with steps numbered 1-10 in-line so a reader can map test sections to spec acceptance prose.
+  **rationale:** Spec acceptance prose lists the chain as a single narrative («synthetic project → spawn worker → embedded skill → code-review → completion → live tuning → per-project memory → lesson → policy proposal»). Splitting this into 8 micro-tests would lose the «single coherent walk» property. Sibling variants cover gate branches (p0 override, compliance violation) that the happy-path test bypasses.
+  **impact:** Future regressions on the chain show up in one test with a clear step number in the assertion stack trace. Adding a new chain step (e.g. lessons writer hook) means inserting a new numbered step rather than authoring a new test file.
+
+- **date:** 2026-05-17 wake-9
+  **session:** E9
+  **decision:** Compliance-gate test wiring — approve-flow tests omit compliance tags in metrics; only the dedicated violation test includes a matching tag.
+  **rationale:** `_gate_compliance` semantics = «these tags require mandatory fix» (tag match on findings triggers escalation). Initial test draft passed all-matching tags in approve-flow metrics, tripping compliance escalation instead of letting the chain reach the verdict. Documented inline in `_approve_event` helper.
+  **impact:** Future tests adding compliance-tag scenarios must remember the «tag = mandatory-fix trigger» semantic. The helper signature reflects this (default = no tags).
+
+- **date:** 2026-05-17 wake-9
+  **session:** E9
+  **decision:** Memory persistence demonstrated via operator-driven round-trip in e2e test, NOT via a new auto-persist subscriber hook on `WORKER_COMPLETED`.
+  **rationale:** Auto-persist has its own design questions (when to write — per story / per wave / on shutdown; what to recompute — median / mean / p99; how to handle concurrent writes from multiple worker subscribers). V1 ships the round-trip primitives (`save_project_memory`, `prime_from_memory`); the hook is a follow-up once first real pilot retro lands and gives feedback on cadence.
+  **impact:** Until the auto-persist hook lands, restarting the orchestrator without an explicit `save_project_memory` call loses the rolling windows. Documented in deferred_items + in the `out of scope` / «memory writer hook» follow-up bullet.
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
@@ -235,7 +246,85 @@
 [2026-05-17 wake-8] E8 execution: runtime/lesson_parser.py (LessonProposal dataclass + parse_lesson_markdown line-by-line state machine + parse_lessons_dir glob + proposals_yaml_path slug sanitiser + atomic save_proposals_yaml + load_proposals_yaml round-trip + apply_proposal w/ pydantic validate-before-write + policy_proposal_applied audit emit + apply_proposals_batch collects errors); cli/main.py policy-apply subcommand (typer.confirm prompt OR --auto-apply); 30 new tests
 [2026-05-17 wake-8] E8 verification: pytest 968 PASS (938 + 30 = 968 ✓ matches acceptance); ruff clean on lesson_parser.py + cli/main.py + test_e8; mypy --strict clean on lesson_parser.py + cli/main.py
 [2026-05-17 wake-8] E8 committed 2240e72 (3 files, +1170 / -0); E8 → Completed, E9 → Current; loop_wrapper runtime + Auto merge=false → no main merge, no ScheduleWakeup, wrapper drives next iteration to E9 (FINAL)
+[2026-05-17 wake-9] E9 promoted Pending → Current; workflow=direct (e2e test file + docs file — pattern locked since wake-2)
+[2026-05-17 wake-9] E9 execution: tests/test_e9_integration_e2e.py (25 tests in 7 groups: 3 full-pipeline e2e + 3 embedded-skills→worker + 4 memory loop + 5 lessons→policy + 3 CLI policy-apply + 3 docs presence + 4 grep DoD); docs/embedded-skills-architecture.md (~190 lines: design rationale, component layout, upgrade flow, worker spawn overlay path, 4-layer self-learning [L1-L4], manual smoke instructions, operational safety, tests pointer, out-of-scope)
+[2026-05-17 wake-9] E9 fix: compliance gate semantics = mandatory-fix on tag MATCH (not absence) — removed matching tags from approve-flow tests; one matching tag retained only in dedicated violation test
+[2026-05-17 wake-9] E9 verification: pytest 993 PASS (968 + 25 = 993 ✓ matches acceptance); ruff clean on touched files (pre-existing I001 in test_w1_real_pilot.py left untouched per «touched files» scope); mypy --strict clean on test_e9_integration_e2e.py
+[2026-05-17 wake-9] E9 committed 3b700b2 (2 files, +1190 / -0); E9 → Completed; Pending empty; initiative complete on integration/embed_phase45_with_selflearning
+[2026-05-17 wake-9] FINAL: loop_wrapper + Auto merge=false → manual_merge_pending blocker written (PENDING resolution stops wrapper); Final Report populated immediately per skill protocol (no autonomous main merge); user reviews integration branch then merges manually
+[2026-05-17 wake-9] S9 done, runtime=loop_wrapper — wrapper detects Final Report populated + Blockers PENDING → exits cleanly; initiative complete
 
-## Final Report (populated on last session completion)
+## Final Report
 
-(empty — E9 still ahead)
+**Initiative:** embed_phase45_with_selflearning (step 2 of 7 master BMad builder roadmap)
+**Status:** COMPLETE on integration branch — awaiting manual merge to main.
+
+### Acceptance — initiative level (all met)
+
+- ✅ Orchestrator имеет canonical phase 4+5 skills (14 skills embedded under `skills/upstream/`)
+- ✅ Любой target project получает same canonical version при worker spawn (overlay via `apply_embedded_skills` in `runtime/embedded_skills.py`)
+- ✅ `bmad-orchestrator skill-update <source>` чинит upstream drift без потери customize/policy/lessons (E4)
+- ✅ 4 gates встроены в code-review с auto-tuning thresholds (E5 gates + E6 live tuning)
+- ✅ Per-project memory тюнит behavior per project (E7 `_config/projects/<slug>/memory.yaml`)
+- ✅ Retrospective lessons → policy proposals → user-approved apply loop (E8)
+- ✅ 993 PASS, ruff/mypy clean on touched files
+- ✅ Docs published (`docs/embedded-skills-architecture.md`)
+
+### Commits on integration/embed_phase45_with_selflearning
+
+| Session | Commit  | Description                                                     | Files | +/-           | Tests |
+|---------|---------|-----------------------------------------------------------------|-------|---------------|-------|
+| E1      | 83f82ed | Embed 14 phase 4+5 BMad skills + skills/ scaffolding            | 63    | +9792 / -24   | 798   |
+| E2      | acd571c | customize/policy/lessons/patches scaffolds + skills_repo        | 21    | +625 / -0     | 813   |
+| E3      | e48be06 | worker_spawn copies embedded skills to worktree                 | 4     | +696 / -0     | 833   |
+| E4      | ad2360a | skill-update + skill-status subcommands + skill_update pipeline | 4     | +1083 / -2    | 853   |
+| E5      | d11a4cb | 4 code-review gates + quarterly compliance sweep                | 4     | +1006 / -10   | 888   |
+| E6      | 104f845 | L2 live tuning of code-review thresholds + atomic YAML write    | 4     | +1086 / -0    | 913   |
+| E7      | 523a774 | L3 per-project memory primes BudgetGuard rolling windows        | 4     | +756 / -0     | 938   |
+| E8      | 2240e72 | L4 lessons → policy proposals parser + policy-apply CLI         | 3     | +1170 / -0    | 968   |
+| E9      | 3b700b2 | Integration + e2e + docs (FINAL)                                | 2     | +1190 / -0    | 993   |
+
+Plus 9 tracker commits + 1 bootstrap commit = **19 commits total**, **+17708 / -10 across 106 files**.
+
+### Test count progression
+
+798 (E1 baseline preserved) → 813 (+15 E2) → 833 (+20 E3) → 853 (+20 E4) → 888 (+35 E5) → 913 (+25 E6) → 938 (+25 E7) → 968 (+30 E8) → 993 (+25 E9) = **993 PASS** (195 new tests across E2-E9; E1 added no tests per spec).
+
+### Manual merge — user action required
+
+```bash
+git checkout main
+git merge --no-ff integration/embed_phase45_with_selflearning \
+  -m "merge embed_phase45_with_selflearning E1..E9 — phase 4+5 skills embedded + L1-L4 self-learning"
+```
+
+Review integration branch first:
+
+```bash
+git log main..integration/embed_phase45_with_selflearning --oneline
+git diff main..integration/embed_phase45_with_selflearning --stat
+```
+
+Rollback if needed (last-resort, uses backup branch):
+
+```bash
+git checkout main
+git reset --hard backup/embed_phase45_with_selflearning-pre-2026-05-17
+```
+
+### Master roadmap progress
+
+Step 2 of 7 complete. Next steps (separate initiatives):
+
+- Step 3-5: Phase 1-3 skills embedding (analysis / planning / solutioning)
+- Step 6: L5 reflexion (auto-PR на own skills) — deferred until baseline data accumulates
+- Step 7: Multi-project queue + skill sync to project's `.claude/skills/` (deploy mode)
+
+### Carry-forward TODOs for follow-up initiative
+
+- Memory writer hook (BudgetGuard → memory.yaml on WORKER_COMPLETED) — E7+E9 deferral
+- Lessons writer (retrospective output → `skills/lessons/<project>/wave-*.md`) — E8+E9 deferral
+- Rollback CLI (`bmad-orchestrator policy-rollback <audit-id>`) — E8 deferral
+- Diff display in interactive `policy-apply` prompt for list-valued fields — E8 deferral
+- Skills-as-data deeper integration + multi-version upstream support — bootstrap deferrals
+- Pre-existing ruff I001 in test_w1_real_pilot.py:290 — one-line cleanup pass
