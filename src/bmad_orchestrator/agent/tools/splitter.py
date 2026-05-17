@@ -2,16 +2,10 @@
 
 check_should_split, split_story.
 
-Phase 2 MVP — pure heuristic (см. spec §21):
-    split when AC >= 7 OR estimated_minutes >= 4*60 OR touched layers >= 3.
-
-Layers are derived from `touches_files` prefixes:
-    src/    -> backend
-    js/, frontend/ -> frontend
-    tests/  -> tests
-    workers/ -> workers
-    crm-rs/  -> rust
-    agent/, bot/ -> python_agent
+Phase 2 MVP heuristic lives in ``runtime/story_splitter.py`` — this module
+wraps it for LLM (``@tool``) invocation. Keeping the pure helper out of the
+SDK-decorator boundary lets downstream code (DagPlanner, watchdog,
+story-splitter skill) import the heuristic without pulling in the Claude SDK.
 """
 
 from __future__ import annotations
@@ -30,35 +24,7 @@ from bmad_orchestrator.agent.tools._common import (
     read_sprint_status_yaml,
     write_sprint_status_yaml,
 )
-
-_LAYER_PREFIXES: list[tuple[str, str]] = [
-    ("src/", "backend"),
-    ("frontend/", "frontend"),
-    ("js/", "frontend"),
-    ("tests/", "tests"),
-    ("workers/", "workers"),
-    ("crm-rs/", "rust"),
-    ("agent/", "python_agent"),
-    ("bot/", "python_agent"),
-]
-
-
-def _classify_layers(files: list[str]) -> set[str]:
-    out: set[str] = set()
-    for f in files:
-        for prefix, label in _LAYER_PREFIXES:
-            if f.startswith(prefix):
-                out.add(label)
-                break
-    return out
-
-
-def _count_acceptance_criteria(story_meta: dict[str, Any]) -> int:
-    text = story_meta.get("_acceptance_text") or ""
-    if isinstance(text, str) and text:
-        return sum(1 for ln in text.splitlines() if ln.strip().startswith(("-", "*", "•")))
-    # fall back to coarse heuristic from estimated_minutes when AC text not parsed
-    return 0
+from bmad_orchestrator.runtime.story_splitter import evaluate_split
 
 
 @tool(
@@ -76,28 +42,10 @@ async def check_should_split(args: dict[str, Any]) -> dict[str, Any]:
     if not story:
         return error(f"unknown story: {story_id!r}", code="unknown_story")
 
-    layers = _classify_layers(story.get("touches_files") or [])
-    minutes = int(story.get("estimated_minutes") or 0)
-    ac_count = _count_acceptance_criteria(story)
-    rules_hit: list[str] = []
-    if ac_count >= 7:
-        rules_hit.append(f"ac>=7 ({ac_count})")
-    if minutes >= 240:
-        rules_hit.append(f"minutes>=240 ({minutes})")
-    if len(layers) >= 3:
-        rules_hit.append(f"layers>=3 ({sorted(layers)})")
-
-    decision = "split" if rules_hit else "keep"
-    return json_ok(
-        {
-            "story_id": story_id,
-            "decision": decision,
-            "rationale": rules_hit,
-            "ac_count": ac_count,
-            "minutes": minutes,
-            "layers": sorted(layers),
-        }
-    )
+    result = evaluate_split(story)
+    payload = result.as_dict()
+    payload["story_id"] = story_id
+    return json_ok(payload)
 
 
 @tool(

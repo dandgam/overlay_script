@@ -43,6 +43,11 @@ description: Build DAG of stories for a wave from sprint-status + epics.md, iden
 - `find_ready_stories` (filter)
 - `predict_conflicts` (mutex check)
 
+## Pure-python helpers (Initiative #2)
+
+- `bmad_orchestrator.runtime.story_splitter.evaluate_split(story)` / `should_split(story)` — heuristic gate (AC≥7 / minutes≥240 / tokens≥5k / files≥10 / layers≥3). No I/O, no LLM. Used by Stage 3.6 pre-split + watchdog warnings.
+- `bmad_orchestrator.runtime.story_splitter.validate_decomposition(payload, parent_id=...)` — schema validator for LLM-emitted sub-story list (2-5 items, deps DAG, no cycles).
+
 ## Failure modes
 
 - Цикл в DAG → escalate человеку (signal что story frontmatter сломан).
