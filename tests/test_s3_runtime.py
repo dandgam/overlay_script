@@ -61,7 +61,7 @@ def _isolate_target_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
 
 def test_event_loop_has_all_spec_types() -> None:
-    """Spec §4 baseline (13) + FS4 B9 (`human_query`) + W4 (`code_review_verdict`) = 15 types."""
+    """Spec §4 baseline (13) + FS4 B9 + W4 + E5 quarterly sweep = 16 types."""
     expected = {
         "worker_completed",
         "worker_halt_file",
@@ -78,10 +78,11 @@ def test_event_loop_has_all_spec_types() -> None:
         "human_response",
         "scheduled_wakeup_5min",
         "code_review_verdict",
+        "compliance_sweep_needed",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 15
+    assert len(ALL_EVENT_TYPES) == 16
 
 
 @pytest.mark.asyncio
