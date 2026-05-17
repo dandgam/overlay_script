@@ -525,6 +525,101 @@ def skill_update(
         console.print("[dim]dry-run — no writes. Re-run with --apply to commit.[/dim]")
 
 
+@app.command(name="policy-apply")
+def policy_apply(
+    project: str = typer.Argument(..., help="Project slug (e.g. odyssey)"),
+    auto_apply: bool = typer.Option(
+        False,
+        "--auto-apply",
+        help="Apply every proposal without prompting (CI / scripted use).",
+    ),
+    lessons_dir: Path | None = typer.Option(  # noqa: B008 — typer pattern
+        None,
+        "--lessons-dir",
+        help=(
+            "Override lessons directory. Defaults to "
+            "<skills_root>/lessons/<project>/."
+        ),
+    ),
+    skills_root: Path = typer.Option(  # noqa: B008 — typer pattern
+        _DEFAULT_SKILLS_ROOT,
+        "--skills-root",
+        help="Root of orchestrator skills dir (default: <repo>/skills).",
+    ),
+    orchestrator_home: Path | None = typer.Option(  # noqa: B008 — typer pattern
+        None,
+        "--orchestrator-home",
+        help="Override orchestrator_home (where _config/projects/ lives).",
+    ),
+) -> None:
+    """Review policy proposals harvested from lessons; accept or reject.
+
+    Scans ``skills/lessons/<project>/`` for ``## Policy proposal`` blocks,
+    persists them to ``_config/projects/<project>/policy-proposals.yaml``,
+    then prompts (or auto-applies with ``--auto-apply``) each against the
+    live policy YAML. Every applied proposal emits a ``policy_proposal_applied``
+    audit event with before/after values for rollback.
+    """
+    from bmad_orchestrator.runtime.lesson_parser import (
+        LessonProposal,
+        LessonProposalInvalidError,
+        apply_proposals_batch,
+        parse_lessons_dir,
+        save_proposals_yaml,
+    )
+
+    settings = load_settings()
+    home = orchestrator_home or settings.orchestrator_home
+    lessons = lessons_dir or (skills_root / "lessons" / project)
+
+    try:
+        proposals = parse_lessons_dir(lessons)
+    except LessonProposalInvalidError as exc:
+        console.print(f"[red]invalid lesson markdown:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    if not proposals:
+        console.print(f"[dim]no proposals found under {lessons}[/dim]")
+        return
+
+    out_path = save_proposals_yaml(
+        proposals, slug=project, orchestrator_home=home
+    )
+    console.print(
+        f"[cyan]found:[/cyan] {len(proposals)} proposal(s) → {out_path}"
+    )
+
+    def _prompt(proposal: LessonProposal) -> bool:
+        console.print(
+            f"\n[bold]{proposal.policy_file}.{proposal.field}[/bold]"
+            f"  [dim]({proposal.source_file})[/dim]"
+        )
+        console.print(f"  before: {proposal.before!r}")
+        console.print(f"  after:  {proposal.after!r}")
+        if proposal.rationale:
+            console.print(f"  rationale: {proposal.rationale}")
+        return typer.confirm("apply?", default=False)
+
+    result = apply_proposals_batch(
+        proposals,
+        skills_root=skills_root,
+        auto_apply=auto_apply,
+        prompt=None if auto_apply else _prompt,
+    )
+
+    console.print(
+        f"\n[green]applied:[/green] {len(result.applied)}  "
+        f"[yellow]rejected:[/yellow] {len(result.rejected)}  "
+        f"[red]errors:[/red] {len(result.errors)}"
+    )
+    for prop, msg in result.errors:
+        console.print(
+            f"  [red]error[/red] {prop.policy_file}.{prop.field}: {msg}"
+        )
+    if result.errors:
+        raise typer.Exit(code=1)
+
+
 @app.command(name="skill-status")
 def skill_status_cmd(
     skills_root: Path = typer.Option(  # noqa: B008 — typer pattern
