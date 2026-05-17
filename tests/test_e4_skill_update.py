@@ -380,8 +380,10 @@ def test_update_skills_apply_updates_bmad_version(tmp_path: Path) -> None:
     assert raw["copied_at"] == "2026-06-01T09:30:00Z"
     assert raw["source_git_date"] == "2026-06-01"
     assert raw["copied_by"] == "pytest E4 fixture"
-    # skills + source_repo preserved
-    assert raw["skills"] == CANONICAL_VERSION["skills"]
+    # F3 P2-1: skills + skills_count are recomputed from the new upstream tree
+    # (canonical fixture lists 2 skills but only 1 is in source).
+    assert raw["skills"] == ["bmad-auto-dev"]
+    assert raw["skills_count"] == 1
     assert raw["source_repo"] == CANONICAL_VERSION["source_repo"]
 
 

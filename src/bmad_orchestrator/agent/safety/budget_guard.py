@@ -82,7 +82,7 @@ def _corruption_result(
 ) -> BudgetResult:
     return BudgetResult(
         scope=scope,
-        spent_usd=spent_usd if isinstance(spent_usd, (int, float)) else 0.0,
+        spent_usd=spent_usd if isinstance(spent_usd, (int, float)) and not isinstance(spent_usd, bool) else 0.0,
         level="halt",
         alarm_threshold=alarm,
         halt_threshold=halt,
@@ -418,6 +418,10 @@ class BudgetGuard:
             self._recent_test_counts.append(min(1.0, max(0.0, ratio)))
         if iterations > 0:
             self._recent_review_iterations.append(int(iterations))
+
+    def recent_story_costs(self) -> tuple[Decimal, ...]:
+        """Snapshot — recent per-story costs (≤ 3) for memory persist + tests."""
+        return tuple(self._recent_story_costs)
 
     def recent_p0_coverages(self) -> tuple[float, ...]:
         """Snapshot — recent per-story P0 coverage ratios (≤ 10)."""

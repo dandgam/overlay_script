@@ -187,6 +187,17 @@ def _relative_files(root: Path) -> dict[str, Path]:
     return files
 
 
+def _enumerate_skills(upstream: Path) -> list[str]:
+    """Sorted skill directory names under ``upstream`` (subdirs with SKILL.md)."""
+    if not upstream.exists() or not upstream.is_dir():
+        return []
+    return sorted(
+        child.name
+        for child in upstream.iterdir()
+        if child.is_dir() and (child / "SKILL.md").is_file()
+    )
+
+
 def compute_diff(current: Path, candidate: Path) -> DiffSummary:
     """Compare regular files under ``current`` vs ``candidate``."""
     cur = _relative_files(current)
@@ -413,6 +424,7 @@ def update_skills(
         shutil.rmtree(backup)
 
     new_rev = _git_rev(src) or version.source_git_rev
+    fresh_skills = _enumerate_skills(current_upstream)
     new_version = BmadVersion(
         source_path=str(src),
         source_repo=version.source_repo,
@@ -420,8 +432,8 @@ def update_skills(
         source_git_date=(ts or _dt.datetime.now(_dt.UTC)).date().isoformat(),
         copied_at=(ts or _dt.datetime.now(_dt.UTC)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         copied_by=updated_by,
-        skills_count=version.skills_count,
-        skills=list(version.skills),
+        skills_count=len(fresh_skills) if fresh_skills else version.skills_count,
+        skills=fresh_skills if fresh_skills else list(version.skills),
     )
     write_bmad_version(skills_root, new_version)
 

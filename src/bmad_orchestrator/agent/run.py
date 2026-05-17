@@ -47,6 +47,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 
 from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard
 from bmad_orchestrator.agent.safety.hooks import audit_tool_output, security_check_hook
+from bmad_orchestrator.agent.skills import SkillError
 from bmad_orchestrator.agent.skills import dispatch as dispatch_skills
 from bmad_orchestrator.agent.skills import load_body as load_skill_body
 from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
@@ -65,7 +67,7 @@ from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
-from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
+from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
 from bmad_orchestrator.runtime.live_tuning import (
     TuningProposal,
     apply_proposals,
@@ -73,8 +75,10 @@ from bmad_orchestrator.runtime.live_tuning import (
     evaluate_threshold,
 )
 from bmad_orchestrator.runtime.project_memory import (
+    ProjectMemoryError,
     ProjectMemoryInvalidError,
     load_project_memory,
+    save_project_memory,
 )
 from bmad_orchestrator.runtime.sandbox import detect_sandbox
 from bmad_orchestrator.runtime.worker_spawn import (
@@ -548,6 +552,7 @@ async def _run_mock_pilot(
         wave=wave,
         spawned=spawned,
         rounds=rounds,
+        completed_stories=len(spawned),
     )
     log.info("mock_pilot_done", stories=len(spawned), rounds=rounds)
 
@@ -608,6 +613,15 @@ async def _run_real_pilot(
         wave=wave,
         escalation_chat_id=getattr(getattr(settings, "bot", None), "escalation_chat_id", None),
     )
+
+    # P0-1 — wire E5/W4/sweep subscribers into the live bus. Without these
+    # registrations real-mode pilots silently no-op on the entire self-learning
+    # pipeline (code review → ff-merge → quarterly sweep). Subscribers take
+    # ``(event, bus)`` while EventLoop dispatches with ``(event,)`` only, so
+    # ``partial`` binds the bus to satisfy the EventCallback contract.
+    bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []
@@ -783,7 +797,7 @@ async def _run_real_pilot(
 
         # Per-batch budget aggregate — sum of realised story costs (W3) with a
         # fallback to the adaptive reserve when no real cost has landed yet.
-        recent_costs = list(budget._recent_story_costs)
+        recent_costs = list(budget.recent_story_costs())
         batch_spent = (
             float(sum(recent_costs))
             if recent_costs
@@ -796,7 +810,29 @@ async def _run_real_pilot(
         wave=wave,
         spawned=spawned,
         rounds=rounds,
+        completed_stories=len(spawned),
     )
+
+    # P1-5 — persist a fresh project_memory snapshot so the next pilot of the
+    # same project boots with primed BudgetGuard windows (E7 prime_from_memory)
+    # instead of an empty deque. Failure must not abort the pilot — log and
+    # continue; a missing snapshot only delays live-tuning convergence by a
+    # few stories at the next launch.
+    try:
+        _persist_project_memory_snapshot(
+            project=project,
+            wave=wave,
+            budget=budget,
+            orchestrator_home=settings.orchestrator_home,
+        )
+    except ProjectMemoryError as exc:
+        log.warning(
+            "project_memory_save_failed",
+            project=project,
+            wave=wave,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
     log.info(
         "real_pilot_done",
         stories=len(spawned),
@@ -804,6 +840,54 @@ async def _run_real_pilot(
         daily_spent_usd=daily_spent_usd,
         halted=daily_halt_reached,
     )
+
+
+def _persist_project_memory_snapshot(
+    *,
+    project: str,
+    wave: str,
+    budget: BudgetGuard,
+    orchestrator_home: Path,
+) -> Path:
+    """P1-5 — atomically rewrite ``memory.yaml`` from BudgetGuard windows.
+
+    Loads the existing memory file (or fresh defaults), refreshes:
+      * ``last_wave`` to the just-completed wave id
+      * the four ``recent_*`` rolling windows from BudgetGuard snapshots
+      * matching medians (story cost, p0 coverage, test coverage)
+
+    Other aggregates (success_rate, compliance_findings_count,
+    lessons_files_count) are touched only by their owning subsystems and
+    preserved as-is. Returns the on-disk path so callers / tests can
+    inspect.
+    """
+    from statistics import median as _median
+
+    memory = load_project_memory(project, orchestrator_home=orchestrator_home)
+    story_costs = [float(c) for c in budget.recent_story_costs()]
+    p0_window = list(budget.recent_p0_coverages())
+    tc_window = list(budget.recent_test_coverages())
+    it_window = list(budget.recent_review_iterations())
+
+    fresh = memory.model_copy(
+        update={
+            "last_wave": wave,
+            "recent_story_costs": story_costs,
+            "recent_p0_coverages": p0_window,
+            "recent_test_coverages": tc_window,
+            "recent_review_iterations": it_window,
+            "median_story_cost_usd": (
+                float(_median(story_costs)) if story_costs else memory.median_story_cost_usd
+            ),
+            "median_review_p0": (
+                float(_median(p0_window)) if p0_window else memory.median_review_p0
+            ),
+            "median_test_count": (
+                float(_median(tc_window)) if tc_window else memory.median_test_count
+            ),
+        }
+    )
+    return save_project_memory(fresh, orchestrator_home=orchestrator_home)
 
 
 async def _tail_and_emit_completion(
@@ -1108,7 +1192,7 @@ async def _dispatch_intent_router(
 
     try:
         body = load_skill_body("intent-router")
-    except Exception as exc:  #skill registry malformed → loud stub
+    except (SkillError, OSError) as exc:  # skill registry malformed → loud stub
         log.error("intent_router_skill_load_failed", error=str(exc))
         await _stub_human_response(
             bus, chat_id=chat_id, corr_id=corr_id, text=text, reason="skill_load_failed"
@@ -1138,7 +1222,19 @@ async def _dispatch_intent_router(
             tools=tools,
             messages=messages,
         )
-    except Exception as exc:  #network / API errors → stub
+    except (TimeoutError, ConnectionError, OSError) as exc:  # network/transport → stub
+        log.error(
+            "intent_router_transport_error",
+            error_type=type(exc).__name__,
+            error=str(exc)[:200],
+            chat_id=chat_id,
+            corr_id=corr_id,
+        )
+        await _stub_human_response(
+            bus, chat_id=chat_id, corr_id=corr_id, text=text, reason="transport_error"
+        )
+        return
+    except Exception as exc:  # anthropic.APIError + unexpected → stub
         log.error(
             "intent_router_api_error",
             error_type=type(exc).__name__,
@@ -1204,7 +1300,7 @@ async def _dispatch_intent_router(
                 continue
             try:
                 result = await handler_tool.handler(tool_input)
-            except Exception as exc:  #tool failure → loud, but emit response
+            except (RuntimeError, ValueError, TypeError, OSError, KeyError) as exc:  # tool failure → loud, but emit response
                 log.error(
                     "intent_router_tool_dispatch_error",
                     tool=tool_name,
@@ -1578,9 +1674,22 @@ async def _apply_live_tuning(
     if not proposals:
         return
 
-    new_gates, escalations = apply_proposals(gates, tuple(proposals))
+    # P1-7 — split off proposals that *tighten* the gate (proposed > current).
+    # Both p0_threshold and test_coverage_threshold are "minimum required" —
+    # raising them makes the gate stricter, which can silently block stories
+    # that would have passed yesterday. Escalate every tightening through
+    # HUMAN_QUERY regardless of bounds; only loosening / no-op moves are
+    # eligible for silent apply.
+    tighten_props = tuple(
+        p for p in proposals if p.proposed_value > p.current_value
+    )
+    safe_props = tuple(
+        p for p in proposals if p.proposed_value <= p.current_value
+    )
+
+    new_gates, bound_escalations = apply_proposals(gates, safe_props)
     changed_metrics = tuple(
-        prop.metric for prop in proposals if prop.within_bounds
+        prop.metric for prop in safe_props if prop.within_bounds
     )
 
     if changed_metrics and cfg.gates_path is not None:
@@ -1602,7 +1711,7 @@ async def _apply_live_tuning(
                 new_test_coverage_threshold=new_gates.test_coverage_threshold,
             )
 
-    for prop in escalations:
+    for prop in bound_escalations:
         log.info(
             "live_tuning_bounds_exceeded",
             story_id=story_id,
@@ -1626,6 +1735,41 @@ async def _apply_live_tuning(
             ),
             story_id=story_id,
             verdict="live_tuning_bounds",
+            metric=prop.metric,
+            current_value=prop.current_value,
+            proposed_value=prop.proposed_value,
+            iqr=prop.iqr,
+            actions=["approve_update", "keep_current"],
+        )
+
+    # P1-7 — tighten escalations get a dedicated verdict and a message that
+    # explicitly flags «strictening» so the operator can distinguish from a
+    # bounds-only breach (which may be a loosening that overshot).
+    for prop in tighten_props:
+        log.info(
+            "live_tuning_tighten_escalated",
+            story_id=story_id,
+            metric=prop.metric,
+            current=prop.current_value,
+            proposed=prop.proposed_value,
+            iqr=prop.iqr,
+        )
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id,
+            text=(
+                f"Live tuning хочет ужесточить {prop.metric} "
+                f"(story {story_id}):\n\n"
+                f"Current: {prop.current_value:.3f}\n"
+                f"Proposed: {prop.proposed_value:.3f} "
+                f"(median of last {len(prop.samples)} coverage samples)\n"
+                f"Tightening раньше предыдущего значения может silently отклонить "
+                f"stories, которые проходили вчера — apply требует ручного "
+                f"подтверждения.\n"
+                f"Approve update or keep current threshold?"
+            ),
+            story_id=story_id,
+            verdict="live_tuning_tighten",
             metric=prop.metric,
             current_value=prop.current_value,
             proposed_value=prop.proposed_value,
@@ -1728,7 +1872,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         handle = await _spawn_code_review_worker(
             worktree=worktree, story_id=story_id, wave=wave
         )
-    except Exception as exc:  # spawn / sandbox failure → escalate
+    except (OSError, RuntimeError) as exc:  # spawn / sandbox failure → escalate
         log.exception(
             "code_review_spawn_failed", story_id=story_id, worktree=worktree
         )
@@ -1921,7 +2065,7 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
             integration_branch=integration_branch,
             feature_branch=feature_branch,
         )
-    except Exception as exc:
+    except Exception as exc:  # git library errors (GitCommandError) + subprocess
         log.exception(
             "merge_to_integration_failed",
             story_id=story_id,
@@ -1955,7 +2099,7 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
             cleanup_worktree(
                 Path(worktree), root=cfg.target_project / ".worktrees"
             )
-        except Exception as exc:  # cleanup failure must not block the merge
+        except OSError as exc:  # cleanup failure must not block the merge
             log.warning(
                 "worktree_cleanup_failed",
                 story_id=story_id,

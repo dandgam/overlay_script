@@ -743,9 +743,12 @@ def test_w4_code_review_skill_invocation_literal() -> None:
 # ── 11. Grep validation (W4 DoD) ────────────────────────────────────────────
 
 
-def test_w4_grep_subscribers_defined_exactly_twice() -> None:
-    """``code_review_subscriber|merge_to_integration_subscriber`` must occur on
-    exactly 2 lines in ``agent/run.py`` (the two definitions)."""
+def test_w4_subscribers_defined_and_wired() -> None:
+    """W4 + F1-P0-1: both subscribers must (a) be defined as async functions
+    and (b) be wired into the EventLoop via ``partial(...)`` inside
+    ``_run_real_pilot``. The earlier assertion that they appeared on
+    exactly 2 lines silently sanctioned the P0 bug where the subscribers
+    were defined but never registered with ``bus.on(...)``."""
     src = (
         Path(__file__).parent.parent
         / "src"
@@ -753,12 +756,10 @@ def test_w4_grep_subscribers_defined_exactly_twice() -> None:
         / "agent"
         / "run.py"
     ).read_text(encoding="utf-8")
-    hits = sum(
-        1
-        for line in src.splitlines()
-        if "code_review_subscriber" in line or "merge_to_integration_subscriber" in line
-    )
-    assert hits == 2, f"expected exactly 2 lines, got {hits}"
+    assert "async def code_review_subscriber" in src
+    assert "async def merge_to_integration_subscriber" in src
+    assert "partial(code_review_subscriber, bus=bus)" in src
+    assert "partial(merge_to_integration_subscriber, bus=bus)" in src
 
 
 def test_w4_grep_event_type_in_event_loop() -> None:
