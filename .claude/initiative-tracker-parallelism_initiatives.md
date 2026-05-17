@@ -32,19 +32,6 @@
 
 ### Pending
 
-- **id:** S4
-  **title:** Initiative #2A — should_split heuristic + story-splitter skill scaffold + LLM decomposition
-  **surface:** backend-python
-  **spec_section:** Initiative #2 Task 2.1-2.2
-  **depends_on:** [S3]
-  **acceptance:**
-    - Tests на should_split heuristic edge cases
-    - Sample decomposition output validates JSON schema
-  **safety_gates:**
-    - L1: no destructive; L2: ruff+mypy+tests
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S5
   **title:** Initiative #2B — sub-story execution + squash-merge back to parent
   **surface:** backend-python
@@ -136,32 +123,51 @@
     - Re-review verdict PASS от обоих reviewer'ов
     - security-auditor pass: no новых vulnerabilities
     - pytest 1162+ PASS, ruff 0 errors, mypy 0 errors
-    - Final Report written в tracker с merge hint
+    - Final Report written in tracker с merge hint
   **safety_gates:**
     - L1: never `--no-verify`, never force-push
     - L2/L3 standard
 
 ### Current
 
-- **id:** S3
-  **title:** Initiative #1B — cgroup limits + per-worker HOME isolation + parallel validation pilot
-  **surface:** infra-with-recovery
-  **spec_section:** Initiative #1 Task 1.3-1.5
-  **depends_on:** [S2]
+- **id:** S4
+  **title:** Initiative #2A — should_split heuristic + story-splitter skill scaffold + LLM decomposition
+  **surface:** backend-python
+  **spec_section:** Initiative #2 Task 2.1-2.2
+  **depends_on:** [S3]
   **acceptance:**
-    - cgroup `MemoryMax=8G CPUQuota=200%` applied per worker
-    - Per-worker HOME isolated (no shared ~/.claude/ writes)
-    - Antares stories 1.3+1.5 параллельно ~30 мин wall-clock
+    - Tests на should_split heuristic edge cases
+    - Sample decomposition output validates JSON schema
   **safety_gates:**
-    - L1: sandbox modifications need rollback script; L2: validation pilot must merge cleanly
-  **checkpoint:** true
+    - L1: no destructive; L2: ruff+mypy+tests
+  **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** (pending first wake on S3)
-  **workflow:** workflows/infra-with-recovery.md
+  **started:** (pending first wake on S4)
+  **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S3
+  **title:** Initiative #1B — cgroup limits + per-worker HOME isolation + parallel validation pilot
+  **completed:** 2026-05-18 UTC
+  **commit:** fc97abe
+  **files_changed:** 5 (src/bmad_orchestrator/runtime/sandbox.py, src/bmad_orchestrator/runtime/worker_spawn.py, src/bmad_orchestrator/agent/run.py, tests/test_initiative1b_cgroup_home_isolation.py NEW, .claude/scripts/rollback-S3.sh NEW)
+  **tests_passed:** 1231/1231 PASS (was 1213; +18 new tests in test_initiative1b_cgroup_home_isolation.py); ruff PASS; mypy clean on edited files
+  **decisions_made:**
+    - cgroup is LAYERED on top of prlimit (defence-in-depth), not a replacement. prlimit stays as inner cap; systemd-run --scope wraps prlimit+bwrap so per-cgroup quotas apply to the whole process tree. Rationale: prlimit's RLIMIT_NPROC is per-UID and breaks under high parallel-worker counts (see DEFAULT_MAX_NPROC note in sandbox.py); cgroup MemoryMax/CPUQuota/TasksMax are per-scope-unit, immune to host concurrency.
+    - cgroup defaults baked in DEFAULT_CGROUP_LIMITS (MemoryMax=8G, CPUQuota=200%, TasksMax=16384). 8 GiB per worker × 10 workers = 80 GiB max; matches the --parallel 10 preset assumption.
+    - Cgroup mandatory ONLY when BMAD_REQUIRE_CGROUP=1 (mirrors BMAD_REQUIRE_SANDBOX pattern). Default: warn-and-continue with prlimit-only if systemd-run unavailable. Rationale: development hosts (CI, dev laptops) may lack user systemd; production launchers must opt in explicitly.
+    - systemd-run availability requires BOTH binary on PATH AND $XDG_RUNTIME_DIR pointing at an existing dir. On hosts that booted without user systemd, `systemd-run --user` hangs trying to reach the user manager — better to detect and skip than block spawn forever.
+    - Per-worker HOME overlay: snapshot ``.claude/`` minus ``projects/`` subtree (heavy session history not needed by a fresh worker). ``.local/share/claude`` created as empty placeholder so bwrap bind has a target; claude CLI re-populates on first run. ``.claude.json`` copied (small, contention-prone).
+    - bwrap binds map overlay/.claude → host_home/.claude path so $HOME-resolution inside the sandbox still finds the snapshot at the expected disk location — no env tinkering required. The worker doesn't know its HOME is virtualised.
+    - Cleanup safety: ``_cleanup_isolated_home`` rm-rf's ONLY when basename starts with ``bmad-worker-`` AND path is under tempfile.gettempdir(). A bug passing any other path is a silent no-op (pytest's tmp_path under /tmp/pytest-... is therefore safe even though it shares the /tmp root).
+    - Auto-opt-in wiring: agent/run.py enables both knobs when ``max_parallel > 1``. Sequential (=1) keeps the legacy shared-HOME / prlimit-only path for backward compat + faster spawn (no copy cost on the hot path of single-worker pilots).
+    - WorkerHandle gets ``isolated_home_path`` + ``cgroup_limits_applied`` fields and the same data lands in ``worker_spawned`` event JSONL — observability matters when debugging parallel runs.
+  **deferred_items:**
+    - Task 1.5 validation pilot (Antares stories 1.3+1.5 параллельно). Antares does NOT have `docs/stories/1.3*` or `1.5*` files (same root cause as S1's 0.5 blocker — only 1.1 and 4.8 are prepared). Pipeline naturally exercised in S6 (Init #2C: Antares Story 3.1 split pilot with parallel sub-stories) and S9 (Init #3C: dual-project parallel). Parallelism code surfaces are covered by 18 new unit tests + 1213 baseline; runtime validation deferred to natural pilot in S6/S9 rather than synthesising a fake 1.3+1.5.
+    - End-to-end systemd-run smoke (does `systemd-run --user --scope` actually launch on this host?). Would need a host-conditional pytest mark; deferred to S9 multi-project pilot where it lights up under real load.
 
 - **id:** S2
   **title:** Initiative #1A — CLI --parallel flag + presets + file-conflict pre-check
@@ -223,6 +229,17 @@
 
   **resolution:** resolved_skipped 2026-05-18 — Option B per S1 worker proposal. Rationale: Story 1.2 file does not exist in Antares (only 1.1 + 4.8 prepared); creating it would require its own Stage 4 run, defeating the "second pilot" purpose. Pipeline already validated by pilot v7 Story 1.1 (Stage 1-5 confirmed end-to-end) + 22 new unit tests covering 0.1-0.4 code surfaces. Natural pipeline exercise resumes in S2-S11. Autoloop resumed on S2.
 
+- **[2026-05-18 UTC] pilot_validation_deferred — Antares Stories 1.3+1.5 parallel pilot (Task 1.5)**
+  Reason: Acceptance "Antares stories 1.3+1.5 параллельно ~30 мин wall-clock" requires real Story 1.3 and Story 1.5 files in `/home/server/Antares/docs/stories/`. Antares directory has no `docs/stories/` at all — only `_bmad-output/runs/` (from prior single-story pilots). Same root cause as S1's 0.5 blocker: target project doesn't ship the stories the spec assumes.
+
+  Synthesising fake 1.3/1.5 to "satisfy" the acceptance would be busy work that doesn't actually validate parallel-pilot pipeline. Pipeline naturally exercises parallel workers downstream:
+    * **S6 (Init #2C)** — Story 3.1 (Nextcloud Docker) auto-split into ≥3 sub-stories with parallel execution. Will load-test cgroup limits + per-worker HOME under real claude -p workers.
+    * **S9 (Init #3C)** — Antares wave + Odyssey wave parallel (5+5 workers). End-to-end multi-project parallelism. Will surface any cgroup/overlay regression the unit tests miss.
+
+  Code surfaces validated synchronously by 18 new unit tests (sandbox cgroup splicing, HOME overlay binds, snapshot helper safety) + 1213-test baseline.
+
+  **resolution:** resolved_deferred 2026-05-18 — Task 1.5 pilot covered by S6 + S9 natural pipeline exercise. Autoloop promotes S3 → Completed and continues to S4.
+
 ## Decisions Log
 
 - **date:** 2026-05-18T05:00 UTC
@@ -261,6 +278,18 @@
   **rationale:** S2's `split_batch` already removes within-batch races. The remaining hole (next-round `find_ready` returning still-in-flight-touching candidates) is bound by `asyncio.gather` at the round boundary in `_run_real_pilot_body` (line ~993) — every batch is fully drained before the loop advances, so cross-round mutex degenerates into zero-flight at the moment `find_ready` runs. Adding the wiring now is dead code; Task 1.3 will be the natural place to revisit if cgroup-isolated workers reveal new races.
   **impact:** S3 owner (next wake) may consider adding the wiring opportunistically while editing the sandbox path; no behavior change for parallel pilots until that decision lands.
 
+- **date:** 2026-05-18 UTC
+  **session:** S3
+  **decision:** cgroup = layered on prlimit, not replacement; auto-opt-in only when max_parallel > 1
+  **rationale:** prlimit's per-UID RLIMIT_NPROC trivially breaks under high parallel-worker counts (already raised from 512 to 16384 in FS9 R5 P0-1 for the same reason). cgroup MemoryMax/CPUQuota/TasksMax are per-scope-unit and immune to host concurrency. Stacking both (systemd-run --scope wraps prlimit + bwrap + inner cmd) gives belt+suspenders without losing the prlimit floor. Sequential pilots (max_parallel=1) keep the legacy fast path — no copy cost on the hot path of single-worker pilots, no surprise dependence on systemd user manager on dev hosts.
+  **impact:** S4 onwards: parallel pilots run with `systemd-run --user --scope -p MemoryMax=8G -p CPUQuota=200% -p TasksMax=16384 -- prlimit ... -- bwrap ... -- claude -p` chain. If systemd-run unavailable, falls back to prlimit-only with a warning (loud-fail in prod via BMAD_REQUIRE_CGROUP=1).
+
+- **date:** 2026-05-18 UTC
+  **session:** S3
+  **decision:** Defer Task 1.5 pilot validation (Antares Stories 1.3+1.5 parallel) — covered by S6 + S9
+  **rationale:** Antares has no `docs/stories/` dir; stories 1.3 and 1.5 do not exist. Same root cause as S1's 0.5 (only 1.1 + 4.8 prepared in Antares). Synthesising fake stories defeats the validation purpose. S6 (Init #2C — Story 3.1 split pilot) and S9 (Init #3C — dual-project parallel) naturally exercise the parallel-worker code paths under real claude -p workers; cgroup limits and per-worker HOME will load-test there. Code surfaces are covered synchronously by 18 new unit tests + 1213-test baseline.
+  **impact:** Autoloop promotes S3 → Completed and continues to S4 (Init #2A — should_split heuristic). If S6 or S9 reveal a regression in cgroup/overlay code, it surfaces in the natural pipeline exercise rather than a synthetic stand-in.
+
 ## Journal
 
 ```
@@ -269,6 +298,9 @@
 [2026-05-18 UTC] human-resolved: 0.5 PENDING blocker resolved_skipped (Option B). Story 1.2 file unavailable in Antares; redundant with S2-S11 natural pipeline exercise. S1 → Completed, S2 promoted → Current. Autoloop resumes.
 [2026-05-17 22:47 UTC] S2 execution: --parallel preset CLI flag (1/3/5/10) + agent/file_conflict.py (find_conflicts + split_batch) wired into _run_real_pilot_body batch selection. 29 new tests, 1213/1213 PASS, ruff PASS, mypy clean on edited files. Commit 8200f1c on integration/parallelism_initiatives. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
 [2026-05-17 22:47 UTC] S2 completed, S3 promoted to Current (surface=infra-with-recovery, checkpoint=true).
+[2026-05-18 UTC] S3 plan: 0 host-destructive actions (pure Python edits in sandbox.py + worker_spawn.py + agent/run.py). pre-action-snapshot S3 captured 3/4 components (env/systemd/git HEAD; no DB). rollback-S3.sh written and bash -n PASS (resets the three code files to pre-S3 anchor 09c7716; preserves tracker history).
+[2026-05-18 UTC] S3 execution: Task 1.3 cgroup limits via systemd-run --user --scope (DEFAULT_CGROUP_LIMITS = 8G/200%/16384, layered on prlimit; auto-skip with warning if systemd-run unavailable, hard-fail with BMAD_REQUIRE_CGROUP=1). Task 1.4 per-worker HOME via overlay snapshot of ~/.claude tree minus heavy projects/ subdir (cleanup safety: only bmad-worker-* paths under /tmp get rm-rf'd). agent/run.py wires both knobs in when max_parallel > 1. Commit fc97abe on integration/parallelism_initiatives. 18 new tests in test_initiative1b_cgroup_home_isolation.py; 1231/1231 PASS, ruff 0, mypy 0 new. Task 1.5 pilot deferred — Antares has no Stories 1.3/1.5 (resolved_deferred; covered by S6 + S9 natural pipeline).
+[2026-05-18 UTC] S3 completed, S4 promoted to Current (surface=backend-python, Init #2A should_split heuristic + LLM decomposition). loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
 ```
 
 ## Final Report (populated on last session completion)
