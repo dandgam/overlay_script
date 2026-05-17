@@ -38,30 +38,6 @@
 
 ### Pending
 
-- **id:** P1
-  **title:** Patch H (timeout fix) + Patch C (smart deletion check) (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 50-65
-  **depends_on:** []
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - Patch H: `worker_spawn._worker_timeout_sec()` default → 1800 (был 86400). Backward compat: `BMAD_WORKER_TIMEOUT_SEC` env override остаётся.
-    - Patch C: new subscriber `deletion_safety_subscriber(event, bus)`:
-      - On WORKER_COMPLETED → parse worker diff (git diff HEAD via subprocess в worktree)
-      - Scan deletions against patterns from `skills/policy/deletion-safety.yaml`: migrations/*.sql, *secrets*, *.env, *credentials*, *.pem, *.key (mirror runner.sh `migration_patterns`)
-      - Match → halt event + emit HUMAN_QUERY с unsafe paths list
-      - Wire в `_run_real_pilot` (caller-side, после embed_phase45_fixes F1 wiring pattern)
-    - Reference grep validation: `grep -nE "Patch H 2026" ~/.claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh` (already done — line 95)
-    - `skills/policy/deletion-safety.yaml` — initial patterns list
-    - 20 regression tests (timeout default, deletion patterns match, env override preserved, subscriber wired)
-    - `pytest tests/ -q` — 1054 PASS (1034 + 20); ruff/mypy clean
-  **safety_gates:**
-    - L1: no force/no-verify
-    - L2: deny-list freeze (sandbox/worker_spawn только caller-side helpers разрешены)
-    - L3: branch isolation
-
 - **id:** P2
   **title:** Patch N (build check guard subscriber) (CHECKPOINT)
   **surface:** backend-python
@@ -84,7 +60,7 @@
       - On success → log + pass through; code-review subscriber fires normally
     - Reference: runner.sh Stage 5.5 build check (cargo check pattern)
     - 20 regression tests
-    - `pytest tests/ -q` — 1074 PASS
+    - `pytest tests/ -q` — 1074 PASS (1057 baseline after P1 + 17 new ≈ 1074)
 
 - **id:** P3
   **title:** Patch Q (diff size) + Patch R (commit-completeness recovery) + Patch S (Stage 5 commit) (CHECKPOINT)
@@ -165,10 +141,23 @@
     - Manual merge через human review (Auto merge=false)
 
 ### Current
-(none — next wake promotes P1)
+(none — next wake promotes P2)
 
 ### Completed
-(none)
+
+- **id:** P1
+  **title:** Patch H (timeout fix) + Patch C (smart deletion check)
+  **completed:** 2026-05-18 00:30 UTC
+  **commit:** b751e33eeccd92e145e389d85fcd8d878287da93
+  **files_changed:** 6
+  **tests_passed:** 1057 PASS (was 1034 + 23 new in test_canonical_patches_p1.py)
+  **decisions_made:**
+    - Patch C subscriber lives in new module `runtime/deletion_safety.py` (not bolted onto `agent/run.py` which is already 2180 LOC).
+    - Patch C policy schema is local (DeletionSafetyPolicy in deletion_safety.py), not added to the 3-file PolicyConfig in skills_repo.py — keeps the canonical policy loader untouched.
+    - Patch C halts the chain by mutating `event.payload['status'] → 'halted_unsafe_deletion'`. `code_review_subscriber` already short-circuits on `status != 'success'`, so no edits needed there.
+    - Patch C subscriber wired FIRST in `_run_real_pilot` bus.on(...) chain (before code_review) — order matters for the payload-mutation gating to work.
+    - test_embed_phase45_fixes_f1 subscriber-count assertion updated 3 → 4.
+  **deferred_items:** []
 
 ## Safety Gates Triggered
 (none yet)
@@ -190,6 +179,17 @@
   **rationale:** User asked «лонг 120 с ватчдогом». Каждая session ~15-25 min, total ~2-3 hours.
   **impact:** Faster iteration на patches; watchdog 90min hard ceiling defends from runaways.
 
+- **date:** 2026-05-18 00:30 UTC
+  **session:** P1
+  **decision:** deletion_safety_subscriber halts via payload mutation (`status → 'halted_unsafe_deletion'`), not via event suppression or new event type.
+  **rationale:** `code_review_subscriber` already gates on `payload['status'] == 'success'` — re-using that gate avoids modifying review code. Adding a new EventType would force every existing/future subscriber to learn about the halt protocol.
+  **impact:** Downstream patches (P2 build_check, P3 stage5_commit, P5 security) can use the SAME mutation pattern — keep the contract consistent. Subscriber registration order matters: the halter must run FIRST.
+
 ## Journal
 
 [2026-05-18 bootstrap] bootstrap: tracker + backup + integration branch созданы, 6 sessions planned (P1-P6), runtime=loop_wrapper, delay=120s, auto_merge=false. Reference: Odyssey handoff doc + bmad-auto-dev-runner.sh.
+[2026-05-18 00:30 UTC] P1 execution: Patch H + Patch C ported. 23 new tests in tests/test_canonical_patches_p1.py; full suite 1057 PASS; ruff clean; mypy clean on new code. Subscriber count 3→4 in test_embed_phase45_fixes_f1. Commit b751e33.
+[2026-05-18 00:30 UTC] P1 completed → Completed; P2 promoted to next-up (subscriber count 4→5 will land in P2 via build_check_subscriber). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
+
+## Final Report (populated on last session completion)
+(empty — P6 will populate)
