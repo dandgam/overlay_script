@@ -187,12 +187,18 @@ def _make_target_with_stories(tmp_path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_deletion_safety_wired_first_before_code_review(
+async def test_deletion_safety_wired_before_code_review(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Patch C subscriber must be the FIRST registered on the bus so its
-    payload mutation (status → 'halted_unsafe_deletion') runs BEFORE
-    code_review_subscriber gates on status == 'success'."""
+    """Patch C subscriber must precede code_review_subscriber on the bus so
+    its payload mutation (status → 'halted_unsafe_deletion') runs BEFORE
+    code_review_subscriber gates on status == 'success'.
+
+    After P2 (Patch N, 2026-05-18) build_check_subscriber registers first, so
+    deletion_safety is at index 1 (not 0). Both still precede code_review.
+    """
+    from bmad_orchestrator.runtime.build_check import build_check_subscriber
+
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
     target = _make_target_with_stories(tmp_path)
     monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(target))
@@ -208,11 +214,15 @@ async def test_deletion_safety_wired_first_before_code_review(
     finally:
         await bus.stop()
 
-    assert len(bus._subs) == 4
-    # Each `partial` keeps the original `.func` reference — compare against it.
-    first = getattr(bus._subs[0], "func", bus._subs[0])
-    assert first is deletion_safety_subscriber, (
-        f"Patch C subscriber must be wired first; got {first!r}"
+    # P1 wired 4 subscribers (deletion + review + merge + sweep); P2 adds
+    # build_check at index 0, total 5.
+    assert len(bus._subs) == 5
+    funcs = [getattr(s, "func", s) for s in bus._subs]
+    assert funcs[0] is build_check_subscriber, (
+        f"Patch N subscriber must be wired first; got {funcs[0]!r}"
+    )
+    assert funcs[1] is deletion_safety_subscriber, (
+        f"Patch C subscriber must be wired second; got {funcs[1]!r}"
     )
 
 

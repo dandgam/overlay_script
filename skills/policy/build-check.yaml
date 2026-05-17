@@ -1,0 +1,42 @@
+# Build check guard — Patch N canonical port (2026-05-18).
+#
+# After WORKER_COMPLETED (status=success), build_check_subscriber runs the
+# commands below inside the worker's worktree. ANY non-zero exit halts the
+# event: payload['status'] is mutated to 'halted_build_check_failed', a
+# HUMAN_QUERY is emitted with the failing command + tail of its output, and the
+# downstream code_review_subscriber skips (gates on status == 'success').
+#
+# Rationale: Stage 6 Opus review costs ~$15 and reads source code, NOT the build
+# graph — it routinely approves code that doesn't compile or has failing tests.
+# A 30-second pytest / cargo check guard saves the $15 spend on broken output.
+#
+# Reference: ~/.claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh
+# Stage 5.5 (lines 521-556 of the original 1100 LOC bash runner). Patch N
+# 2026-05-16.
+#
+# Schema (validated by `bmad_orchestrator.runtime.build_check.BuildCheckPolicy`):
+#   commands: list of {name: str, run: str, required: bool}
+#       - name: short identifier (used in HUMAN_QUERY + logs).
+#       - run:  shell command line executed via /bin/sh -c in the worktree.
+#       - required: if true, non-zero exit halts; if false, exit is logged but
+#                   not fatal (advisory). Defaults to true.
+#   timeout_sec: int — per-command wall-clock cap. Default 600s.
+#   tail_lines:  int — lines from stderr/stdout retained in HUMAN_QUERY body
+#                       for operator triage. Default 40.
+#   skip_if_missing_executable: bool — if the command's first token is not on
+#       PATH, skip silently rather than fail. Default true (a Python project
+#       worktree should not halt because `cargo` is absent).
+#   escalation_text: str — prepended to HUMAN_QUERY body (operator hint).
+
+commands:
+  - {name: pytest, run: "pytest tests/ -q", required: true}
+  - {name: ruff,   run: "ruff check src tests", required: true}
+
+timeout_sec: 600
+tail_lines: 40
+skip_if_missing_executable: true
+
+escalation_text: |
+  Worker build check failed. Stage 6 (code review) is being skipped to avoid
+  spending ~$15 on Opus review of a broken artefact. Inspect the command tail
+  below, fix the build in the worker's branch, and retry the wave.

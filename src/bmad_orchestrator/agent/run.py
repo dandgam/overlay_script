@@ -65,6 +65,7 @@ from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system
 from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
+from bmad_orchestrator.runtime.build_check import build_check_subscriber
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.deletion_safety import deletion_safety_subscriber
@@ -621,10 +622,16 @@ async def _run_real_pilot(
     # ``(event, bus)`` while EventLoop dispatches with ``(event,)`` only, so
     # ``partial`` binds the bus to satisfy the EventCallback contract.
     #
-    # Patch C (2026-05-18 canonical port): deletion_safety_subscriber registers
-    # FIRST so an unsafe-deletion halt mutates the WORKER_COMPLETED payload
-    # status BEFORE code_review_subscriber sees it (the latter gates on
-    # status == 'success' and short-circuits on non-success).
+    # Patch N (2026-05-18 canonical port): build_check_subscriber runs FIRST so
+    # a broken build halts the chain before deletion_safety / code_review fire
+    # — the cheap pytest+ruff guard saves the ~$15 Opus review on broken code.
+    # Patch C (2026-05-18 canonical port): deletion_safety_subscriber runs
+    # SECOND so an unsafe-deletion halt also mutates the WORKER_COMPLETED
+    # payload status BEFORE code_review_subscriber sees it (the latter gates
+    # on status == 'success' and short-circuits on non-success).
+    # Final order target (after P3): stage5_commit → build_check →
+    # deletion_safety → code_review → merge → quarterly_sweep.
+    bus.on(cast(EventCallback, partial(build_check_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(deletion_safety_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
