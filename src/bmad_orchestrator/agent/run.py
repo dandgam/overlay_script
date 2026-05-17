@@ -165,6 +165,12 @@ async def run_orchestrator(
     ``_run_real_pilot`` — DAG → spawn worker → tail JSONL → bridge
     ``worker_completed`` → bus, with caller-supplied ``max_stories`` /
     ``max_spend_usd`` hard caps and ``BMAD_REQUIRE_SANDBOX=1`` guard.
+
+    Auth model: real-mode runs on Claude subscription via the `claude -p`
+    CLI binary spawned by `runtime_spawn_worker`. ANTHROPIC_API_KEY is only
+    needed for the bot's NL intent-router (graceful slash-command fallback
+    without it). When multi-LLM support lands, this comment becomes outdated.
+    See memory: feedback_no_anthropic_api.
     """
     settings = load_settings()
     models = models or settings.models
@@ -1435,6 +1441,11 @@ async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
         body = load_skill_body(skill)
         log.debug("skill_body_loaded", skill=skill, body_chars=len(body))
 
+    # Subscription-mode supported by design: workers spawn via `claude -p`
+    # CLI which uses Claude subscription auth. ANTHROPIC_API_KEY is required
+    # ONLY for this intent-router (NL → action mapping via SDK). Without it,
+    # bot degrades to slash-commands. See memory: feedback_no_anthropic_api.
+    # TODO: restore SDK path when multi-LLM support (OpenAI / local) lands.
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     budget = _INTENT_ROUTER_BUDGET
     models = _INTENT_ROUTER_MODELS

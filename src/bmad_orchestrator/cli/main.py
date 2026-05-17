@@ -118,8 +118,9 @@ def run(
         True, "--mock/--real",
         help=(
             "Mock-mode E2E pilot — no real spawns. Default ON (N3 FS6); "
-            "use --real for real-mode (requires ANTHROPIC_API_KEY + claude "
-            "binary)."
+            "use --real for real-mode. Real-mode runs on Claude subscription "
+            "(claude -p CLI); ANTHROPIC_API_KEY is only needed for the bot's "
+            "NL intent-router (slash-commands work without it)."
         ),
     ),
     max_stories: int = typer.Option(
