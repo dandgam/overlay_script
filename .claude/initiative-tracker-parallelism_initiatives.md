@@ -32,19 +32,6 @@
 
 ### Pending
 
-- **id:** S5
-  **title:** Initiative #2B — sub-story execution + squash-merge back to parent
-  **surface:** backend-python
-  **spec_section:** Initiative #2 Task 2.3-2.4
-  **depends_on:** [S4]
-  **acceptance:**
-    - Integration test с mock sub-stories
-    - Squash-merge produces single parent commit
-  **safety_gates:**
-    - L1/L2/L3 standard
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S6
   **title:** Initiative #2C — validation pilot Antares Story 3.1 (Nextcloud Docker template) auto-split
   **surface:** backend-python
@@ -130,24 +117,41 @@
 
 ### Current
 
-- **id:** S4
-  **title:** Initiative #2A — should_split heuristic + story-splitter skill scaffold + LLM decomposition
+- **id:** S5
+  **title:** Initiative #2B — sub-story execution + squash-merge back to parent
   **surface:** backend-python
-  **spec_section:** Initiative #2 Task 2.1-2.2
-  **depends_on:** [S3]
+  **spec_section:** Initiative #2 Task 2.3-2.4
+  **depends_on:** [S4]
   **acceptance:**
-    - Tests на should_split heuristic edge cases
-    - Sample decomposition output validates JSON schema
+    - Integration test с mock sub-stories
+    - Squash-merge produces single parent commit
   **safety_gates:**
-    - L1: no destructive; L2: ruff+mypy+tests
+    - L1/L2/L3 standard
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** (pending first wake on S4)
+  **started:** (pending first wake on S5)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S4
+  **title:** Initiative #2A — should_split heuristic + story-splitter skill scaffold + LLM decomposition
+  **completed:** 2026-05-18 UTC
+  **commit:** 0220844
+  **files_changed:** 5 (src/bmad_orchestrator/runtime/story_splitter.py NEW, src/bmad_orchestrator/agent/tools/splitter.py REFACTOR, src/bmad_orchestrator/agent/skills/dag-planner/SKILL.md, tests/test_initiative2a_story_splitter.py NEW, tests/fixtures/mock-odyssey/_bmad-output/planning-artifacts/stories/1-1-tenant-signup.md)
+  **tests_passed:** 1269/1269 PASS (was 1231; +38 new in test_initiative2a_story_splitter.py); ruff 0; mypy 0 new on edited files
+  **decisions_made:**
+    - Helper placed at `runtime/story_splitter.py`, NOT at `agent/skills/dag-planner/` as spec literally suggests. Reason: Python packages cannot contain `-` in their name, and the `skills/dag-planner/` dir is the Claude SDK skill scaffold (SKILL.md + references/) — not a Python package. `SKILL.md` updated to reference the import path so the heuristic lives in exactly one canonical place. Downstream code (DagPlanner, watchdog, story-splitter skill) can import without pulling in the Claude SDK `@tool` boundary.
+    - Heuristic widened beyond original `splitter.py` set (AC≥7 / minutes≥240 / layers≥3) to match spec §Initiative #2 Task 2.1: added `tokens≥5_000` and `files≥10`. The old fixture `1-1-tenant-signup.md` had `estimated_tokens: 40000` (8× the new threshold) and its `test_splitter_keeps_small_story` test broke. Lowered the fixture to 1000 — closer to its naming intent ("small_story") and re-aligned with the new heuristic. No production impact: fixture is test-only.
+    - `evaluate_split` returns a `SplitDecision` dataclass (immutable, `as_dict()` for JSON serialisation). `should_split(story) -> bool` kept as a thin convenience wrapper that matches the spec signature literally. Downstream tools may prefer the dataclass for rationale logging without re-running the heuristic.
+    - Defensive `_coerce_int` for `estimated_minutes` / `estimated_tokens`. The bmad_format frontmatter parser occasionally emits string ints when YAML quoting is sloppy, and the old `int(... or 0)` path crashed on garbage. Falling back to 0 means the rule simply does not fire for that metric — preserves safe-default (keep) on parse failure.
+    - `validate_decomposition` rejects on 9 distinct failure modes (wrong outer type, count outside [2,5], non-dict item, missing required key, non-string id, duplicate id, parent collision, deps_on bad type, unknown dep, cycle). Spec §21.7 mandates malformed JSON → fallback `keep` — implementation surfaces the precise error so callers can log the rationale before downgrading.
+    - `DECOMPOSITION_PROMPT` template baked into the module (Phase 2 v1 hand-off to story-splitter skill). Asks for raw JSON (no markdown fence) and inlines all atomicity rules from the skill's SKILL.md so the Opus call can be made standalone without re-loading the skill body.
+  **deferred_items:**
+    - LLM integration of `validate_decomposition` into a real Opus call — that's S5's scope (sub-story execution via Initiative #1 worker pool). Validator + prompt are the building blocks; the spawn site stays in `agent/skills/story-splitter/` for S5.
+    - Wiring `evaluate_split` into a watchdog warning event when the bmad-orchestrator daemon observes a too-large story in sprint-status without a split decision recorded. Cleanest place would be `runtime/event_loop.py`; opportunistic for S5 or S6.
 
 - **id:** S3
   **title:** Initiative #1B — cgroup limits + per-worker HOME isolation + parallel validation pilot
@@ -290,6 +294,24 @@
   **rationale:** Antares has no `docs/stories/` dir; stories 1.3 and 1.5 do not exist. Same root cause as S1's 0.5 (only 1.1 + 4.8 prepared in Antares). Synthesising fake stories defeats the validation purpose. S6 (Init #2C — Story 3.1 split pilot) and S9 (Init #3C — dual-project parallel) naturally exercise the parallel-worker code paths under real claude -p workers; cgroup limits and per-worker HOME will load-test there. Code surfaces are covered synchronously by 18 new unit tests + 1213-test baseline.
   **impact:** Autoloop promotes S3 → Completed and continues to S4 (Init #2A — should_split heuristic). If S6 or S9 reveal a regression in cgroup/overlay code, it surfaces in the natural pipeline exercise rather than a synthetic stand-in.
 
+- **date:** 2026-05-18 UTC
+  **session:** S4
+  **decision:** Helper module at `runtime/story_splitter.py`, not `agent/skills/dag-planner/` (deviation from spec literal path)
+  **rationale:** Spec §Initiative #2 Task 2.1 literally writes the helper into `src/bmad_orchestrator/agent/skills/dag-planner/`. But `dag-planner` (hyphen) is a Claude SDK skill directory (SKILL.md + references/), not an importable Python package. Putting a `.py` file there forces ugly importlib gymnastics on every caller. The clean placement is next to `runtime/dag_planner.py` (its closest relative). SKILL.md updated to reference the canonical import path so future readers find it.
+  **impact:** All downstream consumers (S5 sub-story executor, watchdog event_loop, story-splitter skill) import from `bmad_orchestrator.runtime.story_splitter`. No SDK boundary required for non-LLM callers.
+
+- **date:** 2026-05-18 UTC
+  **session:** S4
+  **decision:** Widen heuristic to include tokens≥5000 + files≥10 (full spec set), accept fixture churn
+  **rationale:** Old `splitter.py` only checked AC≥7 / minutes≥240 / layers≥3. Spec adds two more thresholds for the same reason cgroup limits exist — token-heavy or file-heavy stories blow worker context regardless of AC count. Lowered fixture `1-1-tenant-signup.md` tokens 40000→1000 to keep its "small_story" intent valid under the new heuristic. No prod impact (test fixture only).
+  **impact:** Stories that previously slipped through with tokens=40k will now correctly trigger split decision when fed through `check_should_split`. Watchdog noise temporarily higher until S5 wires the actual auto-split path.
+
+- **date:** 2026-05-18 UTC
+  **session:** S4
+  **decision:** `validate_decomposition` raises `DecompositionError` rather than returning fallback
+  **rationale:** Spec §21.7 says malformed JSON → fallback `keep` + warning log. Burying that policy inside the validator hides the rationale from callers who want to log the precise error before downgrading. Validator surfaces 9 specific failure modes (with messages); caller decides whether to swallow → keep or escalate.
+  **impact:** S5 sub-story executor wraps `validate_decomposition` in try/except and emits `decomposition_invalid` event with the error message before falling back to monolith. Future split-decisions cache key includes the error class for dedup.
+
 ## Journal
 
 ```
@@ -301,6 +323,9 @@
 [2026-05-18 UTC] S3 plan: 0 host-destructive actions (pure Python edits in sandbox.py + worker_spawn.py + agent/run.py). pre-action-snapshot S3 captured 3/4 components (env/systemd/git HEAD; no DB). rollback-S3.sh written and bash -n PASS (resets the three code files to pre-S3 anchor 09c7716; preserves tracker history).
 [2026-05-18 UTC] S3 execution: Task 1.3 cgroup limits via systemd-run --user --scope (DEFAULT_CGROUP_LIMITS = 8G/200%/16384, layered on prlimit; auto-skip with warning if systemd-run unavailable, hard-fail with BMAD_REQUIRE_CGROUP=1). Task 1.4 per-worker HOME via overlay snapshot of ~/.claude tree minus heavy projects/ subdir (cleanup safety: only bmad-worker-* paths under /tmp get rm-rf'd). agent/run.py wires both knobs in when max_parallel > 1. Commit fc97abe on integration/parallelism_initiatives. 18 new tests in test_initiative1b_cgroup_home_isolation.py; 1231/1231 PASS, ruff 0, mypy 0 new. Task 1.5 pilot deferred — Antares has no Stories 1.3/1.5 (resolved_deferred; covered by S6 + S9 natural pipeline).
 [2026-05-18 UTC] S3 completed, S4 promoted to Current (surface=backend-python, Init #2A should_split heuristic + LLM decomposition). loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
+[2026-05-18 UTC] S4 plan: 0 host-destructive (pure Python additions in runtime/story_splitter.py + tests/test_initiative2a_*.py + refactor of agent/tools/splitter.py + SKILL.md doc). pre-action-snapshot captured 3/4 components (env/systemd/git HEAD; no DB).
+[2026-05-18 UTC] S4 execution: Task 2.1 evaluate_split / should_split / classify_layers / count_acceptance_criteria pure-python helpers (5 thresholds: AC≥7 / minutes≥240 / tokens≥5k / files≥10 / layers≥3, SplitDecision dataclass + as_dict()). Task 2.2 validate_decomposition + DECOMPOSITION_PROMPT (9 failure modes incl. cycle check; raises DecompositionError so caller picks fallback rationale). Refactored agent/tools/splitter.py::check_should_split to delegate. Fixture 1-1-tenant-signup.md tokens 40000→1000 (was 8× new threshold; preserves "small_story" intent). 38 new tests in test_initiative2a_story_splitter.py; 1269/1269 PASS, ruff 0, mypy 0 new on edited files. Commit 0220844 on integration/parallelism_initiatives. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
+[2026-05-18 UTC] S4 completed, S5 promoted to Current (surface=backend-python, Init #2B sub-story execution + squash-merge).
 ```
 
 ## Final Report (populated on last session completion)
