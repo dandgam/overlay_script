@@ -38,32 +38,10 @@
 
 ### Pending
 
-- **id:** P5
-  **title:** Patch X (security-review conditional 4-hunter) (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 130-150
-  **depends_on:** [P3]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - New subscriber `security_review_subscriber(event, bus)`:
-      - On WORKER_COMPLETED (success) AND code_review verdict approve
-      - Check triggers from `skills/policy/security-review.yaml`:
-        - frontmatter `security_critical: true`
-        - epic in `[3, 4, 5, 7, 9, 10]` (configurable)
-        - keyword match in story spec OR diff: auth, jwt, rls, dpa, crypto, billing, pii, audit, hmac, argon, session
-      - Spawn `claude -p /bmad-security-review` 4-hunter parallel (Injection/Auth-Bypass/Crypto/Data-Leak)
-      - Parse verdict: APPROVE / MERGE-WITH-FIXES / BLOCK
-      - BLOCK → halt + emit HUMAN_QUERY с findings
-      - APPROVE / MERGE-WITH-FIXES → emit SECURITY_REVIEW_PASSED, merge_to_integration_subscriber fires
-    - 25 regression tests
-    - `pytest tests/ -q` — 1144 PASS
-
 - **id:** P6
   **title:** Integration + e2e + docs (FINAL)
   **surface:** backend-python
-  **spec_section:** 155-180
+  **spec_section:** 75-82
   **depends_on:** [P1, P2, P3, P4, P5]
   **destructive_actions:** []
   **checkpoint:** false
@@ -82,38 +60,65 @@
 
 ### Current
 
-- **id:** P4
-  **title:** Patch W (Patch R scope by File List allow-list) (CHECKPOINT)
+- **id:** P5
+  **title:** Patch X (security-review conditional 4-hunter) (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 110-125
+  **spec_section:** 64-73
   **depends_on:** [P3]
   **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
   **retry_count:** 0
   **acceptance:**
-    - New `runtime/file_list_parser.py` — parses `### File List` section из story markdown (`_bmad/stories/<id>.md`)
-    - Patch R recovery + Patch Q diff size gate consume File List allow-list:
-      - File List ∪ `sprint-status.yaml` ∪ `deferred-work.md` ∪ `<wave>-retrospective.md`
-      - Anything outside → reject + escalate
-    - Reference: Odyssey memory `~/.claude/projects/-home-server-odyssey/memory/skill_improvement_patch_W_candidate.md`
-    - 15 regression tests
-    - `pytest tests/ -q` — 1123 PASS (1108 baseline + 15 new)
+    - New subscriber `security_review_subscriber(event, bus)`:
+      - On WORKER_COMPLETED (success) AND code_review verdict approve
+      - Check triggers from `skills/policy/security-review.yaml`:
+        - frontmatter `security_critical: true`
+        - epic in `[3, 4, 5, 7, 9, 10]` (configurable)
+        - keyword match in story spec OR diff: auth, jwt, rls, dpa, crypto, billing, pii, audit, hmac, argon, session
+      - Spawn `claude -p /bmad-security-review` 4-hunter parallel (Injection/Auth-Bypass/Crypto/Data-Leak)
+      - Parse verdict: APPROVE / MERGE-WITH-FIXES / BLOCK
+      - BLOCK → halt + emit HUMAN_QUERY с findings
+      - APPROVE / MERGE-WITH-FIXES → emit SECURITY_REVIEW_PASSED, merge_to_integration_subscriber fires
+    - 25 regression tests
+    - `pytest tests/ -q` — 1148 PASS (1123 baseline + 25 new)
 
 ### Completed
 
-- **id:** P1
-  **title:** Patch H (timeout fix) + Patch C (smart deletion check)
-  **completed:** 2026-05-18 00:30 UTC
-  **commit:** b751e33eeccd92e145e389d85fcd8d878287da93
-  **files_changed:** 6
-  **tests_passed:** 1057 PASS (was 1034 + 23 new in test_canonical_patches_p1.py)
+- **id:** P4
+  **title:** Patch W (File List allow-list scope check)
+  **completed:** 2026-05-18 03:30 UTC
+  **commit:** 0d2f64a
+  **files_changed:** 5 (1 new module + 1 new test file + 3 modified)
+  **tests_passed:** 1123 PASS (1108 baseline + 15 new in test_canonical_patches_p4.py)
   **decisions_made:**
-    - Patch C subscriber lives in new module `runtime/deletion_safety.py` (not bolted onto `agent/run.py` which is already 2180 LOC).
-    - Patch C policy schema is local (DeletionSafetyPolicy in deletion_safety.py), not added to the 3-file PolicyConfig in skills_repo.py — keeps the canonical policy loader untouched.
-    - Patch C halts the chain by mutating `event.payload['status'] → 'halted_unsafe_deletion'`. `code_review_subscriber` already short-circuits on `status != 'success'`, so no edits needed there.
-    - Patch C subscriber wired FIRST in `_run_real_pilot` bus.on(...) chain (before code_review) — order matters for the payload-mutation gating to work.
-    - test_embed_phase45_fixes_f1 subscriber-count assertion updated 3 → 4.
+    - New `runtime/file_list_parser.py` owns parsing + allow-list composition. `parse_file_list` is tolerant to mixed bullet markers (`-`/`*`), backticks, trailing `(this file)`/`(deferred)` notes, and bullets that sit directly under `### File List` with no NEW/UPDATE bucket. Empty section / missing file returns an empty `FileList` (no exception) — callers treat that as "permissive, no allow-list filtering".
+    - `AllowList` is a frozen dataclass with `paths: frozenset[str]` (exact match) + `globs: tuple[str, ...]` (fnmatch). Retrospectives use a glob because the wave / date suffix varies; sprint-status.yaml + deferred-work.md + the story file are exact paths.
+    - `collect_allow_list` always injects `_bmad/stories/<story_id>.md` + `ALWAYS_IN_SCOPE_PATHS`. This means an empty File List still permits the recovery to bump sprint-status / deferred-work / the story itself — the canonical "operator-touched" files.
+    - Patch Q parameter renamed `file_list_paths` → `out_of_scope_paths` (semantics: caller pre-computed the partition). The P3 forward-compat hook becomes load-bearing here. `gate_verdict` rejects with `scope_violation:` even if the line cap is fine, then falls through to `diff_size_exceeded:`.
+    - Patch R's `git add -A` is replaced with `git add -- <explicit paths>` when an allow-list is provided. Out-of-scope paths stay uncommitted in the worktree and are surfaced in `CommitRecoveryResult.out_of_scope_paths`. When EVERY dirty path is out of scope, `recovered=False` + `error=""` + the out-of-scope list is populated — callers know nothing was committed AND why.
+    - Wiring in `agent/run.py` is defensive: if `_CODE_REVIEW_GATE.target_project` is None (test paths), Patch W silently degrades to P3 (allow-list never built, `out_of_scope_paths=None` is passed). This means none of the P1/P2/P3 tests had to change.
+    - `measure_diff_per_file` uses `--numstat` (tab-separated) rather than `--shortstat`; binary files report `-` which the parser coerces to zero so they appear in the scope partition without contributing to the line cap.
+    - Test count came in at 15 — matched spec estimate exactly. No ASYNC221 leakage after extracting `_git_add_and_commit` sync helper (matches P1/P3 pattern).
+    - ruff + mypy --strict clean on file_list_parser, diff_size_gate, commit_recovery, run.py.
+  **deferred_items:** []
+
+- **id:** P3
+  **title:** Patch Q (diff size) + Patch R (commit-completeness recovery) + Patch S (Stage 5 commit)
+  **completed:** 2026-05-18 02:30 UTC
+  **commit:** 2e732aa
+  **files_changed:** 10 (4 new modules/policies + 1 new test file + 5 modified)
+  **tests_passed:** 1108 PASS (1080 baseline + 28 new in test_canonical_patches_p3.py)
+  **decisions_made:**
+    - Patch S — new subscriber `stage5_completeness_subscriber` in new module `runtime/stage5_completeness.py`. Wired FIRST on bus (index 0). Non-halting recovery: auto-stages uncommitted Stage 6.retry residue BEFORE halt gates inspect. Populates `payload['stage5_recovery_commit_sha']` + `stage5_recovery_paths` for audit trail.
+    - Patch Q — NOT a new subscriber; embedded into existing `code_review_subscriber` after P0/test-coverage gates, before final approve. Pure helpers (`parse_shortstat`, `measure_diff`, `gate_verdict`) live in new `runtime/diff_size_gate.py`. `file_list_paths` parameter is forward-compat hook for Patch W (P4) — currently unused.
+    - Patch R — NOT a new subscriber; embedded into existing `merge_to_integration_subscriber` BEFORE `_ff_merge_to_integration` call. Pure `recover_pre_merge(worktree, marker, signoff)` helper in new `runtime/commit_recovery.py`.
+    - Patch R worktree-guard fix: real git worktrees (created via `git worktree add`) have a `.git` FILE pointing to metadata; plain marker dirs created in tests don't. Guard `if worktree and (Path(worktree) / ".git").exists():` skips recovery for plain dirs to avoid corrupting outer-repo branches. Caught by `test_w4_merge_subscriber_approve_ff_merge_and_cleanup` regression (was committing marker.txt onto main, diverging from feature/s1).
+    - Subscriber count 5 → 6 (only Patch S adds one). Final order: stage5 → build_check → deletion_safety → code_review → merge → quarterly_sweep.
+    - Ruff ASYNC221 — subprocess.run inside async test bodies. Fix: extracted sync helpers `_git_add_and_commit` + `_head_commit_message` (matches P1 pattern).
+    - Test count overshot spec estimate (28 vs 30 in tracker target, but +28 over 1080 baseline = 1108, target was 1104, +4 over plan).
+    - mypy --strict clean on all new modules + run.py.
+    - test_canonical_patches_p1 + p2 + test_embed_phase45_fixes_f1 subscriber-count assertions updated 5 → 6.
   **deferred_items:** []
 
 - **id:** P2
@@ -133,22 +138,18 @@
     - Test count overshot spec estimate (23 vs 17 in tracker, 20 in spec) — coverage of timeout / missing-executable / optional-command / empty-policy paths warranted the extra cases.
   **deferred_items:** []
 
-- **id:** P3
-  **title:** Patch Q (diff size) + Patch R (commit-completeness recovery) + Patch S (Stage 5 commit)
-  **completed:** 2026-05-18 02:30 UTC
-  **commit:** 2e732aa
-  **files_changed:** 10 (4 new modules/policies + 1 new test file + 5 modified)
-  **tests_passed:** 1108 PASS (1080 baseline + 28 new in test_canonical_patches_p3.py)
+- **id:** P1
+  **title:** Patch H (timeout fix) + Patch C (smart deletion check)
+  **completed:** 2026-05-18 00:30 UTC
+  **commit:** b751e33eeccd92e145e389d85fcd8d878287da93
+  **files_changed:** 6
+  **tests_passed:** 1057 PASS (was 1034 + 23 new in test_canonical_patches_p1.py)
   **decisions_made:**
-    - Patch S — new subscriber `stage5_completeness_subscriber` in new module `runtime/stage5_completeness.py`. Wired FIRST on bus (index 0). Non-halting recovery: auto-stages uncommitted Stage 6.retry residue BEFORE halt gates inspect. Populates `payload['stage5_recovery_commit_sha']` + `stage5_recovery_paths` for audit trail.
-    - Patch Q — NOT a new subscriber; embedded into existing `code_review_subscriber` after P0/test-coverage gates, before final approve. Pure helpers (`parse_shortstat`, `measure_diff`, `gate_verdict`) live in new `runtime/diff_size_gate.py`. `file_list_paths` parameter is forward-compat hook for Patch W (P4) — currently unused.
-    - Patch R — NOT a new subscriber; embedded into existing `merge_to_integration_subscriber` BEFORE `_ff_merge_to_integration` call. Pure `recover_pre_merge(worktree, marker, signoff)` helper in new `runtime/commit_recovery.py`.
-    - Patch R worktree-guard fix: real git worktrees (created via `git worktree add`) have a `.git` FILE pointing to metadata; plain marker dirs created in tests don't. Guard `if worktree and (Path(worktree) / ".git").exists():` skips recovery for plain dirs to avoid corrupting outer-repo branches. Caught by `test_w4_merge_subscriber_approve_ff_merge_and_cleanup` regression (was committing marker.txt onto main, diverging from feature/s1).
-    - Subscriber count 5 → 6 (only Patch S adds one). Final order: stage5 → build_check → deletion_safety → code_review → merge → quarterly_sweep.
-    - Ruff ASYNC221 — subprocess.run inside async test bodies. Fix: extracted sync helpers `_git_add_and_commit` + `_head_commit_message` (matches P1 pattern).
-    - Test count overshot spec estimate (28 vs 30 in tracker target, but +28 over 1080 baseline = 1108, target was 1104, +4 over plan).
-    - mypy --strict clean on all new modules + run.py.
-    - test_canonical_patches_p1 + p2 + test_embed_phase45_fixes_f1 subscriber-count assertions updated 5 → 6.
+    - Patch C subscriber lives in new module `runtime/deletion_safety.py` (not bolted onto `agent/run.py` which is already 2180 LOC).
+    - Patch C policy schema is local (DeletionSafetyPolicy in deletion_safety.py), not added to the 3-file PolicyConfig in skills_repo.py — keeps the canonical policy loader untouched.
+    - Patch C halts the chain by mutating `event.payload['status'] → 'halted_unsafe_deletion'`. `code_review_subscriber` already short-circuits on `status != 'success'`, so no edits needed there.
+    - Patch C subscriber wired FIRST in `_run_real_pilot` bus.on(...) chain (before code_review) — order matters for the payload-mutation gating to work.
+    - test_embed_phase45_fixes_f1 subscriber-count assertion updated 3 → 4.
   **deferred_items:** []
 
 ## Safety Gates Triggered
@@ -207,6 +208,18 @@
   **rationale:** Patch W (P4) will populate this list from the story's `### File List`. Adding the parameter now (with None default) means P4 only updates callers, not signatures — keeps the diff to P4 narrow and avoids a churn commit in this session.
   **impact:** P4 implements `runtime/file_list_parser.py`, threads parsed paths through to `gate_verdict(file_list_paths=...)`, and lights up the allow-list branch that's already in place but currently no-op.
 
+- **date:** 2026-05-18 03:30 UTC
+  **session:** P4
+  **decision:** Renamed `gate_verdict(file_list_paths=...)` (P3 forward-compat stub) to `gate_verdict(out_of_scope_paths=...)`. Callers compute the partition with `measure_diff_per_file` + `partition_per_file` against an `AllowList` first, then pass the out-of-scope subset.
+  **rationale:** Keeping the original name was a leaky abstraction — the gate logic does not need the full file list, only the subset that violates scope. Renaming pushes the responsibility for partitioning to the caller (which already has the AllowList) and keeps `gate_verdict` pure + binary at the file-level: out-of-scope present → `scope_violation:`; otherwise the existing line-count cap runs. No callers had wired the old param (it was a stub), so the rename was safe in a single commit.
+  **impact:** P5 (security_review) reads the same allow-list to scope its keyword scan to in-scope files only — same composition function, same shape, no rework needed.
+
+- **date:** 2026-05-18 03:30 UTC
+  **session:** P4
+  **decision:** When `_CODE_REVIEW_GATE.target_project` is None (the test-only "unconfigured gate" branch), Patch W silently degrades to P3 (allow_list never built, `out_of_scope_paths` stays None).
+  **rationale:** Forcing every existing P1/P2/P3 test to provide a `target_project` would be 30+ test edits for zero functional gain — the gate already gracefully degrades for other unconfigured fields. Production paths always have target_project; tests that exercise the wired flow build their own story directory and pass the wave/target. The "no project, no scope check" branch is documented in the run.py comment and the file_list_parser module-level docstring.
+  **impact:** None of the P1/P2/P3 tests had to change. Future patches that build on Patch W (P5's security_review reading File List for keyword scan, P6's e2e covering scope_violation) must pass `target_project` explicitly.
+
 ## Journal
 
 [2026-05-18 bootstrap] bootstrap: tracker + backup + integration branch созданы, 6 sessions planned (P1-P6), runtime=loop_wrapper, delay=120s, auto_merge=false. Reference: Odyssey handoff doc + bmad-auto-dev-runner.sh.
@@ -216,6 +229,8 @@
 [2026-05-18 01:30 UTC] P2 completed → Completed; P3 promoted to Current (Patch Q + Patch R + Patch S — diff size cap + auto-commit recovery + Stage 5 completeness pre-review). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
 [2026-05-18 02:30 UTC] P3 execution: Patch Q + Patch R + Patch S ported. 3 new modules (stage5_completeness.py, diff_size_gate.py, commit_recovery.py) + 2 policy yamls. 28 new tests in tests/test_canonical_patches_p3.py; full suite 1108 PASS (target 1104, +4 over plan); ruff clean (sync helpers extracted for ASYNC221); mypy --strict clean. Subscriber count 5→6; stage5_completeness wired at index 0, build_check at 1, deletion_safety at 2. Patch Q embedded in code_review_subscriber; Patch R embedded in merge_to_integration_subscriber with `.git`-exists() worktree guard. Commit 2e732aa.
 [2026-05-18 02:30 UTC] P3 completed → Completed; P4 promoted to Current (Patch W — File List allow-list для Patch Q/R). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
+[2026-05-18 03:30 UTC] P4 execution: Patch W ported. New `runtime/file_list_parser.py` (AllowList composition + parse_file_list tolerant to NEW/UPDATE buckets, mixed bullets, backticks, trailing notes). Added `measure_diff_per_file` + `partition_per_file` to diff_size_gate; renamed gate_verdict param `file_list_paths` → `out_of_scope_paths`; rewired `recover_pre_merge(allow_list=...)` to use `git add --` explicit pathspecs. Wired in run.py code_review_subscriber (Patch Q) + merge_to_integration_subscriber (Patch R). 15 new tests in tests/test_canonical_patches_p4.py; full suite 1123 PASS (exactly on plan, 1108 baseline + 15 new); ruff clean; mypy --strict clean on file_list_parser, diff_size_gate, commit_recovery, run.py. Commit 0d2f64a.
+[2026-05-18 03:30 UTC] P4 completed → Completed; P5 promoted to Current (Patch X — security-review conditional 4-hunter parallel). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
 
 ## Final Report (populated on last session completion)
 (empty — P6 will populate)
