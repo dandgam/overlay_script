@@ -80,7 +80,10 @@ from bmad_orchestrator.runtime.diff_size_gate import (
     partition_per_file,
 )
 from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
-from bmad_orchestrator.runtime.file_list_parser import collect_allow_list
+from bmad_orchestrator.runtime.file_list_parser import (
+    collect_allow_list,
+    has_explicit_file_list,
+)
 from bmad_orchestrator.runtime.live_tuning import (
     TuningProposal,
     apply_proposals,
@@ -2068,6 +2071,9 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
     #    from the story's `### File List` section ∪ infra paths; when the
     #    target_project is unconfigured (tests), Patch W silently degrades to
     #    pure Patch Q (P3 behaviour).
+    #    Permissive when the story declares NO explicit File List entries
+    #    (BMad v6+ stories populate File List as a post-condition). See
+    #    code-review finding 6.4.
     if verdict == "approve":
         try:
             diff_policy = load_diff_size_policy()
@@ -2080,8 +2086,15 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
                     Path(worktree), range_spec=diff_policy.range_spec
                 )
                 if cfg is not None and cfg.target_project is not None:
-                    allow_list = collect_allow_list(cfg.target_project, story_id)
-                    if allow_list.paths:
+                    explicit = has_explicit_file_list(cfg.target_project, story_id)
+                    if not explicit:
+                        log.info(
+                            "scope_check_skipped_no_file_list",
+                            story_id=story_id,
+                            reason="story declares no explicit ### File List",
+                        )
+                    else:
+                        allow_list = collect_allow_list(cfg.target_project, story_id)
                         per_file = await measure_diff_per_file(
                             Path(worktree), range_spec=diff_policy.range_spec
                         )

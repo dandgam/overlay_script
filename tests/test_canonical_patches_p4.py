@@ -40,6 +40,7 @@ from bmad_orchestrator.runtime.file_list_parser import (
     ALWAYS_IN_SCOPE_PATHS,
     AllowList,
     collect_allow_list,
+    has_explicit_file_list,
     parse_file_list,
 )
 
@@ -127,6 +128,32 @@ def test_parse_file_list_empty_section(tmp_path: Path) -> None:
     )
     listing = parse_file_list(story)
     assert listing.all == ()
+
+
+def test_has_explicit_file_list_false_when_missing(tmp_path: Path) -> None:
+    """No story file → no explicit File List (permissive)."""
+    target = tmp_path / "target"
+    (target / "_bmad" / "stories").mkdir(parents=True)
+    assert has_explicit_file_list(target, "1.1") is False
+
+
+def test_has_explicit_file_list_false_when_empty_section(tmp_path: Path) -> None:
+    """Story file with empty ### File List → permissive (BMad v6+ pattern)."""
+    target = tmp_path / "target"
+    story = target / "_bmad" / "stories" / "1.1.md"
+    _write(story, "## Dev Agent Record\n\n### File List\n")
+    assert has_explicit_file_list(target, "1.1") is False
+
+
+def test_has_explicit_file_list_true_when_bullets_present(tmp_path: Path) -> None:
+    """Story with at least one File List bullet → strict allow-list mode."""
+    target = tmp_path / "target"
+    story = target / "_bmad" / "stories" / "1.1.md"
+    _write(
+        story,
+        "### File List\n- src/foo.py\n- src/bar.py\n",
+    )
+    assert has_explicit_file_list(target, "1.1") is True
 
 
 def test_parse_file_list_mixed_markers_and_backticks(tmp_path: Path) -> None:

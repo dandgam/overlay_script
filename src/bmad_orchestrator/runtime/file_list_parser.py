@@ -235,6 +235,26 @@ def collect_allow_list(
     )
 
 
+def has_explicit_file_list(
+    target_project: Path,
+    story_id: str,
+    story_path: Path | None = None,
+) -> bool:
+    """Return True iff the story declares at least one path in its File List.
+
+    Used by the scope-check gate to distinguish:
+      * **explicit File List** → enforce strict allow-list (Patch W behaviour)
+      * **empty / missing File List** → trust the dev worker, skip scope check
+        (matches BMad v6+ convention where dev populates File List during
+        execution as a post-condition rather than a pre-condition).
+
+    See code-review finding 6.4 (canonical_patches_port).
+    """
+    if story_path is None:
+        story_path = target_project / "_bmad" / "stories" / f"{story_id}.md"
+    return bool(parse_file_list(story_path).all)
+
+
 def partition_paths(
     paths: list[str], allow: AllowList
 ) -> tuple[list[str], list[str]]:
