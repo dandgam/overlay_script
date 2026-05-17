@@ -1,0 +1,2 @@
+# Placeholder — `patches/*.diff` re-applied by `bmad-orchestrator skill-update` (E4).
+# Each diff = unified-format patch over `skills/upstream/<skill>/`.

@@ -1,0 +1,11 @@
+# Cost tuning — initial defaults.
+#
+# Auto-tuned at runtime by L2 live tuning (E6); этот файл — baseline.
+# Schema: src/bmad_orchestrator/skills_repo.py::CostTuning
+#
+# Read by BudgetGuard on init; L2 updates `_recent_story_costs` deque
+# и пересчитывает thresholds via median + 1.5×IQR.
+
+daily_cap_usd: 50.0
+story_reserve_usd: 0.5
+max_concurrent_workers: 4

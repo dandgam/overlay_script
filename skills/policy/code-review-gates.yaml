@@ -1,0 +1,17 @@
+# Code-review gates — initial defaults.
+#
+# Auto-tuned at runtime by L2 live tuning (E6); этот файл — baseline.
+# Schema: src/bmad_orchestrator/skills_repo.py::CodeReviewGates
+#
+# Gates applied in agent/run.py W4 (E5):
+#   * p0_threshold        — minimum auto-fix coverage of P0 findings (0.0..1.0)
+#   * test_coverage_threshold — minimum test-file ratio per spec'ed N_tests (0.0..1.0)
+#   * compliance_tags     — tags treated as mandatory-fix (defer запрещён, escalate)
+#   * sweep_every_stories — emit COMPLIANCE_SWEEP_NEEDED каждые N completed stories
+
+p0_threshold: 0.8
+test_coverage_threshold: 0.5
+compliance_tags:
+  - "152-ФЗ"
+  - "187-ФЗ"
+sweep_every_stories: 50
