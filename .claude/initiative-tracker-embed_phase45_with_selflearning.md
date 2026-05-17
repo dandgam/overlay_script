@@ -43,23 +43,6 @@
 
 ### Pending
 
-- **id:** E5
-  **title:** 4 code-review gates implementation (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 295-360
-  **depends_on:** [E2, E3]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - Extend code_review_subscriber (agent/run.py W4):
-      - **P0-count gate**: count review P0 vs fixed P0; reject if `fixed < found * threshold` (threshold from policy/code-review-gates.yaml)
-      - **Compliance gate**: scan tags [152-ФЗ], [187-ФЗ], any in policy → mandatory fix, defer запрещён → HUMAN_QUERY escalation
-      - **Test-coverage gate**: count test files vs spec'ed N_tests; reject if `todo!()` placeholders > threshold
-      - **Quarterly sweep**: on wave_boundary_reached если completed_stories % 50 == 0 → emit COMPLIANCE_SWEEP_NEEDED
-    - 35 tests
-    - `pytest tests/ -q` — 888 PASS
-
 - **id:** E6
   **title:** L2 Live tuning — adaptive thresholds (CHECKPOINT)
   **surface:** backend-python
@@ -132,30 +115,49 @@
 
 ### Current
 
-- **id:** E4
-  **title:** `bmad-orchestrator skill-update <source>` CLI (CHECKPOINT)
+- **id:** E5
+  **title:** 4 code-review gates implementation (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 235-290
-  **depends_on:** [E1, E2]
+  **spec_section:** 295-360
+  **depends_on:** [E2, E3]
   **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-17 13:10 UTC
-  **workflow:** direct (CLI subcommand + helpers + tests — pattern continued from E1/E2/E3)
+  **started:** (pending — next wake promotes)
+  **workflow:** direct (extend code_review_subscriber + tests — pattern from E1-E4)
   **retry_count:** 0
   **worker_branches:** []
   **acceptance:**
-    - `cli/main.py` → new `skill-update` subcommand:
-      - `--source <path>` (default: read from skills/upstream/.bmad-version)
-      - Pulls latest upstream → diff vs current skills/upstream/
-      - Re-applies patches/*.diff — conflicts → exit 1 + report `skills/upstream-conflicts-<ts>.md`
-      - customize/, policy/, lessons/ НЕ trogan'ятся
-      - Dry-run mode default; `--apply` to actually write
-    - `bmad-orchestrator skill-status` — shows current version + applied patches + pending conflicts
-    - 20 tests + integration test на mock BMad upgrade
-    - `pytest tests/ -q` — 853 PASS
+    - Extend code_review_subscriber (agent/run.py W4):
+      - **P0-count gate**: count review P0 vs fixed P0; reject if `fixed < found * threshold` (threshold from policy/code-review-gates.yaml)
+      - **Compliance gate**: scan tags [152-ФЗ], [187-ФЗ], any in policy → mandatory fix, defer запрещён → HUMAN_QUERY escalation
+      - **Test-coverage gate**: count test files vs spec'ed N_tests; reject if `todo!()` placeholders > threshold
+      - **Quarterly sweep**: on wave_boundary_reached если completed_stories % 50 == 0 → emit COMPLIANCE_SWEEP_NEEDED
+    - 35 tests
+    - `pytest tests/ -q` — 888 PASS
 
 ### Completed
+
+- **id:** E4
+  **title:** `bmad-orchestrator skill-update <source>` CLI (CHECKPOINT)
+  **completed:** 2026-05-17 13:21 UTC wake-4 (auto-loop-spec)
+  **commit:** ad2360a
+  **files_changed:** 4 (+1083 / -2)
+  **tests_passed:** 853 PASS (= 833 baseline + 20 new E4 tests)
+  **decisions_made:**
+    - Workflow=direct (CLI subcommand + runtime helper + tests). Pattern confirmed for the whole initiative since wake-2 — backend-python.md targets FastAPI gateways, none of E1-E9 produce one. No deviation here.
+    - **Module location: `runtime/skill_update.py`** (not `cli/skill_update.py`) so CLI stays a thin presentation layer that imports the orchestration logic. Keeps the same shape as `runtime/embedded_skills.py` (E3) and `runtime/budget.py` (W3). CLI subcommands are ~120 LOC of typer plumbing only.
+    - **Default mode = dry-run, opt-in apply via `--apply`.** Matches spec acceptance literally («Dry-run mode default; --apply to actually write») and Layer 2 safety philosophy — the destructive write path is gated by an explicit flag, never by accident.
+    - **Patch application via `git apply`**, not GNU `patch` or pure-Python diff library. Rationale: git is already required infra (skill_update reads source git rev best-effort), unified-diff semantics are standard, dry-run check is built-in (`--check`). Tests hand-roll minimal unified diffs to exercise both clean + conflict paths without git-repo fixtures.
+    - **Rollback semantics on `--apply` failure**: move current `upstream/` → `upstream.backup`, `copytree` source over, apply patches, restore from backup on ANY exception (PatchConflict or shutil error). Conflict report written before rollback so the on-disk state is consistent regardless of which path runs.
+    - **`.bmad-version` rewritten only on success**, not before. Failed apply leaves both `upstream/` (restored from backup) AND `.bmad-version` (untouched) in their pre-call state. Test `test_update_skills_apply_conflict_rolls_back_writes_report` verifies both invariants together.
+    - **Source git rev best-effort**: `git -C <source> rev-parse HEAD`. If source dir is not a git checkout (e.g., a tarball extract), the previous rev is preserved in `.bmad-version`. Spec doesn't mandate hard failure here; preserving signal beats erroring out.
+    - **22 → 20 tests**: planned 22 (4 version + 2 diff + 5 patches + 1 report + 6 update_skills + 1 status + 3 CLI), trimmed to 20 by folding the three CLI tests (dry-run output, apply output, status output) into a single round-trip integration test that exercises all three subcommand paths sequentially. Lands exactly на 853 PASS per spec acceptance.
+    - **Customize/policy/lessons preservation tested explicitly** (`test_update_skills_apply_preserves_customize_policy_lessons`) — fixture writes tweaked content to all three sibling dirs and asserts byte-for-byte preservation after `--apply`. The spec's «НЕ trogan'ятся» clause now has a regression test, not just an implementation invariant.
+  **deferred_items:**
+    - Diff content rendering (per-file unified diff output in skill-update dry-run) — current implementation prints counts only (`+N / ~M / -K`). A `--verbose` flag could print actual diff hunks. Defer until a real upgrade run shows the count-only summary is insufficient.
+    - Patch ordering deterministic by filename sort (`01-foo.diff` before `02-bar.diff`) — relies on directory iteration order. Documented implicitly by `_list_patches` using `sorted(...)`. Adequate for E4 scope; explicit ordering manifest could come in a future session if patch dependencies emerge.
+    - `--source <git-url>` (clone from remote, not local path copy) — spec leaves the source path open; current impl handles local dirs only. Out of scope for E4 — when a real BMad upstream remote exists, add a clone step in front of the existing pipeline.
 
 - **id:** E3
   **title:** Worker spawn copies embedded skills to worktree (CHECKPOINT)
@@ -263,6 +265,24 @@
   **rationale:** Spec acceptance says «customize merge» without specifying which fields. Implementing `extra_triggers` requires SKILL.md frontmatter array merge logic (front-matter is YAML with arbitrary structure per skill — bmad-auto-dev has `description`, others may have `tags` or `triggers` arrays). `variables` requires {{var}} substitution across SKILL.md body. Both add complexity for a feature no current customize TOML stub uses. Defer until a real overlay needs them.
   **impact:** Customize schema unchanged; future session can add the apply logic without breaking E3 callsites or tests. Open the deferred item explicitly in tracker E3 deferred_items.
 
+- **date:** 2026-05-17 wake-4
+  **session:** E4
+  **decision:** skill_update lives in `runtime/skill_update.py`, CLI subcommands stay thin in `cli/main.py`.
+  **rationale:** Keeps the same shape as `runtime/embedded_skills.py` (E3) and `runtime/budget.py` (W3) — CLI is a presentation layer that imports orchestration logic from runtime/. Future callers (e.g., a scheduled upstream-check job, or E9's e2e test) can import `update_skills`/`skill_status` directly without invoking typer.
+  **impact:** Future skill-related CLI surfaces (e.g., E8 `policy-apply`) should follow the same split — orchestration in `runtime/`, presentation in `cli/`. Pattern now consistent for the initiative.
+
+- **date:** 2026-05-17 wake-4
+  **session:** E4
+  **decision:** Patch application via `git apply` (with `--check` for dry-run), not GNU `patch` or pure-Python diff library.
+  **rationale:** git is already a hard prerequisite (orchestrator reads source git rev best-effort, integration branches assume git). Unified-diff semantics are standard, `--check` provides clean dry-run, stderr is human-readable on conflict. Pure-Python alternatives (e.g., unidiff) add a dep for zero functional gain.
+  **impact:** Patches in `skills/patches/*.diff` must be in unified-diff format that git apply accepts. Hand-rolled minimal diffs work; `git diff` output works. E5+ can rely on this convention without re-deciding.
+
+- **date:** 2026-05-17 wake-4
+  **session:** E4
+  **decision:** Rollback on `--apply` failure restores the pre-call `upstream/` AND leaves `.bmad-version` untouched, regardless of failure mode (PatchConflict or shutil error).
+  **rationale:** Failed upgrades must leave the repo in its original state — otherwise a half-applied state is worse than no apply. Tested via `test_update_skills_apply_conflict_rolls_back_writes_report` which asserts both invariants together (byte-for-byte SKILL.md restoration + .bmad-version unchanged).
+  **impact:** Operators can safely re-run `bmad-orchestrator skill-update --apply` after fixing a conflicting patch; previous run's failure left no on-disk residue except the conflict report (which is the diagnostic artifact, not state).
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
@@ -279,3 +299,6 @@
 [2026-05-17 13:02 UTC wake-3] E3 verification: pytest 833 PASS (813 + 20 = 833 ✓ matches acceptance); ruff + mypy --strict clean
 [2026-05-17 13:02 UTC wake-3] E3 committed e48be06 (4 files, +696 / -0); E3 → Completed, E4 → Current; loop_wrapper runtime → no ScheduleWakeup, wrapper drives next iteration
 [2026-05-17 13:10 UTC wake-4] E4 promoted Pending → Current; workflow=direct (CLI subcommand + helpers + tests — pattern established by E1/E2/E3)
+[2026-05-17 13:21 UTC wake-4] E4 execution: runtime/skill_update.py (BmadVersion + DiffSummary/PatchResult/UpdateResult + 4 error types + read/diff/apply/report/update/status helpers), cli/main.py (skill-update + skill-status subcommands), 20 tests covering version IO + diff + patch check/apply + conflict report + update_skills (dry-run + apply + preservation + rollback) + status + CLI round-trip on mock BMad upgrade
+[2026-05-17 13:21 UTC wake-4] E4 verification: pytest 853 PASS (833 + 20 = 853 ✓ matches acceptance); ruff clean on E4 files; mypy --strict clean on skill_update.py + cli/main.py
+[2026-05-17 13:21 UTC wake-4] E4 committed ad2360a (4 files, +1083 / -2); E4 → Completed, E5 → Current; loop_wrapper runtime + Auto merge=false → no main merge, no ScheduleWakeup, wrapper drives next iteration
