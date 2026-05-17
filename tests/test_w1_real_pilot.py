@@ -287,10 +287,9 @@ async def test_w1_story_filter_missing_id_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """``--story <unknown_id>`` must raise RuntimeError before any spawn."""
-    from bmad_orchestrator.config import ModelConfig
-    from bmad_orchestrator.runtime.event_loop import EventLoop
     from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard
-    from bmad_orchestrator.config import BudgetConfig
+    from bmad_orchestrator.config import BudgetConfig, ModelConfig
+    from bmad_orchestrator.runtime.event_loop import EventLoop
 
     # Empty stories dir → any --story id is missing.
     monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(tmp_path))

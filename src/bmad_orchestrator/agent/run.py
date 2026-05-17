@@ -47,6 +47,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -65,7 +66,7 @@ from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
-from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
+from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
 from bmad_orchestrator.runtime.live_tuning import (
     TuningProposal,
     apply_proposals,
@@ -548,6 +549,7 @@ async def _run_mock_pilot(
         wave=wave,
         spawned=spawned,
         rounds=rounds,
+        completed_stories=len(spawned),
     )
     log.info("mock_pilot_done", stories=len(spawned), rounds=rounds)
 
@@ -608,6 +610,15 @@ async def _run_real_pilot(
         wave=wave,
         escalation_chat_id=getattr(getattr(settings, "bot", None), "escalation_chat_id", None),
     )
+
+    # P0-1 — wire E5/W4/sweep subscribers into the live bus. Without these
+    # registrations real-mode pilots silently no-op on the entire self-learning
+    # pipeline (code review → ff-merge → quarterly sweep). Subscribers take
+    # ``(event, bus)`` while EventLoop dispatches with ``(event,)`` only, so
+    # ``partial`` binds the bus to satisfy the EventCallback contract.
+    bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []
@@ -796,6 +807,7 @@ async def _run_real_pilot(
         wave=wave,
         spawned=spawned,
         rounds=rounds,
+        completed_stories=len(spawned),
     )
     log.info(
         "real_pilot_done",

@@ -324,10 +324,22 @@ def load_proposals_yaml(slug: str, *, orchestrator_home: Path) -> list[LessonPro
             raise LessonProposalInvalidError(
                 f"proposal at {path}: unknown policy_file {policy_file!r}"
             )
+        # P0-4 — defence-in-depth: reject proposals whose ``field`` does not
+        # exist on the pydantic model. Without this guard a hand-edited or
+        # parser-corrupted proposals YAML could inject ``"../etc/passwd"`` or
+        # similar non-model keys; pydantic ``model_validate`` would still pass
+        # (extra=ignore default) and the bogus key would silently survive in
+        # the dumped YAML.
+        field_name = str(entry.get("field", ""))
+        if field_name not in _POLICY_MODELS[policy_file].model_fields:
+            raise LessonProposalInvalidError(
+                f"proposal at {path}: unknown field {field_name!r} "
+                f"for policy_file {policy_file!r}"
+            )
         out.append(
             LessonProposal(
                 policy_file=policy_file,
-                field=str(entry.get("field", "")),
+                field=field_name,
                 before=entry.get("before"),
                 after=entry.get("after"),
                 rationale=(
@@ -350,7 +362,12 @@ def policy_file_path(policy_file: PolicyTarget, *, skills_root: Path) -> Path:
 
 
 def _load_policy_yaml(path: Path) -> dict[str, Any]:
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise PolicyApplyError(
+            f"policy YAML not valid at {path}: {e}"
+        ) from e
     if raw is None:
         return {}
     if not isinstance(raw, dict):
