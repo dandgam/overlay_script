@@ -416,6 +416,130 @@ def model_save() -> None:
     console.print(f"[green]saved[/green] {path}")
 
 
+# ── skill upgrade pipeline (§4 E4) ───────────────────────────────────────────
+
+
+_DEFAULT_SKILLS_ROOT = Path(__file__).resolve().parents[3] / "skills"
+
+
+def _skill_status_table(snapshot: dict[str, object]) -> Table:
+    version_raw = snapshot.get("version")
+    patches_raw = snapshot.get("patches") or []
+    pending_raw = snapshot.get("pending_conflicts") or []
+    patches: list[str] = [str(p) for p in patches_raw] if isinstance(patches_raw, list) else []
+    pending: list[str] = [str(p) for p in pending_raw] if isinstance(pending_raw, list) else []
+    table = Table(title="bmad-orchestrator skills", show_header=True)
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    if isinstance(version_raw, dict):
+        table.add_row("source_repo", str(version_raw.get("source_repo", "?")))
+        table.add_row("source_git_rev", str(version_raw.get("source_git_rev", "?")))
+        table.add_row("source_git_date", str(version_raw.get("source_git_date", "?")))
+        table.add_row("copied_at", str(version_raw.get("copied_at", "?")))
+        table.add_row("skills_count", str(version_raw.get("skills_count", "?")))
+    else:
+        table.add_row("version", "[red]missing[/red] (run skill-update)")
+    table.add_row("patches", ", ".join(patches) if patches else "(none)")
+    table.add_row(
+        "pending_conflicts",
+        ", ".join(pending) if pending else "(none)",
+    )
+    return table
+
+
+@app.command(name="skill-update")
+def skill_update(
+    source: Path | None = typer.Option(  # noqa: B008 — typer pattern
+        None,
+        "--source",
+        help=(
+            "Override upstream source path. Defaults to source_path "
+            "recorded in skills/upstream/.bmad-version."
+        ),
+    ),
+    skills_root: Path = typer.Option(  # noqa: B008 — typer pattern
+        _DEFAULT_SKILLS_ROOT,
+        "--skills-root",
+        help="Root of orchestrator skills dir (default: <repo>/skills).",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply changes to disk. Default is dry-run (no writes).",
+    ),
+) -> None:
+    """Pull upstream BMad skills, diff, re-apply patches.
+
+    Default: dry-run — prints summary, never writes. Use ``--apply`` to swap
+    the on-disk ``skills/upstream/`` tree and update ``.bmad-version``.
+    ``skills/customize/``, ``skills/policy/``, ``skills/lessons/`` are never
+    touched.
+    """
+    from bmad_orchestrator.runtime.skill_update import (
+        BmadVersionInvalidError,
+        BmadVersionNotFoundError,
+        PatchConflictError,
+        SourceMissingError,
+        update_skills,
+    )
+
+    try:
+        result = update_skills(
+            skills_root=skills_root,
+            source=source,
+            dry_run=not apply,
+        )
+    except (BmadVersionNotFoundError, BmadVersionInvalidError) as exc:
+        console.print(f"[red]bad .bmad-version:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    except SourceMissingError as exc:
+        console.print(f"[red]source missing:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    except PatchConflictError as exc:
+        console.print(f"[red]patch conflict during apply:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    diff = result.diff
+    console.print(
+        f"[cyan]source:[/cyan] {result.source_path}  "
+        f"[cyan]rev:[/cyan] {result.source_git_rev or '(unknown)'}"
+    )
+    console.print(
+        f"[cyan]diff:[/cyan] +{len(diff.added)} / "
+        f"~{len(diff.modified)} / -{len(diff.removed)}"
+    )
+    conflicts = result.conflicts
+    if conflicts:
+        console.print(
+            f"[red]patch conflicts:[/red] {len(conflicts)} "
+            f"(report: {result.conflict_report})"
+        )
+        for r in conflicts:
+            console.print(f"  - {r.patch_name}: {r.detail or '(no detail)'}")
+        raise typer.Exit(code=1)
+    if result.patch_results:
+        console.print(f"[green]patches ok:[/green] {len(result.patch_results)}")
+    if result.applied:
+        console.print("[green]applied[/green] — .bmad-version updated")
+    else:
+        console.print("[dim]dry-run — no writes. Re-run with --apply to commit.[/dim]")
+
+
+@app.command(name="skill-status")
+def skill_status_cmd(
+    skills_root: Path = typer.Option(  # noqa: B008 — typer pattern
+        _DEFAULT_SKILLS_ROOT,
+        "--skills-root",
+        help="Root of orchestrator skills dir (default: <repo>/skills).",
+    ),
+) -> None:
+    """Show current upstream version + applied patches + pending conflict reports."""
+    from bmad_orchestrator.runtime.skill_update import skill_status
+
+    snapshot = skill_status(skills_root)
+    console.print(_skill_status_table(snapshot))
+
+
 # ── bot ──────────────────────────────────────────────────────────────────────
 
 

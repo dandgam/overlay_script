@@ -140,8 +140,8 @@
   **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** (pending — next wake promotes)
-  **workflow:** TBD (likely direct — CLI subcommand + tests, not a FastAPI gateway)
+  **started:** 2026-05-17 13:10 UTC
+  **workflow:** direct (CLI subcommand + helpers + tests — pattern continued from E1/E2/E3)
   **retry_count:** 0
   **worker_branches:** []
   **acceptance:**
@@ -278,3 +278,4 @@
 [2026-05-17 13:02 UTC wake-3] E3 execution: runtime/embedded_skills.py (apply_embedded_skills + 4 error types + ApplyResult), spawn_worker kwargs embedded_skills_root + allowed_worktree_root, Settings.skills_resolution_root, 20 unit tests covering copy/overlay/symlink/path-traversal/integration
 [2026-05-17 13:02 UTC wake-3] E3 verification: pytest 833 PASS (813 + 20 = 833 ✓ matches acceptance); ruff + mypy --strict clean
 [2026-05-17 13:02 UTC wake-3] E3 committed e48be06 (4 files, +696 / -0); E3 → Completed, E4 → Current; loop_wrapper runtime → no ScheduleWakeup, wrapper drives next iteration
+[2026-05-17 13:10 UTC wake-4] E4 promoted Pending → Current; workflow=direct (CLI subcommand + helpers + tests — pattern established by E1/E2/E3)
