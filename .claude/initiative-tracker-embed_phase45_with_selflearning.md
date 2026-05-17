@@ -43,23 +43,6 @@
 
 ### Pending
 
-- **id:** E2
-  **title:** customize/policy/lessons/patches scaffolds + pydantic schemas (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 125-180
-  **depends_on:** [E1]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - `skills/customize/<skill>.customize.toml` — empty TOML stubs для каждого embedded skill (14 файлов)
-    - `skills/policy/code-review-gates.yaml`, `cost-tuning.yaml`, `retry-policy.yaml` — initial defaults
-    - `skills/patches/` — empty dir (placeholder)
-    - `skills/lessons/` — empty dir
-    - `src/bmad_orchestrator/skills_repo.py` — load/parse с pydantic models (Customize, PolicyConfig)
-    - 15 unit tests на parse customize/policy schemas
-    - `pytest tests/ -q` — 813 PASS
-
 - **id:** E3
   **title:** Worker spawn copies embedded skills to worktree (CHECKPOINT)
   **surface:** backend-python
@@ -186,35 +169,42 @@
 
 ### Current
 
-- **id:** E1
-  **title:** Skills directory + copy 14 phase 4+5 BMad skills (CHECKPOINT)
+- **id:** E2
+  **title:** customize/policy/lessons/patches scaffolds + pydantic schemas (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 80-120
-  **depends_on:** []
+  **spec_section:** 125-180
+  **depends_on:** [E1]
   **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-17 (auto-loop wake)
-  **workflow:** direct (file-copy + scaffold, not FastAPI — backend-python workflow.md not applicable to pure scaffolding)
+  **started:** (pending — next wake promotes)
+  **workflow:** direct (pydantic models + YAML/TOML scaffolds + unit tests)
   **retry_count:** 0
   **worker_branches:** []
   **acceptance:**
-    - Create `skills/upstream/` directory в orchestrator repo
-    - Copy 14 phase 4+5 skills из `/home/server/odyssey/.claude/skills/` (canonical source):
-      bmad-auto-dev, bmad-dev-story, bmad-agent-dev, bmad-code-review,
-      bmad-review-adversarial-general, bmad-review-edge-case-hunter, bmad-correct-course,
-      bmad-quick-dev, bmad-checkpoint-preview, bmad-create-story,
-      bmad-advanced-elicitation, bmad-retrospective, bmad-customize, bmad-sprint-status
-    - `skills/upstream/.bmad-version` с Odyssey's git rev + date + source path
-    - `skills/README.md` объясняет структуру (upstream/customize/policy/lessons/patches)
-    - `pytest tests/ -q` — 798 PASS (no test changes yet)
-  **safety_gates:**
-    - L1: no force/no-verify; copy operations верны, чистые
-    - L2: deny-list freeze (sandbox/worker_spawn/budget_guard)
-    - L3: branch isolation
+    - `skills/customize/<skill>.customize.toml` — empty TOML stubs для каждого embedded skill (14 файлов)
+    - `skills/policy/code-review-gates.yaml`, `cost-tuning.yaml`, `retry-policy.yaml` — initial defaults
+    - `skills/patches/` — empty dir (placeholder)
+    - `skills/lessons/` — empty dir
+    - `src/bmad_orchestrator/skills_repo.py` — load/parse с pydantic models (Customize, PolicyConfig)
+    - 15 unit tests на parse customize/policy schemas
+    - `pytest tests/ -q` — 813 PASS
 
 ### Completed
-(none)
+
+- **id:** E1
+  **title:** Skills directory + copy 14 phase 4+5 BMad skills (CHECKPOINT)
+  **completed:** 2026-05-17 wake-1 (auto-loop-spec)
+  **commit:** 83f82ed
+  **files_changed:** 63 (+9792 / -24)
+  **tests_passed:** 798 PASS (baseline preserved — no test additions this session per spec)
+  **decisions_made:**
+    - Workflow=direct (file-copy + scaffold). backend-python.md workflow targets FastAPI gateways (Telethon/vkmax) — not applicable к pure scaffolding task. Followed E1 acceptance criteria directly.
+    - Source SHA pinned via skills/upstream/.bmad-version: 307dfab25d59cd21fff6b4802b059adf14144b34 (odyssey 2026-05-17).
+    - skills/README.md objaspresent overlay model (customize/policy/lessons/patches) для будущих сессий E2-E8.
+  **deferred_items:**
+    - No test additions (per acceptance — E2 brings first 15 unit tests).
+    - customize/policy/lessons/patches scaffold dirs creation → E2 (per spec session boundaries).
 
 ## Safety Gates Triggered
 (none yet)
@@ -236,7 +226,16 @@
   **rationale:** Security risk высокий (agent редактирующий свои skills + commits в integration без human review). Lack of baseline data для understanding patterns — нужны 2-3 waves successful pilots first.
   **impact:** Self-learning ограничен L2 (live tuning) + L3 (per-project memory) + L4 (lessons → proposals с user approval). Это даёт 80% UX без 100% risk.
 
+- **date:** 2026-05-17 wake-1
+  **session:** E1
+  **decision:** Workflow=direct для E1 (file-copy + dir scaffold), не backend-python.md.
+  **rationale:** backend-python workflow targets FastAPI gateway services (Telethon, vkmax) с uvicorn smoke test. E1 — pure file copy from canonical odyssey skills + version stamp + README. No FastAPI, no uvicorn, no auth flow. Workflow steps 2-7 (pip install, py_compile, ruff, uvicorn smoke, crm-reviewer) не применимы.
+  **impact:** Future scaffolding sessions (E2 — schemas + scaffolds, E8 — lesson_parser.py) могут пойти тем же путём (direct). Sessions с реальной Python implementation (E3 worker_spawn modification, E4-E8 CLI/code) — следует backend-python workflow с локальными адаптациями.
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
 [2026-05-17 wake-1] E1 promoted Pending → Current; workflow=direct (file-copy task — backend-python workflow targets FastAPI gateways, not applicable)
+[2026-05-17 wake-1] E1 execution: skills/upstream/ created, 14 skills copied from odyssey@307dfab, .bmad-version + README written
+[2026-05-17 wake-1] E1 verification: pytest 798 PASS (baseline preserved — no test changes this session per acceptance)
+[2026-05-17 wake-1] E1 committed 83f82ed (63 files, +9792 / -24); E1 → Completed, E2 → Current; loop_wrapper runtime → no ScheduleWakeup, wrapper drives next iteration
