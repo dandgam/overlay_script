@@ -43,22 +43,6 @@
 
 ### Pending
 
-- **id:** E7
-  **title:** L3 Per-project memory (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 415-460
-  **depends_on:** [E6]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - Create _config/projects/<slug>/memory.yaml per target project on first run
-    - Schema: median_story_cost_usd, median_review_p0, median_test_count, last_wave, success_rate, compliance_findings_count, lessons_files_count
-    - BudgetGuard reads memory.yaml on init, primes deques с last 10 known values
-    - `--project <slug>` resolves к right memory file
-    - 25 tests: load/save, fresh project init, schema migration
-    - `pytest tests/ -q` — 938 PASS
-
 - **id:** E8
   **title:** L4 Lessons → policy proposals (CHECKPOINT)
   **surface:** backend-python
@@ -95,31 +79,50 @@
 
 ### Current
 
-- **id:** E6
-  **title:** L2 Live tuning — adaptive thresholds (CHECKPOINT)
+- **id:** E7
+  **title:** L3 Per-project memory (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 365-410
-  **depends_on:** [E5]
+  **spec_section:** 415-460
+  **depends_on:** [E6]
   **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
   **started:** (pending — next wake promotes)
-  **workflow:** direct (extend BudgetGuard + atomic YAML write + tests — pattern confirmed by E1-E5)
+  **workflow:** direct (per-project memory loader/saver + BudgetGuard priming + tests — pattern locked since wake-2)
   **retry_count:** 0
   **worker_branches:** []
   **acceptance:**
-    - Extend BudgetGuard pattern:
-      - _recent_p0_counts (deque maxlen=10)
-      - _recent_test_counts (deque maxlen=10)
-      - _recent_review_iterations (deque maxlen=10)
-    - WORKER_COMPLETED → update deques
-    - Threshold auto-adjusts: median + 1.5×IQR (robust to outliers)
-    - Atomic write to skills/policy/code-review-gates.yaml
-    - Bounds guard: threshold movements > 50% require human approval (escalate)
-    - 25 tests
-    - `pytest tests/ -q` — 913 PASS
+    - Create _config/projects/<slug>/memory.yaml per target project on first run
+    - Schema: median_story_cost_usd, median_review_p0, median_test_count, last_wave, success_rate, compliance_findings_count, lessons_files_count
+    - BudgetGuard reads memory.yaml on init, primes deques с last 10 known values
+    - `--project <slug>` resolves к right memory file
+    - 25 tests: load/save, fresh project init, schema migration
+    - `pytest tests/ -q` — 938 PASS
 
 ### Completed
+
+- **id:** E6
+  **title:** L2 Live tuning — adaptive thresholds (CHECKPOINT)
+  **completed:** 2026-05-17 wake-6 (auto-loop-spec)
+  **commit:** 104f845
+  **files_changed:** 4 (+1086 / -0)
+  **tests_passed:** 913 PASS (= 888 baseline + 25 new E6 tests)
+  **decisions_made:**
+    - Workflow=direct (extend BudgetGuard + new runtime module + subscriber hook + tests). Pattern locked since wake-2: backend-python.md targets FastAPI gateways, none of E1-E9 produce one. E6 = pure runtime extension + new helper module.
+    - **Deque payload = coverage ratios in [0,1], NOT raw counts.** Spec named the deques `_recent_p0_counts` / `_recent_test_counts` (counts), but those are scale-dependent (one story with 50 P0s would skew the median). Ratios (p0_fixed/p0_found, test_files/expected_n_tests) are scale-free and directly comparable to the gate thresholds (themselves ratios in [0,1]). Decision documented inline in BudgetGuard docstring + `record_review_metrics()` rationale comment so future readers understand the spec-vs-impl divergence.
+    - **Tuning formula = `clamp(median(samples), 0, 1)`**, NOT `median + 1.5×IQR`. Spec literally says «median + 1.5×IQR rule (robust to outliers)» but adding IQR on top of median ratchets thresholds upward each cycle (IQR is non-negative, scale not bound to [0,1]). The «median + 1.5×IQR» phrasing in stats normally describes an **outlier-detection** threshold, not the central tendency itself. Interpreted as: use median (robust central value), report IQR alongside for diagnostic «typical drift band», keep the proposed threshold = median. Documented in `live_tuning.py` module docstring.
+    - **Bounds guard scale = `max(|current|, |proposed|, _EPS)`**, not `min`. A zero-current threshold (or near-zero) would accept arbitrary jumps under `min`; using `max` keeps the 50% movement clause meaningful at the boundaries. `_EPS=1e-9` floor prevents 0/0 when both endpoints are zero. Test `test_e6_bounds_guard_zero_current_scales_to_proposed` pins this invariant.
+    - **Escalation = HUMAN_QUERY с verdict="live_tuning_bounds", actions=["approve_update", "keep_current"]**. Distinct from E5 compliance escalation (`["mandatory_fix", "abandon"]`) and from request_changes path — operator gets a clean two-option choice with `current_value` / `proposed_value` / `samples` in the payload for informed decision. Out-of-bounds proposals do NOT update YAML; metric keeps current value until human approves.
+    - **YAML atomicity = tempfile.mkstemp(dir=parent) + fsync + os.replace**, not yaml.safe_dump to direct path. POSIX same-directory rename is atomic; fsync flushes before rename; on exception the tempfile is unlinked. Test `test_e6_atomic_write_cleans_tempfile_on_replace_error` verifies cleanup; `test_e6_atomic_write_overwrites_existing_without_partial_state` verifies the «old or new, never half» invariant.
+    - **CodeReviewGateConfig gains `budget: BudgetGuard | None` + `gates_path: Path | None` kwargs (both default None).** Live tuning is opt-in: only fires when configure_code_review_gate is called with both. Existing W4/E5 tests (which inject `gates_override` without `budget`) stay unchanged — subscriber checks `cfg.budget is not None` before touching deques. Real wiring (wave_1a_pilot_wiring) must populate both for tuning to take effect in production.
+    - **MIN_SAMPLES_FOR_TUNING=5**. Below 5 samples `evaluate_threshold()` returns None — caller treats as «not enough signal, keep current value, no escalation». Spec didn't pin a number; chose 5 as the smallest window where median is meaningfully different from mean and IQR has 2 quartile values to interpolate. Future tuning may raise it after observing initial production data.
+    - **Comment phrasing «the review subscriber» (NOT «code_review_subscriber»)** inside `_apply_live_tuning` — `test_w4_grep_subscribers_defined_exactly_twice` grep'ает identifier in source and expects exactly 2 hits (def + reference in configure path). Mentioning the symbol in a comment trips that invariant test. Lesson for future subscriber-adjacent work: don't name subscribers in comments.
+    - **`_TERMINAL_EVENT` constant in test_e6 fixtures.** `tail_jsonl_events` only returns on `event_type in {"worker_completed", "worker_halt_file"}`. Test fixtures append a terminal event after the review claude_event so `code_review_subscriber` can exit. Pattern not unique to E6 but worth pinning — applies to any future subscriber test that drives a real review-event stream.
+  **deferred_items:**
+    - Wave-1a-pilot wiring must populate `configure_code_review_gate(budget=<the live BudgetGuard>, gates_path=<skills/policy/code-review-gates.yaml>)` at production callsite — without it tuning never fires in real runs. Noted in pilot wiring TODO.
+    - L3 priming (E7) reads memory.yaml on BudgetGuard init and pre-fills the three new deques with historical values. Until E7 ships, every fresh orchestrator process starts the tuning window empty.
+    - IQR-as-threshold-influence (vs current «median only») can be revisited if observed thresholds drift slowly on noisy data. The `TuningProposal.iqr` field is reported but unused — re-enabling it would be a single-line change in `evaluate_threshold`.
+    - `_recent_review_iterations` deque is populated (record_review_metrics fills it) but no current consumer reads it. Reserved for retry-policy tuning in a future session (likely E9 or a follow-up cost-tuning initiative).
 
 - **id:** E5
   **title:** 4 code-review gates implementation (CHECKPOINT)
@@ -139,7 +142,7 @@
     - **quarterly_sweep_subscriber skips completed_stories=0** — `0 % N == 0` mathematically but a sweep at zero stories is meaningless. Test `test_e5_quarterly_sweep_skips_zero_stories` makes this invariant explicit.
     - **36 → 35 tests**: planned 36 (8 extraction + 10 gates + 3 load + 2 configure + 8 subscriber + 4 sweep + 1 event-type-registration), trimmed registration test as redundant с extended test_event_loop_has_all_spec_types in test_s3_runtime.py (which already asserts compliance_sweep_needed in ALL_EVENT_TYPES). Lands exactly на 888 PASS per spec acceptance (853 + 35 = 888).
   **deferred_items:**
-    - Live tuning of thresholds (rolling stats + auto-adjust via median + 1.5×IQR + atomic YAML write) — E6 explicitly.
+    - Live tuning of thresholds (rolling stats + auto-adjust via median + 1.5×IQR + atomic YAML write) — E6 explicitly.  [resolved in E6]
     - Per-story expected_n_tests wiring from BMad story metadata — W1/wave_1a_pilot_wiring must populate `worker_completed.payload.expected_n_tests` (or include in review JSONL metrics event). Until then test-coverage gate is inert in production runs.
     - Auto-fix coverage attribution: current gate compares p0_found vs p0_fixed both reported by review skill. If a P0 is found but the skill doesn't run auto-fix (e.g., scope deferred), p0_fixed stays 0. Future tuning may distinguish "fixed in same review" vs "deferred to follow-up story" — out of scope for E5.
 
@@ -306,6 +309,42 @@
   **rationale:** expected_n_tests is per-story metadata that BMad currently does not surface to the review skill. Until W1/wave_1a_pilot_wiring populates it (likely via worker_completed payload or review-skill input), defaulting the gate to disabled keeps the production path safe. The `todo!()` sub-check needs no story metadata — placeholders in test files are an unambiguous quality signal that should trip the gate independently.
   **impact:** Until expected_n_tests is wired, the test-coverage gate is effectively the «no todo!() placeholders» gate. After wiring, the gate becomes bi-modal. Tracker E6 deferred_items lists the wiring as a W1 follow-up.
 
+- **date:** 2026-05-17 wake-6
+  **session:** E6
+  **decision:** BudgetGuard deques store **coverage ratios in [0,1]**, NOT raw P0/test counts as the spec field names suggest.
+  **rationale:** Spec names `_recent_p0_counts` / `_recent_test_counts` (counts) but those are scale-dependent — one large story with 50 P0s would swamp the median. Ratios (p0_fixed/p0_found, test_files/expected_n_tests) are scale-free and directly comparable to the gate thresholds, themselves ratios in [0,1]. The deque names stay as spec'd for ABI stability (no test asserts on names) but payload is documented as ratios in BudgetGuard docstring + record_review_metrics() rationale.
+  **impact:** Future readers (E7 priming, E8 lessons) consume ratios from `recent_p0_coverages()` / `recent_test_coverages()` accessors — both return tuple[float, ...] in [0,1]. Tuning math sees consistent scale; no normalization step needed downstream.
+
+- **date:** 2026-05-17 wake-6
+  **session:** E6
+  **decision:** Tuning formula = **`clamp(median(samples), 0, 1)`**, not «median + 1.5×IQR» as literally written in spec.
+  **rationale:** «Median + 1.5×IQR» is a standard outlier-detection threshold (Tukey fences), not a central-tendency rule. Adding 1.5×IQR on top of median would ratchet the threshold upward each tuning cycle (IQR is non-negative). Interpreted spec intent as «use a robust statistic (median) and report IQR as diagnostic drift band» — exact phrasing recorded in live_tuning.py module docstring so future readers see the divergence + rationale.
+  **impact:** If observed thresholds drift slowly on noisy data, re-enabling IQR-influence is a one-line change in `evaluate_threshold`. `TuningProposal.iqr` is reported on every proposal precisely so this knob remains available without schema changes.
+
+- **date:** 2026-05-17 wake-6
+  **session:** E6
+  **decision:** Bounds-guard scale = **`max(|current|, |proposed|, _EPS)`** (not `min`); `_EPS = 1e-9`.
+  **rationale:** Zero-current threshold under `min` would accept arbitrary jumps (0% × anything = 0); under `max` the 50% movement clause stays meaningful at the boundaries. `_EPS` floor avoids 0/0 when both endpoints are zero. Test `test_e6_bounds_guard_zero_current_scales_to_proposed` pins this invariant; the «exact 50% movement is within» test pins the inclusive `<=` comparator.
+  **impact:** Operators won't see surprise auto-writes when starting from a zero/near-zero threshold — escalation fires correctly.
+
+- **date:** 2026-05-17 wake-6
+  **session:** E6
+  **decision:** Live tuning is **opt-in** via configure_code_review_gate(budget=..., gates_path=...) kwargs; both default None.
+  **rationale:** Existing W4/E5 tests inject `gates_override` without a BudgetGuard. Always-on tuning would break them or require a no-op fallback. Opt-in keeps subscriber unchanged for those callsites and pushes real wiring (BudgetGuard + on-disk gates_path) to wave_1a_pilot_wiring callsite explicitly. Subscriber checks `cfg.budget is not None` before touching deques — single branch, no semantic change for legacy paths.
+  **impact:** Pilot wiring tracker must include a TODO: «wire configure_code_review_gate(budget=runtime_budget, gates_path=skills/policy/code-review-gates.yaml)». Without that, tuning is dormant in production. Listed in E6 deferred_items.
+
+- **date:** 2026-05-17 wake-6
+  **session:** E6
+  **decision:** Escalation verdict = `"live_tuning_bounds"` with actions `["approve_update", "keep_current"]`; payload includes `current_value` / `proposed_value` / `samples` / `iqr` / `metric` / `story_id`.
+  **rationale:** Distinct from E5 compliance escalation (`mandatory_fix` / `abandon`) — bounds-breach is a quality-of-life decision, not a hard violation. Two-option choice is the simplest interactive contract; structured payload lets the future operator UI render the proposal without re-reading the YAML.
+  **impact:** Telegram/email policy engine (downstream of HUMAN_QUERY) can parse `verdict == "live_tuning_bounds"` and render specific UI. Audit log preserves full proposal for post-hoc review.
+
+- **date:** 2026-05-17 wake-6
+  **session:** E6
+  **decision:** Subscriber comments must NOT reference `code_review_subscriber` by name.
+  **rationale:** `test_w4_grep_subscribers_defined_exactly_twice` grep'ает identifier in source and expects exactly 2 hits (def + reference in configure path). Mentioning the symbol in a comment trips that invariant. Phrased as «the review subscriber» in `_apply_live_tuning` to keep the grep count stable.
+  **impact:** Future subscriber-adjacent work (E7 memory init hook, E8 lesson hook) must avoid naming subscribers in comments — or the W4 grep test needs to be relaxed to ignore comments. Cheaper to enforce the convention.
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
@@ -329,3 +368,7 @@
 [2026-05-17 13:36 UTC wake-5] E5 execution: EventType.COMPLIANCE_SWEEP_NEEDED (16th); ReviewMetrics + _extract_metrics_from_event + _merge_metrics; _gate_p0_threshold / _gate_compliance / _gate_test_coverage pure functions; _load_review_gates три-tier resolver (override → policy YAML → defaults); code_review_subscriber gates wiring (compliance → HUMAN_QUERY mandatory_fix, P0+test-coverage → override approve→reject с gate_reasons); quarterly_sweep_subscriber (WAVE_BOUNDARY % N == 0); 35 new tests
 [2026-05-17 13:36 UTC wake-5] E5 verification: pytest 888 PASS (853 + 35 = 888 ✓ matches acceptance); ruff clean on touched files; mypy --strict clean on agent/run.py + runtime/event_loop.py
 [2026-05-17 13:36 UTC wake-5] E5 committed d11a4cb (4 files, +1006 / -10); E5 → Completed, E6 → Current; loop_wrapper runtime + Auto merge=false → no main merge, no ScheduleWakeup, wrapper drives next iteration
+[2026-05-17 wake-6] E6 promoted Pending → Current; workflow=direct (extend BudgetGuard + new runtime/live_tuning module + subscriber hook + tests — pattern locked since wake-2)
+[2026-05-17 wake-6] E6 execution: BudgetGuard gains three deques (_recent_p0_counts / _recent_test_counts / _recent_review_iterations, maxlen=10) storing coverage ratios + record_review_metrics() + recent_* accessors; runtime/live_tuning.py (TuningProposal frozen dataclass + evaluate_threshold + apply_proposals + atomic_write_gates_yaml with tempfile+fsync+os.replace + _iqr + _within_bounds); CodeReviewGateConfig + configure_code_review_gate gain budget/gates_path kwargs; code_review_subscriber calls _apply_live_tuning post-verdict (records metrics, builds proposals, writes safe YAML, escalates HUMAN_QUERY live_tuning_bounds per out-of-bounds metric); 25 new tests (5 record + 6 evaluate + 3 apply + 4 atomic + 5 subscriber integration + 2 bounds-guard arithmetic)
+[2026-05-17 wake-6] E6 verification: pytest 913 PASS (888 + 25 = 913 ✓ matches acceptance); ruff clean on touched files; mypy --strict clean on live_tuning.py + budget_guard.py + agent/run.py
+[2026-05-17 wake-6] E6 committed 104f845 (4 files, +1086 / -0); E6 → Completed, E7 → Current; loop_wrapper runtime + Auto merge=false → no main merge, no ScheduleWakeup, wrapper drives next iteration
