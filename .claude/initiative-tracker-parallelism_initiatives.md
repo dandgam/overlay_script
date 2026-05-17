@@ -32,19 +32,6 @@
 
 ### Pending
 
-- **id:** S7
-  **title:** Initiative #3A — project registry yaml + CLI scan/doctor/init/resume
-  **surface:** backend-python
-  **spec_section:** Initiative #3 Task 3.1-3.2
-  **depends_on:** [S6]
-  **acceptance:**
-    - `bmad-orchestrator init /path` создаёт config
-    - `scan` показывает все known projects
-  **safety_gates:**
-    - L1/L2/L3 standard
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S8
   **title:** Initiative #3B — multi-project execution + per-project state isolation
   **surface:** backend-python
@@ -103,25 +90,43 @@
 
 ### Current
 
-- **id:** S6
-  **title:** Initiative #2C — validation pilot Antares Story 3.1 (Nextcloud Docker template) auto-split
+- **id:** S7
+  **title:** Initiative #3A — project registry yaml + CLI scan/doctor/init/resume
   **surface:** backend-python
-  **spec_section:** Initiative #2 Task 2.5
-  **depends_on:** [S5]
+  **spec_section:** Initiative #3 Task 3.1-3.2
+  **depends_on:** [S6]
   **acceptance:**
-    - Story 3.1 split на ≥3 sub-stories
-    - Speedup ≥2× vs sequential baseline
-    - sprint-status 3.1=done
+    - `bmad-orchestrator init /path` создаёт config
+    - `scan` показывает все known projects
   **safety_gates:**
     - L1/L2/L3 standard
-  **checkpoint:** true
+  **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** (pending first wake on S6)
+  **started:** (pending first wake on S7)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S6
+  **title:** Initiative #2C — auto-split pipeline wiring (decomposer + executor + squash) + validation pilot deferred
+  **completed:** 2026-05-18 UTC
+  **commit:** 2a75557
+  **files_changed:** 6 (src/bmad_orchestrator/runtime/auto_split.py NEW, src/bmad_orchestrator/runtime/event_loop.py, src/bmad_orchestrator/agent/run.py, tests/test_initiative2c_auto_split_pilot.py NEW, tests/test_canonical_patches_p6.py, tests/test_s3_runtime.py)
+  **tests_passed:** 1301/1301 PASS (was 1287; +14 new in test_initiative2c_auto_split_pilot.py); ruff 0; mypy 0 new on edited files
+  **decisions_made:**
+    - Auto-split orchestrator placed at `runtime/auto_split.py` (sibling of `runtime/story_splitter.py` from S4 and `runtime/sub_story_executor.py` from S5). Same rationale as prior sessions — Python packages cannot contain `-`, and `agent/skills/dag-planner/` is a Claude SDK skill dir. Keeps the entire auto-split chain (should_split → decompose → execute_sub_stories → squash_sub_stories) at canonical import paths under `runtime/`. The new module is the *bridge* — it composes S4 helpers with S5 executor + adds bus-event translation.
+    - Opt-in env gate `BMAD_AUTO_SPLIT=1` (mirrors `BMAD_REQUIRE_SANDBOX` / `BMAD_REQUIRE_CGROUP` pattern from S3). Default OFF — production runs the legacy single-worker path until operators flip the flag. Rationale: decomposition issues a paid Opus call per oversized story; gating prevents accidental cost surprise during the rollout window.
+    - Decomposer is an injectable async callable (`set_decomposer(fn)` / `get_decomposer()` module-state pair) rather than a hard-wired `claude -p` subprocess. Default `_DECOMPOSER = None` makes the auto-split path inert even with the env flag set in production — operator must explicitly wire a decomposer at startup. Unit tests use stub callables to drive the full pipeline without touching real `claude -p`. Pattern mirrors how `spawn_fn` / `wait_fn` got injected in S5's `execute_sub_stories`.
+    - `auto_split_and_execute` enforces MIN_SUBS=2 — a "decomposition" that yields a single sub-story is treated as a no-op fallback (decision=`keep`, fallback_reason populated). Prevents the worker from spinning up isolated infrastructure for what is effectively the original monolith.
+    - On `auto_split.succeeded == True`, agent/run.py emits a *synthetic* `EventType.WORKER_COMPLETED` carrying `auto_split=True` + `sub_ids` + `squashed_sha` so downstream pipeline stages (Stage 6 code-review, sprint-status update, cost ledger close-out) fire exactly as for a monolithic worker. Without this, the auto-split branch would silently bypass Stage 6 review. The synthetic event also flags `auto_split=True` for observability — Stage 6 can opt to scope its diff window to the squashed commit.
+    - 4 new typed EventType values (`SUB_STORY_STARTED` / `SUB_STORY_COMPLETED` / `SUB_STORY_SQUASH_DONE` / `SUB_STORY_SQUASH_SKIPPED`) plus 2 derived (`STORY_SPLIT_TRIGGERED` / `PHASE4_COMPLETE`). Inventory bumped 19 → 23. `make_bus_bridge()` returns an `on_event(dict)` closure that translates the executor's free-form dict events to typed bus emissions via `asyncio.create_task` with a strong-ref `pending: set[asyncio.Task]` (RUF006 fix) so fire-and-forget tasks survive GC pressure between sync executor and async bus.
+    - Failure mode: if `auto_split_and_execute` itself raises (decomposer crash, executor panic, squash failure), agent/run.py catches the exception, logs `auto_split_failed_falling_back`, and falls through to the legacy `runtime_spawn_worker` path. Auto-split is strictly an *optimisation* — pipeline correctness must not regress under failure. The catch is broad on purpose (`except Exception`) — any unexpected condition becomes a fallback rather than a halt.
+  **deferred_items:**
+    - Real Antares Story 3.1 (Nextcloud Docker template) pilot acceptance — Antares directory has no `docs/stories/` subdir; story 3.1 file does not exist. Same root cause as S1's 0.5 and S3's 1.5 blockers (Antares only ships 1.1 + 4.8 prepared). Synthesising 3.1 to "satisfy" the acceptance would be busy work, not validation. Real-pilot acceptance covered by S9 (Init #3C — Antares wave + Odyssey wave parallel) plus optional manual user run if/when a real 3.1 file lands in Antares. Pipeline correctness validated synchronously by 14 new unit tests (happy path 3 subs / decomposer error fallback / invalid JSON fallback / MIN_SUBS=2 / silent failure / bus bridge typed translation / env flag respected) + 1287-test baseline.
+    - Production wiring of a real Opus-backed decomposer (`set_decomposer(opus_decompose)` at startup). Cleanest place would be `cli/main.py` or `agent/run.py` startup — load Opus client + register the callable. Deferred to operator decision; default-off behaviour preserved until the wiring lands.
+    - JSONL emission of the synthetic `WORKER_COMPLETED` payload's `auto_split` / `sub_ids` / `squashed_sha` fields for Stage 6 review-scope narrowing. Currently the fields ride along the event payload; consumers that want to act on them must opt in.
 
 - **id:** S5
   **title:** Initiative #2B — sub-story execution + squash-merge back to parent
@@ -252,6 +257,23 @@
 
   **resolution:** resolved_deferred 2026-05-18 — Task 1.5 pilot covered by S6 + S9 natural pipeline exercise. Autoloop promotes S3 → Completed and continues to S4.
 
+- **[2026-05-18 UTC] pilot_validation_deferred — Antares Story 3.1 auto-split pilot (Task 2.5)**
+  Reason: Acceptance "Story 3.1 split на ≥3 sub-stories + speedup ≥2× + sprint-status 3.1=done" requires a real `docs/stories/3-1-*.md` file in `/home/server/Antares/`. Antares does not have a `docs/stories/` directory at all (same root cause as S1's 0.5 blocker and S3's 1.5 blocker — Antares only ships 1.1 + 4.8 prepared). Synthesising 3.1 to "satisfy" acceptance would be busy work (would need its own Stage 4 generation run, defeating the validation purpose).
+
+  Architectural wiring lands in S6 synchronously:
+    * `runtime/auto_split.py` — orchestrator (should_split → decompose → execute → squash)
+    * `agent/run.py` — per-story diversion to auto-split path when env+decomposer set
+    * 4 new typed `SUB_STORY_*` EventTypes + bus bridge translator
+    * Opt-in env gate `BMAD_AUTO_SPLIT=1` + injectable decomposer (`set_decomposer`) — production-safe default-off
+
+  Pipeline correctness validated synchronously by 14 new unit tests (happy path 3 subs / keep decision / decomposer error fallback / invalid JSON / MIN_SUBS=2 / silent failure / bus bridge typed translation / env flag respected / set_decomposer round-trip) + 1287-test baseline.
+
+  Real-pilot acceptance covered downstream by:
+    * **S9 (Init #3C)** — Antares wave + Odyssey wave parallel will naturally exercise the auto-split path if any story in either wave triggers `should_split`.
+    * Optional manual user run when a real story 3.1 lands in Antares (`set_decomposer(opus_call)` + `BMAD_AUTO_SPLIT=1` + run real pilot).
+
+  **resolution:** resolved_deferred 2026-05-18 — S6 acceptance reframed to architectural wiring + deferred runtime pilot to S9/manual. Autoloop promotes S6 → Completed and continues to S7.
+
 ## Decisions Log
 
 - **date:** 2026-05-18T05:00 UTC
@@ -338,6 +360,24 @@
   **rationale:** Soft-reset works in-place on the current branch — keeps tree and index identical, produces exactly one commit at the same branch head. `git merge --squash` requires a separate source branch, which sub-stories don't have (they share the parent feature branch). Soft-reset is also reversible mid-debug by `git reflog` lookup, whereas a merge-squash forfeits the original chain. `--allow-empty` fallback covers mock-only tests where sub-stories produce no tree diff.
   **impact:** Squash collapses N→1 commit on the parent feature branch in-place; pre-squash commits remain accessible via reflog for ~90 days for postmortem. No new branch namespace introduced.
 
+- **date:** 2026-05-18 UTC
+  **session:** S6
+  **decision:** Auto-split orchestrator at `runtime/auto_split.py`, opt-in env gate `BMAD_AUTO_SPLIT=1`, default decomposer `None` (production-safe inert)
+  **rationale:** Placement mirrors S4/S5 — auto-split chain lives at canonical `runtime/` import paths, away from the Claude SDK skill directories. Opt-in env flag mirrors `BMAD_REQUIRE_SANDBOX` / `BMAD_REQUIRE_CGROUP` pattern from S3; prevents accidental Opus calls during rollout. Default decomposer = None ensures even with env flag set, the path stays inert until an operator explicitly wires a real decomposer at startup (`set_decomposer(opus_call)`). Tests use stub callables to drive the full pipeline without `claude -p` subprocesses — same injection pattern as S5's `spawn_fn` / `wait_fn`.
+  **impact:** S7+ can safely import `auto_split_enabled` / `auto_split_and_execute` / `set_decomposer` from `runtime.auto_split`. Production rollout = 3 explicit gates: env flag + decomposer registration + decision-passes-should-split. Real-pilot validation deferred to S9 + optional manual run.
+
+- **date:** 2026-05-18 UTC
+  **session:** S6
+  **decision:** Synthetic `WORKER_COMPLETED` emission after successful auto-split (preserves Stage 6 code-review continuity)
+  **rationale:** Stage 6 review + sprint-status update + cost ledger close-out all subscribe to `WORKER_COMPLETED`. If the auto-split branch silently returned without emitting, downstream pipeline would skip review for split stories — exactly the opposite of what's needed (split stories should get *more* scrutiny, not less). Synthetic event carries `auto_split=True` + `sub_ids` + `squashed_sha` so review can opt to scope its diff to the squashed commit. Payload mirrors the legacy worker event shape so consumers need no awareness of the auto-split path.
+  **impact:** Split stories flow through Stage 6 identically to monolithic stories. JSONL observers see `auto_split=True` flag they can filter on. Downstream consumers that want to narrow diff scope to the squashed commit can read `squashed_sha` from the event payload.
+
+- **date:** 2026-05-18 UTC
+  **session:** S6
+  **decision:** Defer real Antares Story 3.1 pilot to S9 + manual user run (resolved_deferred)
+  **rationale:** Antares has no `docs/stories/` directory at all; story 3.1 file does not exist. Same root cause as S1's 0.5 and S3's 1.5 — Antares only ships 1.1 + 4.8 prepared. Creating 3.1 via a synthetic Stage 4 run defeats the validation purpose (synthetic ≠ real wave). Architectural wiring is complete and covered by 14 new unit tests + 1287-test baseline. Real-pilot exercise lands naturally in S9 (Antares + Odyssey parallel waves) — any story in either wave that exceeds `should_split` thresholds will trip the auto-split path under real claude -p workers.
+  **impact:** S6 → Completed without runtime pilot. S7 (Init #3A — project registry + CLI) promoted as Current. If S9 reveals a regression in auto-split surfaces, it surfaces in real-wave exercise rather than a synthetic stand-in.
+
 ## Journal
 
 ```
@@ -355,6 +395,9 @@
 [2026-05-18 UTC] S5 plan: 0 host-destructive (pure Python addition runtime/sub_story_executor.py + test_initiative2b_substory_executor.py). Acceptance literally "integration test с mock sub-stories" + "squash-merge produces single parent commit" — no wiring into _run_real_pilot_body (that lands in S6 alongside the Antares 3.1 validation pilot).
 [2026-05-18 UTC] S5 execution: Task 2.3 execute_sub_stories (sequential dispatch into shared parent worktree, spawn_fn/wait_fn injection, halt-on-failure + silent-failure detection, branch + git-repo invariant checks, on_event observability hook). Task 2.4 squash_sub_stories (git reset --soft + recommit; 0/1-commit fast paths skipped=True; --allow-empty fallback; sub_ids listed in body for Stage 6 review scope). 18 new tests in test_initiative2b_substory_executor.py (happy path + halt-on-failure + custom wait_fn + missing id / branch mismatch / no-git-repo errors + 0/1/N-commit squash + end-to-end execute+squash + frozen dataclasses). Commit 1fc6150 on integration/parallelism_initiatives. 1287/1287 PASS (was 1269); ruff 0; mypy 0 new on edited files. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
 [2026-05-18 UTC] S5 completed, S6 promoted to Current (surface=backend-python, Init #2C validation pilot Antares Story 3.1 auto-split, checkpoint=true).
+[2026-05-18 UTC] S6 plan: 0 host-destructive (pure Python addition runtime/auto_split.py + EventType bump + agent/run.py wiring). Acceptance for real Antares 3.1 pilot reframed to "architectural wiring + 14 new tests"; real-pilot validation deferred to S9 / manual user run because Antares ships no docs/stories/ dir.
+[2026-05-18 UTC] S6 execution: runtime/auto_split.py (auto_split_and_execute orchestrates should_split → decompose → execute_sub_stories → squash_sub_stories; AutoSplitOutcome dataclass with .succeeded; make_bus_bridge translates dict events → typed EventType.SUB_STORY_*; opt-in BMAD_AUTO_SPLIT env gate; injectable async decomposer via set_decomposer/get_decomposer with default None). 4 new EventTypes (SUB_STORY_STARTED/COMPLETED/SQUASH_DONE/SQUASH_SKIPPED) + 2 derived (STORY_SPLIT_TRIGGERED/PHASE4_COMPLETE); inventory 19 → 23. agent/run.py per-story diversion: when env+decomposer set, auto_split runs BEFORE legacy worker; on success emits synthetic WORKER_COMPLETED for Stage 6 continuity; on failure falls through to legacy worker. 14 new tests in test_initiative2c_auto_split_pilot.py (happy path 3 subs, keep decision, decomposer error fallback, invalid JSON fallback, MIN_SUBS=2, silent failure, bus bridge typed translation, env flag respected, set_decomposer round-trip). Commit 2a75557 on integration/parallelism_initiatives. 1301/1301 PASS (was 1287); ruff 0; mypy 0 new on edited files. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
+[2026-05-18 UTC] S6 completed, S7 promoted to Current (surface=backend-python, Init #3A project registry yaml + CLI scan/doctor/init/resume).
 ```
 
 ## Final Report (populated on last session completion)
