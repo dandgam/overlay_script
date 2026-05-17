@@ -206,11 +206,9 @@ class BwrapSandbox:
             "--dev", "/dev",
             "--tmpfs", "/tmp",  # noqa: S108 — bwrap mount point inside the sandbox namespace, not a host path
             "--tmpfs", "/sys",  # FS9 H1 — hide kernel info (LSMs, dmi, network)
-            # FS9 R5 P0-2 — H1 was asymmetric: /sys hidden but /proc still
-            # exposed the same kernel fingerprint (version, cmdline, modules,
-            # kallsyms, cpuinfo, meminfo). Block those individual /proc files
-            # via /dev/null bind. Bash, ps, /proc/self/* still work.
-            "--ro-bind", "/dev/null", "/proc/version",
+            # FS9 R5 P0-2 — block individual /proc kernel fingerprint files.
+            # ``/proc/version`` is needed by the Claude CLI (bun runtime reads
+            # it on startup) so it stays exposed; the rest get redacted.
             "--ro-bind", "/dev/null", "/proc/cmdline",
             "--ro-bind", "/dev/null", "/proc/modules",
             "--ro-bind", "/dev/null", "/proc/kallsyms",
@@ -223,6 +221,23 @@ class BwrapSandbox:
             "--unshare-ipc",
             "--unshare-cgroup-try",
         ]
+
+        # Claude CLI state: the binary writes config to ~/.claude.json,
+        # plugin manifest to ~/.claude/, and version state to
+        # ~/.local/share/claude/. Without writable mounts the worker
+        # `claude -p` exits with EROFS / EACCES on startup. Bind these
+        # ONLY when they exist on the host (treat as best-effort).
+        # Concurrency: workers share host state; multiple parallel
+        # workers may contend on lock files — acceptable for single-tenant
+        # pilot, follow-up: per-worker HOME (backlog).
+        home = Path(os.path.expanduser("~"))
+        for claude_path in (
+            home / ".claude",
+            home / ".claude.json",
+            home / ".local" / "share" / "claude",
+        ):
+            if claude_path.exists():
+                wrapped += ["--bind", str(claude_path), str(claude_path)]
 
         if network == "none":
             wrapped += ["--unshare-net"]

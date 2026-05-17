@@ -174,7 +174,10 @@ def test_r5_p1_1_env_override_below_minimum_clamps(
 # files. These individual /proc paths must be bound to /dev/null inside the
 # sandbox to defeat host fingerprinting.
 @pytest.mark.parametrize("proc_path", [
-    "/proc/version",
+    # ``/proc/version`` intentionally omitted: Claude CLI's bun runtime reads
+    # it on startup, blocking the worker spawn with EACCES otherwise. The
+    # fingerprint that leaks is the kernel banner only; remaining /proc
+    # files below still get redacted to /dev/null.
     "/proc/cmdline",
     "/proc/modules",
     "/proc/kallsyms",
