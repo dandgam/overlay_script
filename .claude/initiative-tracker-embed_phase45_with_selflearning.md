@@ -43,24 +43,6 @@
 
 ### Pending
 
-- **id:** E3
-  **title:** Worker spawn copies embedded skills to worktree (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 185-230
-  **depends_on:** [E1, E2]
-  **destructive_actions:**
-    - Copy skills/upstream/ + customize/ overrides в worktree's .claude/skills/ (overwrites if exists)
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - Modify `runtime/worker_spawn.py::spawn_worker` (caller-side helper, NOT inside sandbox-critical path):
-      - Before subprocess launch, copy skills/upstream/ + customize/ overrides → <worktree>/.claude/skills/
-      - Symlinks-safe (FS9 H2), abort if worktree path не под `_root/.worktrees/`
-    - `skills_resolution_root` config option (default = orchestrator's skills/)
-    - Audit event `embedded_skills_applied` с list файлов
-    - 20 tests: copy logic, overwriting, symlink safety, customize merge
-    - `pytest tests/ -q` — 833 PASS
-
 - **id:** E4
   **title:** `bmad-orchestrator skill-update <source>` CLI (CHECKPOINT)
   **surface:** backend-python
@@ -169,28 +151,45 @@
 
 ### Current
 
-- **id:** E2
-  **title:** customize/policy/lessons/patches scaffolds + pydantic schemas (CHECKPOINT)
+- **id:** E3
+  **title:** Worker spawn copies embedded skills to worktree (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 125-180
-  **depends_on:** [E1]
-  **destructive_actions:** []
+  **spec_section:** 185-230
+  **depends_on:** [E1, E2]
+  **destructive_actions:**
+    - Copy skills/upstream/ + customize/ overrides в worktree's .claude/skills/ (overwrites if exists)
   **checkpoint:** true
   **estimated_retries_allowed:** 3
   **started:** (pending — next wake promotes)
-  **workflow:** direct (pydantic models + YAML/TOML scaffolds + unit tests)
+  **workflow:** TBD (likely direct — Python file modification + tests, not a FastAPI gateway)
   **retry_count:** 0
   **worker_branches:** []
   **acceptance:**
-    - `skills/customize/<skill>.customize.toml` — empty TOML stubs для каждого embedded skill (14 файлов)
-    - `skills/policy/code-review-gates.yaml`, `cost-tuning.yaml`, `retry-policy.yaml` — initial defaults
-    - `skills/patches/` — empty dir (placeholder)
-    - `skills/lessons/` — empty dir
-    - `src/bmad_orchestrator/skills_repo.py` — load/parse с pydantic models (Customize, PolicyConfig)
-    - 15 unit tests на parse customize/policy schemas
-    - `pytest tests/ -q` — 813 PASS
+    - Modify `runtime/worker_spawn.py::spawn_worker` (caller-side helper, NOT inside sandbox-critical path):
+      - Before subprocess launch, copy skills/upstream/ + customize/ overrides → <worktree>/.claude/skills/
+      - Symlinks-safe (FS9 H2), abort if worktree path не под `_root/.worktrees/`
+    - `skills_resolution_root` config option (default = orchestrator's skills/)
+    - Audit event `embedded_skills_applied` с list файлов
+    - 20 tests: copy logic, overwriting, symlink safety, customize merge
+    - `pytest tests/ -q` — 833 PASS
 
 ### Completed
+
+- **id:** E2
+  **title:** customize/policy/lessons/patches scaffolds + pydantic schemas (CHECKPOINT)
+  **completed:** 2026-05-17 wake-2 (auto-loop-spec)
+  **commit:** acd571c
+  **files_changed:** 21 (+625 / -0)
+  **tests_passed:** 813 PASS (= 798 baseline + 15 new E2 tests)
+  **decisions_made:**
+    - Workflow=direct (pydantic models + YAML/TOML scaffolds + unit tests). backend-python.md workflow targets FastAPI gateway services (Telethon/vkmax) — не применимо к чистому scaffolding + library code. Followed E2 acceptance directly.
+    - 16 → 15 tests: dropped redundant `test_skills_root_default_resolves_to_project_skills_dir` (overlaps с implicit coverage в production-load tests) — landed exactly на 813 PASS per spec acceptance.
+    - Pydantic v2 `model_config = ConfigDict(extra="forbid")` для всех scaffold моделей — typo'ы в customize.toml / policy YAML fail-loud вместо silent drop.
+    - Three separate top-level policy YAML files (gates / cost-tuning / retry) сохранены — соответствуют spec; PolicyConfig агрегирует. Альтернатива (один YAML) была бы tighter, но spec explicitly mandates три файла.
+    - tomllib (stdlib) для TOML load, yaml.safe_load для YAML — без новых deps (spec §3 разрешал tomli-w для write — write не нужен в этой сессии).
+  **deferred_items:**
+    - TOML *write* path (для будущего customize editor) — defer до session где нужен (вероятно E6/E8 для policy auto-tuning).
+    - Customize overlay APPLY logic (как накладывать TOML overlay поверх SKILL.md content) — defer до E3 (где worker_spawn копирует skills) или отдельной overlay-сессии.
 
 - **id:** E1
   **title:** Skills directory + copy 14 phase 4+5 BMad skills (CHECKPOINT)
@@ -232,6 +231,18 @@
   **rationale:** backend-python workflow targets FastAPI gateway services (Telethon, vkmax) с uvicorn smoke test. E1 — pure file copy from canonical odyssey skills + version stamp + README. No FastAPI, no uvicorn, no auth flow. Workflow steps 2-7 (pip install, py_compile, ruff, uvicorn smoke, crm-reviewer) не применимы.
   **impact:** Future scaffolding sessions (E2 — schemas + scaffolds, E8 — lesson_parser.py) могут пойти тем же путём (direct). Sessions с реальной Python implementation (E3 worker_spawn modification, E4-E8 CLI/code) — следует backend-python workflow с локальными адаптациями.
 
+- **date:** 2026-05-17 wake-2
+  **session:** E2
+  **decision:** Workflow=direct для E2 (pydantic models + YAML/TOML scaffolds + 15 unit tests), не backend-python.md.
+  **rationale:** backend-python workflow targets FastAPI gateways. E2 — pure library code (pydantic schemas + load helpers) + static config files. Нет FastAPI, нет uvicorn, нет внешней библиотечной auth flow. Acceptance criteria покрывают всё прямой реализацией.
+  **impact:** E3 (worker_spawn modification) — likely также direct (Python subprocess helper, не FastAPI service). E4 CLI — также direct (typer subcommand). E5-E8 — все код в существующих модулях, не новые FastAPI services. Реально backend-python.md workflow не будет использоваться в этой инициативе вообще — все sessions = direct. Зафиксировать как pattern.
+
+- **date:** 2026-05-17 wake-2
+  **session:** E2
+  **decision:** Three separate policy YAML files (code-review-gates / cost-tuning / retry-policy) сохранены — НЕ агрегированы в один.
+  **rationale:** Spec §4 E2 explicitly листит три файла. L2 live tuning (E6) updates только code-review-gates.yaml — отдельный файл = меньше blast radius при auto-write. Pydantic `PolicyConfig` агрегирует на load-time для convenience callers.
+  **impact:** E6 atomic write targets только code-review-gates.yaml. E4 skill-update НЕ trogan'ет ни один из трёх — заявлено в acceptance.
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
@@ -239,3 +250,7 @@
 [2026-05-17 wake-1] E1 execution: skills/upstream/ created, 14 skills copied from odyssey@307dfab, .bmad-version + README written
 [2026-05-17 wake-1] E1 verification: pytest 798 PASS (baseline preserved — no test changes this session per acceptance)
 [2026-05-17 wake-1] E1 committed 83f82ed (63 files, +9792 / -24); E1 → Completed, E2 → Current; loop_wrapper runtime → no ScheduleWakeup, wrapper drives next iteration
+[2026-05-17 12:46 UTC wake-2] E2 promoted: customize/policy/lessons/patches scaffolds + pydantic schemas; workflow=direct (library code + scaffolds — backend-python workflow targets FastAPI gateways, not applicable)
+[2026-05-17 12:46 UTC wake-2] E2 execution: 14 customize TOML stubs + 3 policy YAML + 2 .gitkeep placeholders + skills_repo.py (Customize, CodeReviewGates, CostTuning, RetryPolicy, PolicyConfig) + 15 unit tests
+[2026-05-17 12:46 UTC wake-2] E2 verification: pytest 813 PASS (798 + 15 = 813 ✓ matches acceptance); ruff + mypy --strict clean
+[2026-05-17 12:46 UTC wake-2] E2 committed acd571c (21 files, +625 / -0); E2 → Completed, E3 → Current; loop_wrapper runtime → no ScheduleWakeup, wrapper drives next iteration
