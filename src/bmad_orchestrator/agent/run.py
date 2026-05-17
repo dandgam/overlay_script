@@ -59,6 +59,7 @@ import structlog
 if TYPE_CHECKING:
     from claude_agent_sdk.types import HookCallback
 
+from bmad_orchestrator.agent.file_conflict import split_batch
 from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard
 from bmad_orchestrator.agent.safety.hooks import audit_tool_output, security_check_hook
 from bmad_orchestrator.agent.skills import SkillError
@@ -885,7 +886,21 @@ async def _run_real_pilot_body(
 
         remaining_slots = max_stories - len(spawned)
         effective_max = min(max_parallel, remaining_slots)
-        batch = ready[:effective_max]
+        # Initiative #1 Task 1.2 — file-conflict pre-check. ``planner.find_ready``
+        # is round-based and not informed by ``in_flight_touches`` here, so two
+        # ready stories that touch the same file would otherwise spawn in
+        # parallel and race their writes. ``split_batch`` keeps the first owner
+        # of each file in the parallel slot; later collisions land in
+        # ``deferred`` and naturally re-appear in the next round (they are not
+        # in ``spawned``, and their conflicting peer has finished by then).
+        batch, deferred = split_batch(ready[:effective_max * 2], effective_max)
+        if deferred:
+            log.info(
+                "file_conflict_split",
+                parallel=[s.get("id") for s in batch],
+                deferred=[s.get("id") for s in deferred],
+                effective_max=effective_max,
+            )
         if not batch:
             break
 

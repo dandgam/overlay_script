@@ -44,6 +44,12 @@ app = typer.Typer(
 )
 console = Console()
 
+# Initiative #1 (Task 1.1) — preset parallelism slots for --parallel CLI flag.
+# Keep this list narrow: each preset bakes assumptions about memory/CPU caps
+# (see Initiative #1 Task 1.3 cgroup work). Adding a value here without a
+# matching sandbox preset = silent over-subscription on a busy host.
+PARALLEL_PRESETS: tuple[int, ...] = (1, 3, 5, 10)
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -105,6 +111,13 @@ def run(
     project: str = typer.Option(..., "--project", help="Target project name"),
     wave: str = typer.Option(..., "--wave", help="Wave identifier (e.g. 1a)"),
     max_parallel: int = typer.Option(3, "--max-parallel"),
+    parallel: int | None = typer.Option(
+        None, "--parallel",
+        help=(
+            "Preset N parallel workers (1, 3, 5, 10). Overrides --max-parallel "
+            "if set. See Initiative #1 Task 1.1."
+        ),
+    ),
     model: str | None = typer.Option(None, "--model", help="Set all roles to one model"),
     planner_model: str | None = typer.Option(None, "--planner-model"),
     reviewer_model: str | None = typer.Option(None, "--reviewer-model"),
@@ -141,6 +154,13 @@ def run(
     ),
 ) -> None:
     """Запустить оркестратор на указанной wave."""
+    if parallel is not None:
+        if parallel not in PARALLEL_PRESETS:
+            raise typer.BadParameter(
+                f"--parallel must be one of: {', '.join(str(p) for p in PARALLEL_PRESETS)}"
+            )
+        max_parallel = parallel
+
     models_cfg = _resolve_models(
         model=model,
         planner_model=planner_model,
@@ -153,6 +173,9 @@ def run(
 
     if daemon:
         # Spawn ourselves detached (§14.4 mode 2).
+        # --parallel already collapsed into max_parallel above; pass only the
+        # underlying integer so the daemon child reproduces the chosen slot
+        # count without re-validating the preset.
         args = [sys.executable, "-m", "bmad_orchestrator.cli", "run",
                 "--project", project, "--wave", wave,
                 "--max-parallel", str(max_parallel),
