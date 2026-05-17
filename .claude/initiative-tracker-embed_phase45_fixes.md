@@ -45,6 +45,9 @@
 ## Sessions
 
 ### Pending
+(none — F3 promoted to Current)
+
+### Current
 
 - **id:** F3
   **title:** P1 polish + P2 nice-to-haves (FINAL)
@@ -54,6 +57,10 @@
   **destructive_actions:** []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
+  **started:** 2026-05-17 23:25 UTC
+  **workflow:** workflows/backend-python.md (adapted — orchestrator-runtime edits)
+  **retry_count:** 0
+  **worker_branches:** []
   **acceptance:**
     - P1-4: `fcntl.flock` advisory locks к `_atomic_yaml_write` (3 файла)
     - P1-6: `BudgetGuard.recent_story_costs() -> tuple[Decimal, ...]` accessor, replace private `_recent_story_costs` usage в `agent/run.py`
@@ -61,32 +68,8 @@
     - P2-2: `budget_guard.py:85` exclude bool из `isinstance` check
     - P2-3: narrow at least one `except Exception` per site (`agent/run.py` 5 sites)
     - 10 regression tests
-    - `pytest tests/ -q` — 1033 PASS (1023 + 10); ruff/mypy clean
+    - `pytest tests/ -q` — 1034 PASS (1024 + 10); ruff/mypy clean
     - Manual merge через human review (Auto merge=false)
-
-### Current
-
-- **id:** F2
-  **title:** Critical P1 fixes — DoS cap, backup, bounds, save_project_memory, threshold escalation (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 95-135
-  **depends_on:** [F1]
-  **destructive_actions:**
-    - `policy-rollback <project> <proposal-id>` mutates skills/policy/ files (restore from backup)
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **started:** 2026-05-17 16:02 UTC
-  **workflow:** workflows/backend-python.md (adapted — orchestrator-runtime edits)
-  **retry_count:** 0
-  **worker_branches:** []
-  **acceptance:**
-    - P1-1: `runtime/lesson_parser.py` `_MAX_LINE_LEN=8192` + `_MAX_FILE_BYTES=1_048_576` + overflow raises `LessonProposalInvalidError`
-    - P1-2: `apply_proposal` writes `.yaml.bak-<ts>` (keep last 3), new CLI `policy-rollback`
-    - P1-3: `runtime/live_tuning.py:75-86` bounds → `max(abs(current), _EPS)`, update existing tests
-    - P1-5: `agent/run.py::_run_real_pilot` after wave_boundary → `save_project_memory(slug, fresh_medians)`
-    - P1-7: `_apply_live_tuning` если direction = tighten → emit HUMAN_QUERY + skip silent apply
-    - 18 regression tests
-    - `pytest tests/ -q` — 1024 PASS (1006 + 18); ruff/mypy clean
 
 ### Completed
 
@@ -106,11 +89,28 @@
   **deferred_items:**
     - Symmetric wiring of subscribers in `_run_mock_pilot` — spec marked optional, mock-mode tests don't need it.
 
+- **id:** F2
+  **title:** Critical P1 fixes — DoS cap, backup, bounds, save_project_memory, threshold escalation (CHECKPOINT)
+  **completed:** 2026-05-17 23:25 UTC
+  **commit:** d02e698
+  **files_changed:** 6 (lesson_parser.py, live_tuning.py, agent/run.py, cli/main.py, test_e6_live_tuning.py, test_embed_phase45_fixes_f2.py [new])
+  **tests_passed:** 1024 PASS (1006 baseline + 18 new F2 tests)
+  **decisions_made:**
+    - P1-1: Encoded-length check (UTF-8 byte count) for file cap; per-line check against UTF-8 byte length not char count — DoS attacker controls bytes, not unicode runes. `parse_lessons_dir` does `stat()` BEFORE read_text to avoid loading a malicious 100 MiB file into memory just to reject it.
+    - P1-2: Backup timestamp suffix doubles as `proposal_id` in audit log + as the `rollback_policy` lookup key. Format `<basename>.bak-YYYYMMDDTHHMMSSZ` is greppable, sortable, idempotent (same `apply_proposal` call twice → 2 distinct backups). Keep-last-3 prune runs after the new snapshot is written so we never accidentally delete the only backup.
+    - P1-3: Reading spec literally: «drift measured against current value only». Previous formula `max(abs(current), abs(proposed), _EPS)` rescued proposals that moved the threshold a lot but landed on a larger absolute value — exactly the 0.5→0.8 case the audit flagged. New formula `max(abs(current), _EPS)` rejects that as 60% drift while still tolerating `current=0` via the EPS floor.
+    - P1-5: Helper `_persist_project_memory_snapshot` is local to `agent/run.py` (not promoted to `project_memory.py`) because it knows BudgetGuard internals (`_recent_*` deques). Refreshes only fields the orchestrator owns (last_wave + 4 rolling windows + 3 medians) — preserves `success_rate`, `compliance_findings_count`, `lessons_files_count` set by other subsystems. Wrapped in try/except `ProjectMemoryError` with warn-only logging: a missing snapshot delays live-tuning convergence by a few stories at next launch but must NOT abort an otherwise-successful pilot.
+    - P1-7: Direction partition done by tuple comprehension on `proposed_value > current_value` — keeps existing `apply_proposals` call path intact for the loosen subset. Each tighten emits its own HUMAN_QUERY with `verdict="live_tuning_tighten"` so user can approve/reject per metric (vs batch). YAML file remains at the pre-proposal value until human applies via the existing escalation flow.
+    - 2 pre-existing E6 tests updated to match new semantics: `test_e6_evaluate_clamps_proposed_to_unit_interval` asserts within_bounds=False (was True under old formula); `test_e6_subscriber_persists_yaml_after_min_samples` rewritten to test LOOSEN path (0.8→0.7) instead of TIGHTEN (0.8→0.9) which now escalates.
+    - Test infra: `ORCHESTRATOR_HOME` env var → must use double-prefix `ORCHESTRATOR_ORCHESTRATOR_HOME` because pydantic-settings adds env_prefix to field name. Caught by the failing real-pilot test on first run.
+  **deferred_items:**
+    - Mock-pilot wave-boundary persist not wired (spec only required real-mode); mock-mode tests construct ProjectMemory manually anyway.
+
 ## Safety Gates Triggered
-(none yet)
+(none)
 
 ## Blockers / Pauses
-(none yet)
+(none)
 
 ## Decisions Log
 
@@ -126,6 +126,12 @@
   **rationale:** Subscriber wiring через `functools.partial` оказался cleanest path: один import + cast, не требует переписывания subscriber'ов под однопараметровый EventCallback. Bug в test_w4_grep_subscribers_defined_exactly_twice исправлен — старый assert==2 сам по себе и был тем guard'ом, который должен был поймать missing wiring (но проверял только def, не usage).
   **impact:** F2 (critical P1) разблокирован; depends_on=[F1] satisfied. Test baseline на следующий сессии = 1006 PASS.
 
+- **date:** 2026-05-17 23:25 UTC
+  **session:** F2
+  **decision:** F2 закрыта — все 5 critical P1 имплементированы, 18 regression tests, 1024 PASS зелёный, ruff/mypy strict clean. 2 pre-existing E6 теста обновлены под новую семантику bounds/tighten.
+  **rationale:** P1-3 (bounds formula) и P1-7 (tighten escalation) — самые поведенчески-важные: первый блокирует крупные «безопасные на вид» прыжки (0.5→0.8); второй превращает молчаливое ужесточение в человеко-контролируемую операцию. P1-2 (policy backup + rollback CLI) даёт operator выход «откатить последнее изменение политики» без git surgery. P1-1 (DoS cap) — defence-in-depth перед открытием skills/policy на user-uploaded markdown в будущем. P1-5 (memory persist) закрывает обнаруженный gap между E7 (load) и реальной production runtime — без него primed deques пустые.
+  **impact:** F3 (polish + P2) разблокирован; depends_on=[F2] satisfied. Test baseline на следующую сессию = 1024 PASS. После F3 → initiative complete → manual merge на main (Auto merge=false).
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 3 sessions planned (F1=P0, F2=critical P1, F3=polish), runtime=loop_wrapper, delay=300s
@@ -133,3 +139,6 @@
 [2026-05-17 16:02 UTC] F1 execution: P0-1 wired 3 subscribers via partial; P0-2 added completed_stories к WAVE_BOUNDARY_REACHED payload (mock + real); P0-3 wrapped _load_policy_yaml в PolicyApplyError; P0-4 validated field_name в load_proposals_yaml
 [2026-05-17 16:02 UTC] F1 tests: 13 regression tests passing (12 spec'd + 1 sanity), full suite 1006 PASS, ruff/mypy clean
 [2026-05-17 16:02 UTC] F1 completed → Completed, F2 promoted to Current; commit 5dfcfa689eb6a72c5f2607e9260c2c8983477478
+[2026-05-17 23:25 UTC] F2 execution: P1-1 lesson_parser DoS caps + LessonProposalInvalidError on overflow; P1-2 apply_proposal snapshot .yaml.bak-<ts> + keep-last-3 prune + `bmad-orchestrator policy-rollback` CLI; P1-3 _within_bounds → max(abs(current), _EPS) (rejects 0.5→0.8 as 60% drift); P1-5 _persist_project_memory_snapshot helper called after WAVE_BOUNDARY_REACHED in _run_real_pilot (warn-only on failure); P1-7 tighten direction in _apply_live_tuning escalates via HUMAN_QUERY (loosen still silent-applies)
+[2026-05-17 23:25 UTC] F2 tests: 18 regression tests passing, 2 pre-existing E6 tests updated for new semantics, full suite 1024 PASS, ruff clean, mypy --strict clean on 4 modified src files
+[2026-05-17 23:25 UTC] F2 completed → Completed, F3 promoted to Current; commit d02e698 on integration/embed_phase45_fixes. Runtime=loop_wrapper → no main merge, no ScheduleWakeup; wrapper handles next iteration.
