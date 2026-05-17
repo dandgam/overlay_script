@@ -72,6 +72,10 @@ from bmad_orchestrator.runtime.live_tuning import (
     atomic_write_gates_yaml,
     evaluate_threshold,
 )
+from bmad_orchestrator.runtime.project_memory import (
+    ProjectMemoryInvalidError,
+    load_project_memory,
+)
 from bmad_orchestrator.runtime.sandbox import detect_sandbox
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
@@ -158,6 +162,19 @@ async def run_orchestrator(
     budget = BudgetGuard(settings.budget, event_loop=bus)
     if state_db is not None and session_id is not None:
         budget.attach_state_db(state_db, session_id)
+
+    # E7 — prime BudgetGuard rolling windows from persisted per-project memory
+    # so live tuning has historical signal from the very first story of the
+    # new run instead of starting empty. Malformed memory files are tolerated
+    # (logged, then run continues with empty windows) — a corrupt file must
+    # not block a real-mode pilot launch.
+    try:
+        memory = load_project_memory(
+            project, orchestrator_home=settings.orchestrator_home
+        )
+        budget.prime_from_memory(memory)
+    except ProjectMemoryInvalidError as exc:
+        log.warning("project_memory_load_failed", project=project, error=str(exc))
 
     if mock:
         await _run_mock_pilot(bus, wave=wave, max_parallel=max_parallel, budget=budget)

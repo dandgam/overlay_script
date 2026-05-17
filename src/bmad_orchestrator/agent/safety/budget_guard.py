@@ -30,6 +30,12 @@ from bmad_orchestrator.config import BudgetConfig
 from bmad_orchestrator.models import Budget
 from bmad_orchestrator.runtime.budget import is_finite_spend
 from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
+from bmad_orchestrator.runtime.project_memory import (
+    ProjectMemory,
+    _finite_clamped_ratio,
+    _finite_nonneg_int,
+    _finite_positive,
+)
 
 if TYPE_CHECKING:
     from bmad_orchestrator.state.db import BudgetEnforceResult, StateDB
@@ -141,6 +147,33 @@ class BudgetGuard:
         """Late-binding helper — wire the guard to a shared StateDB after init."""
         self.state_db = state_db
         self.session_id = session_id
+
+    # ── E7 — L3 per-project memory priming ────────────────────────────────────
+
+    def prime_from_memory(self, memory: ProjectMemory) -> None:
+        """Pre-fill rolling windows from a persisted :class:`ProjectMemory`.
+
+        Called once at boot when ``--project <slug>`` resolves to a memory
+        file. Idempotent in spirit but not enforced — repeated priming
+        just adds more samples to the rolling deques (deque maxlen caps
+        memory). All four windows are extended in oldest-first order so
+        the newest persisted sample lands at the right of each deque,
+        matching :meth:`record_review_metrics` and :meth:`record_story_cost`
+        runtime behaviour.
+
+        Invalid samples (NaN, inf, non-positive story costs, negative
+        iteration counts) are dropped silently — the persisted file may
+        be a few schema-versions old or hand-edited; the guard fails safe
+        by ignoring rather than crashing boot.
+        """
+        for cost in _finite_positive(memory.recent_story_costs):
+            self._recent_story_costs.append(Decimal(str(cost)))
+        for ratio in _finite_clamped_ratio(memory.recent_p0_coverages):
+            self._recent_p0_counts.append(ratio)
+        for ratio in _finite_clamped_ratio(memory.recent_test_coverages):
+            self._recent_test_counts.append(ratio)
+        for it in _finite_nonneg_int(memory.recent_review_iterations):
+            self._recent_review_iterations.append(it)
 
     # ── public API ─────────────────────────────────────────────────────────────
 
