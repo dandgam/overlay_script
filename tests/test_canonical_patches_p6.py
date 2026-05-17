@@ -346,6 +346,9 @@ async def test_all_seven_canonical_subscribers_wired_in_correct_order(
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
     target = _make_target_with_stories(tmp_path)
     monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(target))
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("ORCHESTRATOR_ORCHESTRATOR_HOME", str(home))
 
     bus = EventLoop()
     budget = BudgetGuard(load_settings().budget, event_loop=bus)

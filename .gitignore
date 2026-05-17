@@ -28,6 +28,8 @@ env/
 # Auto-loop runtime logs (генерируются launcher.sh / watchdog.sh)
 .claude/auto-loop-*.log
 .claude/watchdog-*.log
+.claude/bmad-bot.log
+.claude/bmad-stub.log
 
 # State snapshots для rollback (per-session, не коммитим)
 .claude/state/
@@ -59,3 +61,7 @@ anthropic_api_key.txt
 
 # Trash
 trash/
+
+# Per-project memory snapshots (populated at runtime by _persist_project_memory_snapshot).
+# Tests that forget to override ORCHESTRATOR_ORCHESTRATOR_HOME also leak here.
+_config/projects/
