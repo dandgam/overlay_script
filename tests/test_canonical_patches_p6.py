@@ -7,7 +7,7 @@ Coverage (10 tests + 1 inventory check):
 
 * **Wiring + inventory** (4)
   - All 7 canonical subscribers wired in correct order via ``_run_real_pilot``.
-  - ``EventType`` enum count is 17 (the canonical post-P5 inventory).
+  - ``EventType`` enum count is 19 (post-Phase-0 inventory: P5 + Phase 0 patches).
   - ``SECURITY_REVIEW_PASSED`` present in the enum (P5 addition).
   - All 6 bundled policy YAMLs load without error.
 
@@ -390,15 +390,17 @@ async def test_all_seven_canonical_subscribers_wired_in_correct_order(
     assert getattr(funcs[6], "__name__", "") == "quarterly_sweep_subscriber"
 
 
-def test_event_type_inventory_count_is_seventeen() -> None:
-    """Post-P5 the EventType enum carries exactly 17 entries.
+def test_event_type_inventory_count_is_nineteen() -> None:
+    """Post-Phase-0 the EventType enum carries exactly 19 entries.
 
-    Bumped from 16 in P5 with the addition of ``SECURITY_REVIEW_PASSED``.
+    Bumped from 17 in Phase 0 (spec_parallelism_initiatives) with the
+    addition of ``WORKER_SILENT_FAILURE`` (Task 0.2 silent-failure detection)
+    and ``COST_TRACKING_UNAVAILABLE`` (Task 0.3 subscription-mode honesty).
     A future addition MUST update this assertion in the same commit so the
     inventory drift is reviewed.
     """
-    assert len(ALL_EVENT_TYPES) == 17, (
-        f"Expected 17 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    assert len(ALL_EVENT_TYPES) == 19, (
+        f"Expected 19 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 

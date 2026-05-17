@@ -109,6 +109,7 @@ class WorkerHandle:
     fallback_reason: str | None = None
     real_requested: bool = False
     sandbox_kind: str = "none"
+    base_sha: str | None = None
 
 
 def _resolve_claude_bin() -> str | None:
@@ -202,6 +203,7 @@ async def spawn_worker(
     sandbox_network: NetworkPolicy = "none",
     embedded_skills_root: Path | str | None = None,
     allowed_worktree_root: Path | str | None = None,
+    base_sha: str | None = None,
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 
@@ -310,6 +312,7 @@ async def spawn_worker(
             fallback_reason=fallback_reason,
             real_requested=real_requested,
             sandbox_kind=sandbox_kind,
+            base_sha=base_sha,
         )
 
     # Real-mode subprocess.
@@ -385,6 +388,7 @@ async def spawn_worker(
         process=process,
         mock=False,
         sandbox_kind=sandbox.kind,
+        base_sha=base_sha,
     )
 
 

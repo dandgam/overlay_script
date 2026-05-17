@@ -33,6 +33,8 @@ class EventType(StrEnum):
     WORKER_COMPLETED = "worker_completed"
     WORKER_HALT_FILE = "worker_halt_file"
     WORKER_ELICITATION = "worker_elicitation"
+    WORKER_SILENT_FAILURE = "worker_silent_failure"
+    COST_TRACKING_UNAVAILABLE = "cost_tracking_unavailable"
     BUDGET_THRESHOLD_HIT = "budget_threshold_hit"
     WAVE_BOUNDARY_REACHED = "wave_boundary_reached"
     EPIC_BOUNDARY_REACHED = "epic_boundary_reached"

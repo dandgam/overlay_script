@@ -43,6 +43,9 @@ import asyncio
 import os
 import re
 import secrets
+import shutil
+import signal
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -620,10 +623,125 @@ async def _run_real_pilot(
     The per-story spend reserve here is a placeholder (story_alarm_usd / 6 ≈
     $5/story) — W3 wires real cost parsing from worker JSONL ``usage`` blocks.
     """
+    # Phase 0 Task 0.1 — pre-cleanup of stale orchestrator processes from
+    # prior failed runs. Excludes self + PPID to avoid suicide. See
+    # spec_parallelism_initiatives §Phase 0 / Task 0.1.
+    killed_stale = _kill_stale_orchestrators(project)
+    if killed_stale:
+        log.info("stale_orchestrators_killed", project=project, count=killed_stale)
+
     # W1.3 — sandbox guard. ``detect_sandbox()`` itself enforces
     # ``BMAD_REQUIRE_SANDBOX=1`` + NoSandbox → RuntimeError (FS9 H5). Calling at
     # entry surfaces the missing-bwrap failure BEFORE any DAG / spawn work.
     _ = detect_sandbox()
+
+    spawned_handles: list[WorkerHandle] = []
+    try:
+        await _run_real_pilot_body(
+            bus,
+            project=project,
+            wave=wave,
+            max_parallel=max_parallel,
+            max_stories=max_stories,
+            max_spend_usd=max_spend_usd,
+            budget=budget,
+            state_db=state_db,
+            session_id=session_id,
+            models=models,
+            options=options,
+            story_filter=story_filter,
+            spawned_handles=spawned_handles,
+        )
+    finally:
+        # Phase 0 Task 0.1 — kill child processes (claude -p, bwrap) if the
+        # orchestrator crashes mid-pilot. Without this, zombie workers
+        # accumulate and collide on next launch.
+        _kill_orphan_workers(spawned_handles)
+
+
+def _kill_stale_orchestrators(project: str) -> int:
+    """Kill orchestrator processes for the same project, excluding self/PPID.
+
+    Spec: ``pkill -9 -f "bmad-orchestrator run --project {project}"`` matched
+    the live pilot too — fix is pgrep + PID filter. Returns number killed.
+    """
+    pattern = f"bmad-orchestrator run --project {project}"
+    exclude_pids = {os.getpid(), os.getppid()}
+    pgrep_bin = shutil.which("pgrep")
+    if pgrep_bin is None:
+        return 0
+    try:
+        # ``pattern`` is a search expression, not an executed command — pgrep
+        # matches it against existing /proc/<pid>/cmdline entries. Hardcoded
+        # absolute binary + no shell.
+        proc = subprocess.run(  # noqa: S603
+            [pgrep_bin, "-f", pattern],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return 0
+    killed = 0
+    for line in proc.stdout.split():
+        line = line.strip()
+        if not line.isdigit():
+            continue
+        pid = int(line)
+        if pid in exclude_pids:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            continue
+    return killed
+
+
+def _kill_orphan_workers(handles: list[WorkerHandle]) -> None:
+    """SIGKILL any worker subprocess still alive when the pilot exits.
+
+    Called from ``_run_real_pilot`` finally — covers the case where the
+    orchestrator crashes between spawn and ``_tail_and_emit_completion``
+    completion, leaving claude/bwrap children alive.
+    """
+    for handle in handles:
+        proc = handle.process
+        if proc is None or proc.returncode is not None:
+            continue
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            continue
+        log.warning(
+            "orphan_worker_killed",
+            story_id=handle.story_id,
+            pid=handle.pid,
+        )
+
+
+async def _run_real_pilot_body(
+    bus: EventLoop,
+    *,
+    project: str,
+    wave: str,
+    max_parallel: int,
+    max_stories: int,
+    max_spend_usd: float,
+    budget: BudgetGuard,
+    state_db: StateDB | None,
+    session_id: int | None,
+    models: ModelConfig,
+    options: dict[str, Any],
+    story_filter: tuple[str, ...] | None,
+    spawned_handles: list[WorkerHandle],
+) -> None:
+    """Body of ``_run_real_pilot`` — wrapped in try/finally for orphan cleanup.
+
+    ``spawned_handles`` accumulates every WorkerHandle spawned across all
+    rounds so the finally block in the outer function can SIGKILL leftovers.
+    """
 
     from bmad_orchestrator.agent.tools._common import (
         list_stories,
@@ -852,7 +970,7 @@ async def _run_real_pilot(
 
             wt = worktree_root / f"wt-{story['id']}"
             branch_name = f"feature/{story['id']}"
-            await _ensure_git_worktree(
+            base_sha = await _ensure_git_worktree(
                 target_project=settings.target_project,
                 worktree=wt,
                 branch=branch_name,
@@ -865,8 +983,10 @@ async def _run_real_pilot(
                 sandbox_network="full",
                 embedded_skills_root=settings.skills_resolution_root,
                 allowed_worktree_root=worktree_root,
+                base_sha=base_sha,
             )
             handles.append(handle)
+            spawned_handles.append(handle)
             spawned.append(story["id"])
 
         if handles:
@@ -988,8 +1108,13 @@ async def _ensure_git_worktree(
     target_project: Path,
     worktree: Path,
     branch: str,
-) -> None:
+) -> str:
     """Create (or reuse) a git worktree at ``worktree`` based on ``branch``.
+
+    Returns the resolved HEAD SHA of the worktree branch (base reference
+    for post-worker silent-failure detection — Phase 0 Task 0.2). On
+    reuse, also runs the Phase 0 Task 0.4 freshness check (warns if the
+    worktree has untracked / modified files left over from a prior run).
 
     First real-mode primitive — без него worker'ы спавнились в пустых
     папках и не имели доступа ни к story file, ни к source code,
@@ -1008,7 +1133,8 @@ async def _ensure_git_worktree(
             worktree=str(worktree),
             branch=branch,
         )
-        return
+        await _warn_if_worktree_dirty(worktree)
+        return await _resolve_worktree_head(worktree)
 
     # If a plain dir exists from a previous failed spawn — leave it; git
     # worktree add will fail on non-empty paths, which is the right loud
@@ -1051,6 +1177,67 @@ async def _ensure_git_worktree(
         branch=branch,
         new_branch=not branch_exists,
     )
+    await _warn_if_worktree_dirty(worktree)
+    return await _resolve_worktree_head(worktree)
+
+
+async def _warn_if_worktree_dirty(worktree: Path) -> list[str]:
+    """Phase 0 Task 0.4 — emit warn log if worktree has untracked/modified files.
+
+    Pre-existing residue (e.g. leftover commits, stray files from a prior
+    aborted spawn) can collide with the new worker's output. Returns the
+    list of porcelain status lines for callers/tests; empty when clean.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(worktree), "status", "--porcelain",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return []
+    raw = stdout.decode(errors="replace")
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if lines:
+        log.warning(
+            "worktree_dirty_pre_spawn",
+            worktree=str(worktree),
+            entries=lines[:20],
+            count=len(lines),
+            note="pre-existing untracked/modified files may collide with story output",
+        )
+    return lines
+
+
+async def _resolve_worktree_head(worktree: Path) -> str:
+    """Return ``git -C <worktree> rev-parse HEAD`` or empty string on failure."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(worktree), "rev-parse", "HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return ""
+    return stdout.decode(errors="replace").strip()
+
+
+async def _count_new_commits(worktree: str, base_sha: str) -> int:
+    """Count commits on the worker's branch since ``base_sha`` (Phase 0 Task 0.2)."""
+    if not base_sha:
+        return 0
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", worktree, "rev-list", "--count", f"{base_sha}..HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return 0
+    try:
+        return int(stdout.decode(errors="replace").strip())
+    except ValueError:
+        return 0
 
 
 async def _tail_and_emit_completion(
@@ -1074,6 +1261,13 @@ async def _tail_and_emit_completion(
     :meth:`BudgetGuard.record_story_cost`. Tests that drive this helper with
     pure mock-mode handles can omit both and get the legacy bridge-only path.
     """
+    # Phase 0 Task 0.3 — subscription mode: ANTHROPIC_API_KEY absent or
+    # BMAD_DISABLE_BUDGET=1 means per-token billing is unavailable. We still
+    # run the tracker so any usage data that does appear in JSONL events is
+    # captured, but on terminal events with zero tokens we emit
+    # ``cost_tracking_unavailable`` instead of the misleading
+    # ``worker_cost_final total_usd=0.00``.
+    subscription_mode = _is_subscription_mode()
     tracker: WorkerCostTracker | None = None
     if budget is not None and model:
         tracker = WorkerCostTracker(model=model)
@@ -1088,22 +1282,61 @@ async def _tail_and_emit_completion(
         event_type = ev.get("event_type")
         if event_type == "worker_completed":
             if tracker is not None and budget is not None:
-                _emit_worker_cost_final(tracker, handle.story_id)
-                budget.record_story_cost(tracker.total_cost)
+                if subscription_mode and _tracker_has_no_usage(tracker):
+                    await _emit_cost_tracking_unavailable(
+                        bus, handle.story_id, reason="subscription_mode"
+                    )
+                else:
+                    _emit_worker_cost_final(tracker, handle.story_id)
+                    budget.record_story_cost(tracker.total_cost)
+            exit_code = ev.get("exit_code", 0)
+            if exit_code == 0 and handle.base_sha:
+                commits = await _count_new_commits(
+                    handle.worktree, handle.base_sha
+                )
+                if commits == 0:
+                    log.warning(
+                        "worker_silent_failure",
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        base_sha=handle.base_sha,
+                        note="exit_code=0 but zero new commits — treating as halt",
+                    )
+                    await bus.emit(
+                        EventType.WORKER_SILENT_FAILURE,
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        jsonl=str(handle.jsonl_path),
+                        exit_code=exit_code,
+                        base_sha=handle.base_sha,
+                    )
+                    await bus.emit(
+                        EventType.WORKER_HALT_FILE,
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        jsonl=str(handle.jsonl_path),
+                        reason="silent_failure_zero_commits",
+                    )
+                    return
             await bus.emit(
                 EventType.WORKER_COMPLETED,
                 story_id=handle.story_id,
                 worktree=handle.worktree,
                 jsonl=str(handle.jsonl_path),
-                exit_code=ev.get("exit_code", 0),
+                exit_code=exit_code,
                 status=ev.get("status", "success"),
                 mock=False,
             )
             return
         if event_type == "worker_halt_file":
             if tracker is not None and budget is not None:
-                _emit_worker_cost_final(tracker, handle.story_id)
-                budget.record_story_cost(tracker.total_cost)
+                if subscription_mode and _tracker_has_no_usage(tracker):
+                    await _emit_cost_tracking_unavailable(
+                        bus, handle.story_id, reason="subscription_mode"
+                    )
+                else:
+                    _emit_worker_cost_final(tracker, handle.story_id)
+                    budget.record_story_cost(tracker.total_cost)
             await bus.emit(
                 EventType.WORKER_HALT_FILE,
                 story_id=handle.story_id,
@@ -1124,6 +1357,52 @@ def _emit_worker_cost_final(tracker: WorkerCostTracker, story_id: str) -> None:
         cache_read_tokens=tracker.cumulative.cache_read_input_tokens,
         cache_write_tokens=tracker.cumulative.cache_creation_input_tokens,
         output_tokens=tracker.cumulative.output_tokens,
+    )
+
+
+def _tracker_has_no_usage(tracker: WorkerCostTracker) -> bool:
+    """Return True when no usage block has landed yet (all token counts zero)."""
+    cumulative = tracker.cumulative
+    return (
+        cumulative.input_tokens == 0
+        and cumulative.output_tokens == 0
+        and cumulative.cache_read_input_tokens == 0
+        and cumulative.cache_creation_input_tokens == 0
+    )
+
+
+def _is_subscription_mode() -> bool:
+    """Phase 0 Task 0.3 — detect Claude subscription (no per-token billing).
+
+    Either ANTHROPIC_API_KEY is absent (subscription auth) or the explicit
+    BMAD_DISABLE_BUDGET=1 escape hatch is set. Returns ``False`` when an
+    API key is present and budget gates are enabled — the only mode where
+    ``worker_cost_final`` numbers are honest.
+    """
+    if os.environ.get("BMAD_DISABLE_BUDGET") == "1":
+        return True
+    return not os.environ.get("ANTHROPIC_API_KEY")
+
+
+async def _emit_cost_tracking_unavailable(
+    bus: EventLoop, story_id: str, *, reason: str
+) -> None:
+    """Phase 0 Task 0.3 — emit ``cost_tracking_unavailable`` on terminal event.
+
+    Replaces the misleading ``worker_cost_final total_usd=0.00`` log when
+    cost tracking is unavailable (subscription mode). Emits both a
+    structured log and a bus event so observers can distinguish "free run"
+    from "genuine zero spend".
+    """
+    log.info(
+        "cost_tracking_unavailable",
+        story_id=story_id,
+        reason=reason,
+    )
+    await bus.emit(
+        EventType.COST_TRACKING_UNAVAILABLE,
+        story_id=story_id,
+        reason=reason,
     )
 
 
