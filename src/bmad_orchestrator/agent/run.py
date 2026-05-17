@@ -66,9 +66,17 @@ from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
 from bmad_orchestrator.runtime.build_check import build_check_subscriber
+from bmad_orchestrator.runtime.commit_recovery import recover_pre_merge
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.deletion_safety import deletion_safety_subscriber
+from bmad_orchestrator.runtime.diff_size_gate import (
+    gate_verdict as _diff_size_gate_verdict,
+)
+from bmad_orchestrator.runtime.diff_size_gate import (
+    load_diff_size_policy,
+    measure_diff,
+)
 from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
 from bmad_orchestrator.runtime.live_tuning import (
     TuningProposal,
@@ -83,6 +91,7 @@ from bmad_orchestrator.runtime.project_memory import (
     save_project_memory,
 )
 from bmad_orchestrator.runtime.sandbox import detect_sandbox
+from bmad_orchestrator.runtime.stage5_completeness import stage5_completeness_subscriber
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
     tail_jsonl_events,
@@ -622,15 +631,30 @@ async def _run_real_pilot(
     # ``(event, bus)`` while EventLoop dispatches with ``(event,)`` only, so
     # ``partial`` binds the bus to satisfy the EventCallback contract.
     #
-    # Patch N (2026-05-18 canonical port): build_check_subscriber runs FIRST so
-    # a broken build halts the chain before deletion_safety / code_review fire
-    # — the cheap pytest+ruff guard saves the ~$15 Opus review on broken code.
-    # Patch C (2026-05-18 canonical port): deletion_safety_subscriber runs
-    # SECOND so an unsafe-deletion halt also mutates the WORKER_COMPLETED
-    # payload status BEFORE code_review_subscriber sees it (the latter gates
-    # on status == 'success' and short-circuits on non-success).
-    # Final order target (after P3): stage5_commit → build_check →
-    # deletion_safety → code_review → merge → quarterly_sweep.
+    # Final canonical-patches order (after P3 — stage5 → build → deletion →
+    # code_review → merge → quarterly_sweep). Each WORKER_COMPLETED gate is
+    # ordered cheapest-first so a halt skips the more expensive downstream
+    # steps. The two halters (build_check, deletion_safety) mutate
+    # ``payload['status']``; downstream gates (code_review,
+    # merge_to_integration) short-circuit on non-success status.
+    #
+    # Patch S (2026-05-18): stage5_completeness_subscriber runs FIRST so it
+    # auto-stages any Stage 5 residue BEFORE build_check / deletion_safety
+    # see the worktree (the residue would otherwise be silently lost when
+    # the worktree is cleaned post-merge).
+    # Patch N (2026-05-18): build_check_subscriber runs second so a broken
+    # build halts the chain before deletion_safety / code_review fire — the
+    # cheap pytest+ruff guard saves the ~$15 Opus review on broken code.
+    # Patch C (2026-05-18): deletion_safety_subscriber runs third so an
+    # unsafe-deletion halt mutates the WORKER_COMPLETED payload status
+    # BEFORE code_review_subscriber sees it.
+    # Patch Q (2026-05-18): diff size gate is embedded INSIDE
+    # code_review_subscriber (downgrades approve→reject on oversize diff,
+    # not a new subscriber — see _gate_diff_size below).
+    # Patch R (2026-05-18): commit recovery is embedded INSIDE
+    # merge_to_integration_subscriber (auto-commits residue before ff-merge,
+    # not a new subscriber).
+    bus.on(cast(EventCallback, partial(stage5_completeness_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(build_check_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(deletion_safety_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
@@ -1951,15 +1975,33 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         tc_reason = _gate_test_coverage(metrics, gates.test_coverage_threshold)
         if tc_reason is not None:
             gate_reasons.append(tc_reason)
-        if gate_reasons:
-            verdict = "reject"
-            prefix = "; ".join(gate_reasons)
-            summary = f"{prefix}\n\n(original: {summary})" if summary else prefix
-            log.info(
-                "code_review_gate_override",
-                story_id=story_id,
-                reasons=gate_reasons,
-            )
+
+    # ── Patch Q — diff size gate. Even if metrics are missing (e.g. review
+    #    emitted no structured block), the size gate runs purely on git so it
+    #    catches runaway scope regardless of the review parser's coverage.
+    if verdict == "approve":
+        try:
+            diff_policy = load_diff_size_policy()
+        except (PolicyNotFoundError, PolicyInvalidError) as e:
+            log.warning("diff_size_policy_load_failed", error=str(e))
+        else:
+            if diff_policy.enabled:
+                diff_metrics = await measure_diff(
+                    Path(worktree), range_spec=diff_policy.range_spec
+                )
+                diff_reason = _diff_size_gate_verdict(diff_metrics, diff_policy)
+                if diff_reason is not None:
+                    gate_reasons.append(diff_reason)
+
+    if verdict == "approve" and gate_reasons:
+        verdict = "reject"
+        prefix = "; ".join(gate_reasons)
+        summary = f"{prefix}\n\n(original: {summary})" if summary else prefix
+        log.info(
+            "code_review_gate_override",
+            story_id=story_id,
+            reasons=gate_reasons,
+        )
 
     log.info(
         "code_review_dispatched",
@@ -2070,6 +2112,32 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
             actions=["approve_override", "abandon", "edit_in_human_loop"],
         )
         return
+
+    # Patch R — auto-stage any uncommitted residue in the worker's worktree
+    # before merge. Only fires when ``worktree`` is an actual git worktree
+    # (has its own ``.git`` entry — file for ``git worktree add`` worktrees,
+    # directory for ordinary clones). Plain marker directories inside an
+    # outer repo (some tests pass these) MUST NOT trigger a recovery commit:
+    # ``git -C plain-dir`` walks up the tree to the outer repo and would
+    # commit on whatever branch is currently checked out there, diverging
+    # the merge target. Best-effort: failures here do NOT block the merge.
+    if worktree and (Path(worktree) / ".git").exists():
+        recovery = await recover_pre_merge(Path(worktree))
+        if recovery.recovered:
+            log.info(
+                "patch_r_pre_merge_recovery",
+                story_id=story_id,
+                worktree=worktree,
+                commit_sha=recovery.commit_sha,
+                staged=list(recovery.staged_paths),
+            )
+        elif recovery.error:
+            log.warning(
+                "patch_r_pre_merge_recovery_failed",
+                story_id=story_id,
+                worktree=worktree,
+                error=recovery.error,
+            )
 
     integration_branch = f"integration/{cfg.wave}"
     feature_branch = f"feature/{story_id}"

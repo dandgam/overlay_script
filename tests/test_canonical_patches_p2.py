@@ -208,7 +208,11 @@ async def test_build_check_wired_first_before_deletion_safety(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Patch N must register BEFORE Patch C so the cheap build guard halts
-    before the deletion scan; Patch C still precedes code_review."""
+    before the deletion scan; Patch C still precedes code_review.
+
+    After P3 (Patch S, 2026-05-18) stage5_completeness registers at index 0,
+    so build_check is at index 1 and deletion_safety at index 2.
+    """
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
     target = _make_target_with_stories(tmp_path)
     monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(target))
@@ -225,8 +229,8 @@ async def test_build_check_wired_first_before_deletion_safety(
         await bus.stop()
 
     funcs = [getattr(s, "func", s) for s in bus._subs]
-    assert funcs[0] is build_check_subscriber
-    assert funcs[1] is deletion_safety_subscriber
+    assert funcs[1] is build_check_subscriber
+    assert funcs[2] is deletion_safety_subscriber
 
 
 def _policy_with(tmp_path: Path, body: str) -> Path:

@@ -137,11 +137,11 @@ async def _drain(bus: EventLoop) -> list[Event]:
 async def test_p0_1_real_pilot_wires_three_subscribers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """``_run_real_pilot`` must register exactly 5 subscribers on the bus
-    (build_check_subscriber [Patch N] + deletion_safety_subscriber [Patch C]
-    + code_review_subscriber + merge_to_integration_subscriber +
-    quarterly_sweep_subscriber). Pre-call ``len(bus._subs) == 0``; post-call
-    ``len(bus._subs) == 5``."""
+    """``_run_real_pilot`` must register exactly 6 subscribers on the bus
+    (stage5_completeness [Patch S] + build_check [Patch N] + deletion_safety
+    [Patch C] + code_review + merge_to_integration + quarterly_sweep).
+    Pre-call ``len(bus._subs) == 0``; post-call ``len(bus._subs) == 6``.
+    """
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
     target = _make_target_with_stories(tmp_path)  # zero stories → empty DAG
     monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(target))
@@ -159,8 +159,8 @@ async def test_p0_1_real_pilot_wires_three_subscribers(
     finally:
         await bus.stop()
 
-    assert len(bus._subs) == 5, (
-        f"Expected 5 subscribers wired after _run_real_pilot, "
+    assert len(bus._subs) == 6, (
+        f"Expected 6 subscribers wired after _run_real_pilot, "
         f"got {len(bus._subs)}"
     )
 

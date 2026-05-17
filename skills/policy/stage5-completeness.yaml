@@ -1,0 +1,33 @@
+# Stage 5 commit completeness — Patch S canonical port (2026-05-18).
+#
+# On WORKER_COMPLETED (status=success), stage5_completeness_subscriber runs
+# BEFORE build_check / deletion_safety / code_review / merge. If the worker
+# left uncommitted residue in its worktree (Stage 5 should have committed
+# everything), the subscriber:
+#
+#   1. ``git add -A`` — stages everything.
+#   2. ``git commit --signoff -m "<commit_marker>"`` — lands a recovery commit.
+#   3. Records the resulting SHA in ``event.payload['stage5_recovery_commit_sha']``.
+#
+# Rationale: worker auto-fix loops occasionally leave residue (formatter
+# touched files, generated artefacts, half-applied patches). Without this
+# subscriber the residue is invisible to code review (which reads HEAD~1..HEAD)
+# and silently lost when the worktree is cleaned up post-merge. Recovering
+# trumps escalating because the data-loss alternative is worse than a slightly
+# noisy commit history.
+#
+# Reference: ~/.claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh
+# Stage 5 (lines ~566-580 of the original runner). Patch S 2026-05-16.
+#
+# Schema (validated by `bmad_orchestrator.runtime.stage5_completeness.
+# Stage5CompletenessPolicy`):
+#   enabled:        bool — master switch. Default true.
+#   commit_marker:  str  — message used for the recovery commit. Surface this
+#                          in git log so operators can audit auto-stages.
+#   signoff:        bool — pass ``--signoff`` to ``git commit``. Default true,
+#                          mirrors the rest of the BMad runner's discipline.
+
+enabled: true
+commit_marker: |
+  Patch S recovery: auto-stage Stage 5 residue (worker forgot to commit)
+signoff: true

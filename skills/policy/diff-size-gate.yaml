@@ -1,0 +1,40 @@
+# Diff size gate — Patch Q canonical port (2026-05-18).
+#
+# In code_review_subscriber, after the verdict is parsed but BEFORE emitting
+# CODE_REVIEW_VERDICT, the diff-size gate measures the worker's commit range
+# (default HEAD~1..HEAD) via ``git diff --shortstat``. If insertions+deletions
+# exceed ``max_lines``, an APPROVE verdict is downgraded to REJECT with a
+# ``diff_size_exceeded`` reason, mirroring the existing P0 / test-coverage
+# gates in the same subscriber.
+#
+# Rationale: a /bmad-code-review approval is a style + correctness judgement
+# — it cannot detect runaway scope (worker touched 30 files when the story
+# named 4). The diff size cap forces large changes to escalate to a human
+# instead of being silently merged.
+#
+# Reference: ~/.claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh
+# `Patch Q` (lines ~821+ of the original 1100 LOC bash runner).
+#
+# Schema (validated by `bmad_orchestrator.runtime.diff_size_gate.
+# DiffSizeGatePolicy`):
+#   enabled:               bool — master switch. Default true.
+#   max_lines:             int  — insertions + deletions threshold. Default 500.
+#   range_spec:            str  — git diff range. Default "HEAD~1..HEAD" so
+#                                 the gate measures the worker's last commit
+#                                 (plus any Stage 5 recovery commit from
+#                                 Patch S — which is the desired behaviour).
+#   always_allowed_paths:  list[str] — fnmatch patterns; files matching are
+#                                       excluded from the line count. Patch W
+#                                       (P4) will extend with story File List.
+#   escalation_text:       str — prepended to the rejection summary.
+
+enabled: true
+max_lines: 500
+range_spec: "HEAD~1..HEAD"
+always_allowed_paths: []
+
+escalation_text: |
+  Worker commit diff exceeds the safety cap. /bmad-code-review approves on
+  style + correctness only; large unscoped changes must be triaged by a
+  human before merging. Inspect the diff in the worker's worktree, narrow
+  the change to the story's File List, then resume.

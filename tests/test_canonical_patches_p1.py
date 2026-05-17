@@ -194,10 +194,14 @@ async def test_deletion_safety_wired_before_code_review(
     its payload mutation (status → 'halted_unsafe_deletion') runs BEFORE
     code_review_subscriber gates on status == 'success'.
 
-    After P2 (Patch N, 2026-05-18) build_check_subscriber registers first, so
-    deletion_safety is at index 1 (not 0). Both still precede code_review.
+    After P3 (Patch S, 2026-05-18) stage5_completeness is at index 0,
+    build_check at index 1, deletion_safety at index 2. All three still
+    precede code_review.
     """
     from bmad_orchestrator.runtime.build_check import build_check_subscriber
+    from bmad_orchestrator.runtime.stage5_completeness import (
+        stage5_completeness_subscriber,
+    )
 
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
     target = _make_target_with_stories(tmp_path)
@@ -214,15 +218,18 @@ async def test_deletion_safety_wired_before_code_review(
     finally:
         await bus.stop()
 
-    # P1 wired 4 subscribers (deletion + review + merge + sweep); P2 adds
-    # build_check at index 0, total 5.
-    assert len(bus._subs) == 5
+    # P1=4 subscribers (deletion+review+merge+sweep), P2 adds build_check=5,
+    # P3 adds stage5_completeness=6.
+    assert len(bus._subs) == 6
     funcs = [getattr(s, "func", s) for s in bus._subs]
-    assert funcs[0] is build_check_subscriber, (
-        f"Patch N subscriber must be wired first; got {funcs[0]!r}"
+    assert funcs[0] is stage5_completeness_subscriber, (
+        f"Patch S subscriber must be wired first; got {funcs[0]!r}"
     )
-    assert funcs[1] is deletion_safety_subscriber, (
-        f"Patch C subscriber must be wired second; got {funcs[1]!r}"
+    assert funcs[1] is build_check_subscriber, (
+        f"Patch N subscriber must be wired second; got {funcs[1]!r}"
+    )
+    assert funcs[2] is deletion_safety_subscriber, (
+        f"Patch C subscriber must be wired third; got {funcs[2]!r}"
     )
 
 
