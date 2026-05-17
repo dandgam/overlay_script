@@ -11,6 +11,7 @@
 - **Created:** 2026-05-18
 - **Bootstrap completed:** 2026-05-18 by auto-loop-spec-long
 - **Scope frozen:** 2026-05-18
+- **Initiative completed:** 2026-05-18 05:30 UTC (awaiting manual merge)
 - **Runtime:** loop_wrapper
 - **Delay seconds:** 120
 - **Auto merge:** false
@@ -37,32 +38,29 @@
 ## Sessions
 
 ### Pending
-(none — P6 is now Current)
+(none — initiative complete)
 
 ### Current
+(none — initiative complete)
+
+### Completed
 
 - **id:** P6
   **title:** Integration + e2e + docs (FINAL)
-  **surface:** backend-python
-  **spec_section:** 75-82
-  **depends_on:** [P1, P2, P3, P4, P5]
-  **destructive_actions:** []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-  **retry_count:** 0
-  **acceptance:**
-    - E2E test: synthetic story → spawn worker → stage5_commit_completeness → build_check → deletion_safety → code_review → security_review (если security-critical) → merge_to_integration. Asserts all gate emit + correct order.
-    - `docs/canonical-patches-architecture.md`:
-      - Mapping table: our subscribers ↔ Odyssey Patch IDs
-      - Port methodology (bash impl + customize.toml → Python subscriber + policy.yaml)
-      - Subscriber registration order rationale
-      - Trigger configuration examples
-    - ~10 final integration tests
-    - `pytest tests/ -q` — 1154 PASS (или ≥1159 учитывая текущие 1149)
-    - ruff/mypy clean
-    - Manual merge через human review (Auto merge=false)
-
-### Completed
+  **completed:** 2026-05-18 05:30 UTC
+  **commit:** 3163407
+  **files_changed:** 2 (1 new test file + 1 new docs file)
+  **tests_passed:** 1160 PASS (1149 baseline + 11 new в test_canonical_patches_p6.py)
+  **decisions_made:**
+    - E2E tests wire all 7 canonical subscribers in `_run_real_pilot` order via helper `_wire_canonical_chain(bus, security_runner, security_policy_path, build_policy_path)` — mirrors lines 673-688 of run.py one-for-one. Real `EventLoop`, real subscribers; only `_spawn_code_review_worker` (returns fixture JSONL) and `_ff_merge_to_integration` (returns stub SHA) are monkeypatched.
+    - `_drain_dispatch(bus, max_iter=50)` helper calls `bus.dispatch_one()` until queue empty — covers the implicit chain CODE_REVIEW_VERDICT → security_review → merge.
+    - 11 tests final: 4 wiring/inventory (subscriber count + order + EventType inventory + policy yaml loadability for all 8 policies) + 2 happy-path (security-critical + non-critical SECURITY_REVIEW_PASSED audit) + 4 halt scenarios (build_failed / unsafe_deletion / code_review_reject / security_block) + 1 inventory check (asserts test count == 10 excluding self).
+    - `is_security_critical` extracts epic from FIRST digit segment of story_id (e.g. "4.1" → 4; "s1" → None — no digits). Test fixture story_ids deliberately use "4.1" / "1.1" to exercise epic trigger; "s1" exercises the keyword-fallback path.
+    - Story body keyword "jwt" / "RLS" used to exercise spec-keyword trigger; non-critical case uses neutral "Add a docstring" body + epic=1 story_id → triggers nothing → SECURITY_REVIEW_PASSED with reason="not_security_critical".
+    - Architecture doc maps every Patch ID to its module + policy YAML + subscriber position. Includes halt-via-payload-mutation contract description, trigger config examples with project-level overlay path, and EventType inventory delta (12 → 17 across initiative).
+    - mypy --strict clean on test_canonical_patches_p6.py (after removing one spurious `# type: ignore[import-not-found]` on the self-inspection import).
+    - ruff check tests/test_canonical_patches_p6.py — all clean (no S105 / ASYNC221 / unused imports).
+  **deferred_items:** []
 
 - **id:** P5
   **title:** Patch X (security-review conditional 4-hunter) (CHECKPOINT)
@@ -154,10 +152,13 @@
   **deferred_items:** []
 
 ## Safety Gates Triggered
-(none yet)
+(none — all 6 sessions ran without invoking infra-with-recovery or rollback)
 
 ## Blockers / Pauses
-(none yet)
+
+[2026-05-18 05:30 UTC] manual_merge_pending — initiative complete on integration/canonical_patches_port. User must merge manually:
+  git checkout main && git merge --no-ff integration/canonical_patches_port -m "merge canonical_patches_port P1..P6"
+resolution: PENDING (user action)
 
 ## Decisions Log
 
@@ -233,6 +234,18 @@
   **rationale:** Operator override должен иметь высший приоритет — если автор story знает что story не security-critical (например, frontend-only без auth touch), может явно `security_critical: false` и пропустить scan. Дальше идут automatic heuristics: epic является самым дешёвым (один integer compare), keywords в spec — second cheapest (parse один файл), keywords в diff — самый дорогой (subprocess git diff). Порядок отражает cost.
   **impact:** P6 e2e должен ковёрить все 4 trigger paths + override path. Operators могут добавить keywords в `skills/policy/security-review.yaml` без code change — особенно нужно для new domains (например, `gdpr` / `hipaa`).
 
+- **date:** 2026-05-18 05:30 UTC
+  **session:** P6
+  **decision:** E2E tests use real `EventLoop` + real subscribers, monkeypatching only the two production-side boundaries: `_spawn_code_review_worker` (returns fixture JSONL path) and `_ff_merge_to_integration` (returns stub SHA). No mock subscribers.
+  **rationale:** P1-P5 tests covered each subscriber in isolation. P6 must prove the chain composes correctly — order + halt-via-payload-mutation + verdict propagation. Mocking subscribers would test the test wiring, not the production wiring. The two monkeypatched boundaries are the only points that touch the filesystem / network / spawn — replacing them keeps the test hermetic without weakening the contract.
+  **impact:** A regression that moves a subscriber, swaps the listened event, or breaks the halt mutation contract fails P6 tests immediately. New subscribers added in future initiatives can extend `_wire_canonical_chain` helper without rewriting the e2e shape.
+
+- **date:** 2026-05-18 05:30 UTC
+  **session:** P6
+  **decision:** Architecture docs at `docs/canonical-patches-architecture.md` (NEW file, not extension of `embedded-skills-architecture.md`).
+  **rationale:** The two specs are independent: embedded skills (overlay machinery for `.claude/skills/`) vs canonical patches (subscriber chain semantics + Patch ID mapping). Future readers grep for "Patch C" or "security_review_subscriber" — having a dedicated doc keeps the table-of-contents direct. Both docs cross-reference via the same spec file pointer.
+  **impact:** docs/ now has 3 files (embedded-skills, production-launcher, canonical-patches). Future port initiatives (phase 5 patches Y / threat-model / correct-course) will append to this same doc rather than spawn a new one.
+
 ## Journal
 
 [2026-05-18 bootstrap] bootstrap: tracker + backup + integration branch созданы, 6 sessions planned (P1-P6), runtime=loop_wrapper, delay=120s, auto_merge=false. Reference: Odyssey handoff doc + bmad-auto-dev-runner.sh.
@@ -246,6 +259,94 @@
 [2026-05-18 03:30 UTC] P4 completed → Completed; P5 promoted to Current (Patch X — security-review conditional 4-hunter parallel). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
 [2026-05-18 04:30 UTC] P5 execution: Patch X (security_review conditional 4-hunter) ported. New `runtime/security_review.py` (~370 LOC) + `skills/policy/security-review.yaml`. New EventType SECURITY_REVIEW_PASSED (16→17). Subscriber registered at bus index 4 (between code_review и merge). 25 regression tests + 1 inventory check in tests/test_canonical_patches_p5.py; full suite 1149 PASS (1123 baseline + 26 новых; target был 1148 — overshot на +1 inventory test); ruff clean (S105 false positives fixed via variable rename token→word); mypy --strict clean. test_canonical_patches_p1, test_embed_phase45_fixes_f1 subscriber count 6→7; test_s3_runtime EventType count 16→17. Commit b357fda.
 [2026-05-18 04:30 UTC] P5 completed → Completed; P6 promoted to Current (Integration + e2e + docs FINAL session). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
+[2026-05-18 05:30 UTC] P6 execution: 11 e2e/integration tests + docs/canonical-patches-architecture.md. tests/test_canonical_patches_p6.py wires all 7 canonical subscribers via `_wire_canonical_chain` helper, monkeypatches only `_spawn_code_review_worker` + `_ff_merge_to_integration` for hermetic e2e. 4 wiring/inventory tests + 2 happy-path (security-critical + non-critical SECURITY_REVIEW_PASSED audit) + 4 halt scenarios + 1 inventory check = 11 total. Full suite 1160 PASS (1149 baseline + 11 new; target was 1154, +6 over plan); ruff + mypy --strict clean. Docs cover Patch ID → file map, subscriber order rationale, halt-via-payload-mutation contract, trigger config examples, EventType inventory delta, coverage delta (5/22 → 13/22). Commit 3163407.
+[2026-05-18 05:30 UTC] P6 completed → Completed; no Pending sessions remain. Auto merge=false → manual_merge_pending Blockers entry written; integration branch ready for human review. Final Report populated below. Runtime=loop_wrapper — this invocation exits clean.
 
-## Final Report (populated on last session completion)
-(empty — P6 will populate)
+## Final Report
+
+**Initiative complete on integration/canonical_patches_port — awaiting manual merge.**
+
+### Summary
+
+Ported 8 canonical patches (H, C, N, Q, R, S, W, X) from Odyssey's production-tested `bmad-auto-dev-runner.sh` (bash, ~1100 LOC) to the bmad-orchestrator's async event-driven subscriber chain (Python). Coverage 5/22 → 13/22 of the BMad runner patches; wrong Patch H default fixed (1800s vs 86400s). All 6 sessions ran without invoking infra-with-recovery or any rollback.
+
+### Commits on integration branch (12 total, 6 feat + 6 tracker)
+
+```
+3163407 feat(safety): P6 — integration + e2e + docs (FINAL)
+6a1dc93 tracker(canonical_patches_port): P5 completed + P6 promoted
+b357fda feat(safety): P5 — Patch X (security-review conditional 4-hunter)
+e0becc0 tracker(canonical_patches_port): P4 completed + P5 promoted
+0d2f64a feat(safety): P4 — Patch W (File List allow-list scope check)
+2f393c8 tracker(canonical_patches_port): P3 completed + P4 promoted
+2e732aa feat(safety): P3 — Patch Q + Patch R + Patch S
+35b2ca9 tracker(canonical_patches_port): P2 completed + P3 promoted
+87e3c9f feat(safety): P2 — Patch N (build check guard subscriber)
+57f13a5 tracker(canonical_patches_port): P1 completed + P2 promoted
+b751e33 feat(safety): P1 — Patch H (timeout 30min) + Patch C (deletion safety subscriber)
+23e7afe tracker(canonical_patches_port): bootstrap via /auto-loop-spec-long, delay=120s
+```
+
+### Diff stats vs main
+
+```
+27 files changed, 6008 insertions(+), 22 deletions(-)
+```
+
+### Test suite delta
+
+- Baseline (main, pre-initiative): **1034 PASS**
+- P1: 1057 PASS (+23)
+- P2: 1080 PASS (+23)
+- P3: 1108 PASS (+28)
+- P4: 1123 PASS (+15)
+- P5: 1149 PASS (+26 — 25 regression + 1 inventory)
+- P6: **1160 PASS** (+11 — 11 e2e/integration)
+- Total new tests: **126**
+- ruff clean, mypy --strict clean across all touched modules.
+
+### New modules
+
+- `src/bmad_orchestrator/runtime/deletion_safety.py` (Patch C)
+- `src/bmad_orchestrator/runtime/build_check.py` (Patch N)
+- `src/bmad_orchestrator/runtime/stage5_completeness.py` (Patch S)
+- `src/bmad_orchestrator/runtime/diff_size_gate.py` (Patch Q)
+- `src/bmad_orchestrator/runtime/commit_recovery.py` (Patch R)
+- `src/bmad_orchestrator/runtime/file_list_parser.py` (Patch W)
+- `src/bmad_orchestrator/runtime/security_review.py` (Patch X)
+
+### New policy YAMLs
+
+- `skills/policy/deletion-safety.yaml`
+- `skills/policy/build-check.yaml`
+- `skills/policy/stage5-completeness.yaml`
+- `skills/policy/diff-size-gate.yaml`
+- `skills/policy/security-review.yaml`
+
+### New events
+
+- `BUILD_CHECK_FAILED`, `UNSAFE_DELETION_DETECTED`, `STAGE5_COMMIT_RECOVERED`, `DIFF_SIZE_EXCEEDED`, `SECURITY_REVIEW_PASSED` (EventType count 12 → 17).
+
+### New docs
+
+- `docs/canonical-patches-architecture.md` — subscriber chain, Patch ID → file map, halt contract, trigger config examples, EventType inventory.
+
+### Manual merge command
+
+```bash
+git checkout main
+git merge --no-ff integration/canonical_patches_port -m "merge canonical_patches_port P1..P6 — 8 canonical patches + e2e + docs"
+```
+
+After merge, the backup branch `backup/canonical_patches_port-pre-2026-05-18` should be kept until at least one real pilot run validates the chain in production. To revert at any time before merge:
+
+```bash
+git reset --hard backup/canonical_patches_port-pre-2026-05-18  # only if main was already advanced
+# or simpler — just don't merge integration/canonical_patches_port.
+```
+
+### Follow-up work (deferred to follow-up initiatives)
+
+- Remaining 9 patches (A/B/D/E/F/G/I/J/K) — non-critical, backlog item in `project_lesson_canonical_bmad_chain_gaps.md`.
+- Phase 5 patches (Y qa-e2e, threat-model regen, correct-course) — separate initiative after pilot.
+- Real pilot run on Odyssey Wave 1a using the new safety net — see `project_backlog_post_mvp.md::wave-1a-pilot-wiring`.
