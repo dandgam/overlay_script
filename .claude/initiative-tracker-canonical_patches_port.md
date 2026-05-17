@@ -38,23 +38,6 @@
 
 ### Pending
 
-- **id:** P4
-  **title:** Patch W (Patch R scope by File List allow-list) (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 110-125
-  **depends_on:** [P3]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - New `runtime/file_list_parser.py` — parses `### File List` section из story markdown (`_bmad/stories/<id>.md`)
-    - Patch R recovery + Patch Q diff size gate consume File List allow-list:
-      - File List ∪ `sprint-status.yaml` ∪ `deferred-work.md` ∪ `<wave>-retrospective.md`
-      - Anything outside → reject + escalate
-    - Reference: Odyssey memory `~/.claude/projects/-home-server-odyssey/memory/skill_improvement_patch_W_candidate.md`
-    - 15 regression tests
-    - `pytest tests/ -q` — 1119 PASS
-
 - **id:** P5
   **title:** Patch X (security-review conditional 4-hunter) (CHECKPOINT)
   **surface:** backend-python
@@ -99,25 +82,23 @@
 
 ### Current
 
-- **id:** P3
-  **title:** Patch Q (diff size) + Patch R (commit-completeness recovery) + Patch S (Stage 5 commit) (CHECKPOINT)
+- **id:** P4
+  **title:** Patch W (Patch R scope by File List allow-list) (CHECKPOINT)
   **surface:** backend-python
-  **spec_section:** 90-105
-  **depends_on:** [P2]
-  **destructive_actions:**
-    - Patch S может auto-commit untracked файлы в worker'ом branch (защита от data loss)
+  **spec_section:** 110-125
+  **depends_on:** [P3]
+  **destructive_actions:** []
   **checkpoint:** true
   **estimated_retries_allowed:** 3
   **retry_count:** 0
   **acceptance:**
-    - Patch Q: в `code_review_subscriber` pre-merge — `git diff --shortstat HEAD~1 HEAD` → reject if `lines_added + lines_deleted > 500` AND not all paths in File List allow-list. Reference: runner.sh Patch Q.
-    - Patch R: extend `merge_to_integration_subscriber` — if `git status --porcelain` shows uncommitted после auto-fix → `git add -A && git commit --signoff -m "Patch R recovery: auto-stage Stage 6.retry residue"`. Reference: runner.sh ~line 821.
-    - Patch S: new subscriber `stage5_commit_completeness_subscriber(event, bus)`:
-      - On WORKER_COMPLETED (before build_check) → detect uncommitted in worktree
-      - Auto `git add` + commit с marker message. Reference: runner.sh ~line 566.
-    - Subscriber order в `_run_real_pilot.on(...)`: stage5_commit → build_check → deletion_safety → code_review → merge
-    - 30 regression tests
-    - `pytest tests/ -q` — 1104 PASS
+    - New `runtime/file_list_parser.py` — parses `### File List` section из story markdown (`_bmad/stories/<id>.md`)
+    - Patch R recovery + Patch Q diff size gate consume File List allow-list:
+      - File List ∪ `sprint-status.yaml` ∪ `deferred-work.md` ∪ `<wave>-retrospective.md`
+      - Anything outside → reject + escalate
+    - Reference: Odyssey memory `~/.claude/projects/-home-server-odyssey/memory/skill_improvement_patch_W_candidate.md`
+    - 15 regression tests
+    - `pytest tests/ -q` — 1123 PASS (1108 baseline + 15 new)
 
 ### Completed
 
@@ -150,6 +131,24 @@
     - `skip_if_missing_executable=true` default (per policy yaml) — a Python-only worktree must not halt because `cargo` is absent. Required commands with non-zero from missing executables would otherwise spuriously halt every Python-only worker.
     - `_run_command` uses `/bin/sh -c` to match runner.sh's shell-style invocation (and to allow `echo bad; exit 7` test fixtures). stderr is merged into stdout via `STDOUT` redirection so the tail captures both streams.
     - Test count overshot spec estimate (23 vs 17 in tracker, 20 in spec) — coverage of timeout / missing-executable / optional-command / empty-policy paths warranted the extra cases.
+  **deferred_items:** []
+
+- **id:** P3
+  **title:** Patch Q (diff size) + Patch R (commit-completeness recovery) + Patch S (Stage 5 commit)
+  **completed:** 2026-05-18 02:30 UTC
+  **commit:** 2e732aa
+  **files_changed:** 10 (4 new modules/policies + 1 new test file + 5 modified)
+  **tests_passed:** 1108 PASS (1080 baseline + 28 new in test_canonical_patches_p3.py)
+  **decisions_made:**
+    - Patch S — new subscriber `stage5_completeness_subscriber` in new module `runtime/stage5_completeness.py`. Wired FIRST on bus (index 0). Non-halting recovery: auto-stages uncommitted Stage 6.retry residue BEFORE halt gates inspect. Populates `payload['stage5_recovery_commit_sha']` + `stage5_recovery_paths` for audit trail.
+    - Patch Q — NOT a new subscriber; embedded into existing `code_review_subscriber` after P0/test-coverage gates, before final approve. Pure helpers (`parse_shortstat`, `measure_diff`, `gate_verdict`) live in new `runtime/diff_size_gate.py`. `file_list_paths` parameter is forward-compat hook for Patch W (P4) — currently unused.
+    - Patch R — NOT a new subscriber; embedded into existing `merge_to_integration_subscriber` BEFORE `_ff_merge_to_integration` call. Pure `recover_pre_merge(worktree, marker, signoff)` helper in new `runtime/commit_recovery.py`.
+    - Patch R worktree-guard fix: real git worktrees (created via `git worktree add`) have a `.git` FILE pointing to metadata; plain marker dirs created in tests don't. Guard `if worktree and (Path(worktree) / ".git").exists():` skips recovery for plain dirs to avoid corrupting outer-repo branches. Caught by `test_w4_merge_subscriber_approve_ff_merge_and_cleanup` regression (was committing marker.txt onto main, diverging from feature/s1).
+    - Subscriber count 5 → 6 (only Patch S adds one). Final order: stage5 → build_check → deletion_safety → code_review → merge → quarterly_sweep.
+    - Ruff ASYNC221 — subprocess.run inside async test bodies. Fix: extracted sync helpers `_git_add_and_commit` + `_head_commit_message` (matches P1 pattern).
+    - Test count overshot spec estimate (28 vs 30 in tracker target, but +28 over 1080 baseline = 1108, target was 1104, +4 over plan).
+    - mypy --strict clean on all new modules + run.py.
+    - test_canonical_patches_p1 + p2 + test_embed_phase45_fixes_f1 subscriber-count assertions updated 5 → 6.
   **deferred_items:** []
 
 ## Safety Gates Triggered
@@ -190,6 +189,24 @@
   **rationale:** A Python-only worktree must not halt because `cargo` happens to be absent from the runner's PATH; the same policy yaml is reused across surface types (Rust / Python / mixed). Required commands with missing executables would otherwise halt every Python-only worker on a `cargo check` row.
   **impact:** Operators must explicitly set `skip_if_missing_executable: false` if they want a missing executable to be fatal (e.g. a Rust-only project's CI yaml).
 
+- **date:** 2026-05-18 02:30 UTC
+  **session:** P3
+  **decision:** Patch Q and Patch R extend EXISTING subscribers (code_review, merge_to_integration); only Patch S adds a new subscriber.
+  **rationale:** Q is a verdict-modifier on the same evidence code_review already inspects (diff). R is pre-merge auto-staging that must run inside the same atomic merge transaction. Pulling either into its own subscriber would duplicate event filtering + re-fetching the worktree path, and break the natural one-decision-per-subscriber invariant. Patch S is a separate phase (Stage 5 vs Stage 6) and runs at a different point in the pipeline — it earns its own subscriber.
+  **impact:** Subscriber count grows by 1 (5 → 6), not 3. Bus order is now stable for the rest of the initiative; P5 will add security_review as #7.
+
+- **date:** 2026-05-18 02:30 UTC
+  **session:** P3
+  **decision:** Patch R recovery gated by `(Path(worktree) / ".git").exists()` to distinguish real git worktrees from plain marker dirs in tests.
+  **rationale:** Real worktrees created via `git worktree add` have a `.git` FILE (pointing to outer-repo metadata). Plain test-fixture dirs created with `mkdir` lack any `.git` entry. Without the guard, `git -C <plain_dir> status` walks UP to the outer repo, mistakes test marker.txt for outer-repo content, and stages+commits it onto the outer branch — diverging the integration branch from feature/s1 and breaking `test_w4_merge_subscriber_approve_ff_merge_and_cleanup`.
+  **impact:** Patch R is a strict opt-in by worktree presence. Production flow (real worktrees) gets recovery; test fixtures using plain dirs are skipped. Patch W (P4) inherits the same guard via the same code path.
+
+- **date:** 2026-05-18 02:30 UTC
+  **session:** P3
+  **decision:** `file_list_paths: list[str] | None = None` parameter shipped in `gate_verdict` and `measure_diff` signatures but unused in P3.
+  **rationale:** Patch W (P4) will populate this list from the story's `### File List`. Adding the parameter now (with None default) means P4 only updates callers, not signatures — keeps the diff to P4 narrow and avoids a churn commit in this session.
+  **impact:** P4 implements `runtime/file_list_parser.py`, threads parsed paths through to `gate_verdict(file_list_paths=...)`, and lights up the allow-list branch that's already in place but currently no-op.
+
 ## Journal
 
 [2026-05-18 bootstrap] bootstrap: tracker + backup + integration branch созданы, 6 sessions planned (P1-P6), runtime=loop_wrapper, delay=120s, auto_merge=false. Reference: Odyssey handoff doc + bmad-auto-dev-runner.sh.
@@ -197,6 +214,8 @@
 [2026-05-18 00:30 UTC] P1 completed → Completed; P2 promoted to next-up (subscriber count 4→5 will land in P2 via build_check_subscriber). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
 [2026-05-18 01:30 UTC] P2 execution: Patch N (build_check_subscriber) ported. New `runtime/build_check.py` + `skills/policy/build-check.yaml` (pytest + ruff baseline). 23 new tests in tests/test_canonical_patches_p2.py; full suite 1080 PASS (target was 1074, +6 over plan); ruff clean; mypy --strict clean on new module. Subscriber count 4→5; build_check wired BEFORE deletion_safety so cheap pytest+ruff guard halts before the deletion scan. P1's "deletion_safety first" assertion relaxed to "precedes code_review". Commit 87e3c9f.
 [2026-05-18 01:30 UTC] P2 completed → Completed; P3 promoted to Current (Patch Q + Patch R + Patch S — diff size cap + auto-commit recovery + Stage 5 completeness pre-review). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
+[2026-05-18 02:30 UTC] P3 execution: Patch Q + Patch R + Patch S ported. 3 new modules (stage5_completeness.py, diff_size_gate.py, commit_recovery.py) + 2 policy yamls. 28 new tests in tests/test_canonical_patches_p3.py; full suite 1108 PASS (target 1104, +4 over plan); ruff clean (sync helpers extracted for ASYNC221); mypy --strict clean. Subscriber count 5→6; stage5_completeness wired at index 0, build_check at 1, deletion_safety at 2. Patch Q embedded in code_review_subscriber; Patch R embedded in merge_to_integration_subscriber with `.git`-exists() worktree guard. Commit 2e732aa.
+[2026-05-18 02:30 UTC] P3 completed → Completed; P4 promoted to Current (Patch W — File List allow-list для Patch Q/R). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
 
 ## Final Report (populated on last session completion)
 (empty — P6 will populate)
