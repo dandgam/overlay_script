@@ -46,44 +46,6 @@
 
 ### Pending
 
-- **id:** F1
-  **title:** P0 fixes — subscribers wiring + payload + YAML errors + field validation (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 50-90
-  **depends_on:** []
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - P0-1: в `agent/run.py::_run_real_pilot` после `configure_code_review_gate(...)` добавить `bus.on(code_review_subscriber); bus.on(merge_to_integration_subscriber); bus.on(quarterly_sweep_subscriber)`
-    - P0-2: `WAVE_BOUNDARY_REACHED` emit sites (mock + real path) добавить `completed_stories=len(spawned)`
-    - P0-3: `_load_policy_yaml` wrap в `try/except yaml.YAMLError as e: raise PolicyApplyError(...) from e`
-    - P0-4: `load_proposals_yaml` validate `field_name in _POLICY_MODELS[policy_file].model_fields`, raise `LessonProposalInvalidError` если missing
-    - 12 regression tests (subscribers wired count, payload includes completed_stories, quarterly_sweep fires at 50 stories, bad YAML caught, field name validation rejects unknown)
-    - `pytest tests/ -q` — 1005 PASS (993 + 12); ruff/mypy clean
-  **safety_gates:**
-    - L1: no force/no-verify
-    - L2: deny-list freeze (sandbox/worker_spawn/budget_guard); modifications limited to caller-side wiring + error handling
-    - L3: branch isolation
-
-- **id:** F2
-  **title:** Critical P1 fixes — DoS cap, backup, bounds, save_project_memory, threshold escalation (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 95-135
-  **depends_on:** [F1]
-  **destructive_actions:**
-    - `policy-rollback <project> <proposal-id>` mutates skills/policy/ files (restore from backup)
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - P1-1: `runtime/lesson_parser.py` `_MAX_LINE_LEN=8192` + `_MAX_FILE_BYTES=1_048_576` + overflow raises `LessonProposalInvalidError`
-    - P1-2: `apply_proposal` writes `.yaml.bak-<ts>` (keep last 3), new CLI `policy-rollback`
-    - P1-3: `runtime/live_tuning.py:75-86` bounds → `max(abs(current), _EPS)`, update existing tests
-    - P1-5: `agent/run.py::_run_real_pilot` after wave_boundary → `save_project_memory(slug, fresh_medians)`
-    - P1-7: `_apply_live_tuning` если direction = tighten → emit HUMAN_QUERY + skip silent apply
-    - 18 regression tests
-    - `pytest tests/ -q` — 1023 PASS (1005 + 18); ruff/mypy clean
-
 - **id:** F3
   **title:** P1 polish + P2 nice-to-haves (FINAL)
   **surface:** backend-python
@@ -103,10 +65,46 @@
     - Manual merge через human review (Auto merge=false)
 
 ### Current
-(none — next wake promotes F1)
+
+- **id:** F2
+  **title:** Critical P1 fixes — DoS cap, backup, bounds, save_project_memory, threshold escalation (CHECKPOINT)
+  **surface:** backend-python
+  **spec_section:** 95-135
+  **depends_on:** [F1]
+  **destructive_actions:**
+    - `policy-rollback <project> <proposal-id>` mutates skills/policy/ files (restore from backup)
+  **checkpoint:** true
+  **estimated_retries_allowed:** 3
+  **started:** 2026-05-17 16:02 UTC
+  **workflow:** workflows/backend-python.md (adapted — orchestrator-runtime edits)
+  **retry_count:** 0
+  **worker_branches:** []
+  **acceptance:**
+    - P1-1: `runtime/lesson_parser.py` `_MAX_LINE_LEN=8192` + `_MAX_FILE_BYTES=1_048_576` + overflow raises `LessonProposalInvalidError`
+    - P1-2: `apply_proposal` writes `.yaml.bak-<ts>` (keep last 3), new CLI `policy-rollback`
+    - P1-3: `runtime/live_tuning.py:75-86` bounds → `max(abs(current), _EPS)`, update existing tests
+    - P1-5: `agent/run.py::_run_real_pilot` after wave_boundary → `save_project_memory(slug, fresh_medians)`
+    - P1-7: `_apply_live_tuning` если direction = tighten → emit HUMAN_QUERY + skip silent apply
+    - 18 regression tests
+    - `pytest tests/ -q` — 1024 PASS (1006 + 18); ruff/mypy clean
 
 ### Completed
-(none)
+
+- **id:** F1
+  **title:** P0 fixes — subscribers wiring + payload + YAML errors + field validation (CHECKPOINT)
+  **completed:** 2026-05-17 16:02 UTC
+  **commit:** 5dfcfa689eb6a72c5f2607e9260c2c8983477478
+  **files_changed:** 5 (run.py, lesson_parser.py, test_embed_phase45_fixes_f1.py, test_w1_real_pilot.py, test_w4_code_review_gate.py)
+  **tests_passed:** 1006 PASS (993 baseline + 13 new F1 tests)
+  **decisions_made:**
+    - P0-1: Used `functools.partial(sub, bus=bus)` cast to EventCallback to adapt (event, bus) signature to bus.on() contract. Cleaner than introducing local async wrappers; matches how callers test subscribers directly.
+    - P0-1: Skipped wiring in `_run_mock_pilot` (spec only required real-mode + test-only path) — mock tests instantiate subscribers manually.
+    - P0-3: Wrapped at the lowest-level read site (`_load_policy_yaml`) so all callers (apply_proposal, apply_proposals_batch) benefit uniformly.
+    - P0-4: Validation inside `load_proposals_yaml` loop (not on `LessonProposal` constructor) — matches existing style where `policy_file` was already validated there.
+    - Updated stale `test_w4_grep_subscribers_defined_exactly_twice` → `test_w4_subscribers_defined_and_wired` (the old test silently sanctioned the P0-1 bug it failed to catch).
+    - Pre-existing ruff I001 on test_w1_real_pilot.py:290 fixed inline (sorted imports) to keep ruff clean per spec acceptance.
+  **deferred_items:**
+    - Symmetric wiring of subscribers in `_run_mock_pilot` — spec marked optional, mock-mode tests don't need it.
 
 ## Safety Gates Triggered
 (none yet)
@@ -122,6 +120,16 @@
   **rationale:** Без fixes 4 subscribers (code_review, merge, sweep) физически не работают в production — initiative silently no-op. P0-1 unblock'ит ВСЁ что E5/E6 строили. Прочие P0/P1 — defence-in-depth + edge cases которые могут привести к data corruption.
   **impact:** После F3 — embed initiative production-ready. Merge на main → real pilot готов.
 
+- **date:** 2026-05-17 16:02 UTC
+  **session:** F1
+  **decision:** F1 закрыта — все 4 P0 имплементированы, 13 regression tests добавлено (1 extra sanity check on top of 12 spec'd), 1006 PASS зелёный, ruff/mypy clean.
+  **rationale:** Subscriber wiring через `functools.partial` оказался cleanest path: один import + cast, не требует переписывания subscriber'ов под однопараметровый EventCallback. Bug в test_w4_grep_subscribers_defined_exactly_twice исправлен — старый assert==2 сам по себе и был тем guard'ом, который должен был поймать missing wiring (но проверял только def, не usage).
+  **impact:** F2 (critical P1) разблокирован; depends_on=[F1] satisfied. Test baseline на следующий сессии = 1006 PASS.
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 3 sessions planned (F1=P0, F2=critical P1, F3=polish), runtime=loop_wrapper, delay=300s
+[2026-05-17 wake] F1 promoted Pending→Current; starting P0 fixes work
+[2026-05-17 16:02 UTC] F1 execution: P0-1 wired 3 subscribers via partial; P0-2 added completed_stories к WAVE_BOUNDARY_REACHED payload (mock + real); P0-3 wrapped _load_policy_yaml в PolicyApplyError; P0-4 validated field_name в load_proposals_yaml
+[2026-05-17 16:02 UTC] F1 tests: 13 regression tests passing (12 spec'd + 1 sanity), full suite 1006 PASS, ruff/mypy clean
+[2026-05-17 16:02 UTC] F1 completed → Completed, F2 promoted to Current; commit 5dfcfa689eb6a72c5f2607e9260c2c8983477478
