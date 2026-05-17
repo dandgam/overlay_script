@@ -777,8 +777,14 @@ async def _run_real_pilot(
             story_reserve = float(story_reserve_decimal)
             projected_daily = daily_spent_usd + story_reserve
 
+            # Subscription-mode bypass: на Claude subscription нет per-token
+            # billing'а — $ метрика фантомная. BMAD_DISABLE_BUDGET=1 skip'ает
+            # все $$ гейты (cap, daily, story alarm) сохраняя token tracking
+            # для observability. См. feedback_no_anthropic_api.
+            _budget_disabled = os.environ.get("BMAD_DISABLE_BUDGET") == "1"
+
             # Local user-supplied hard cap (W1.2 --max-spend-usd).
-            if projected_daily > max_spend_usd:
+            if not _budget_disabled and projected_daily > max_spend_usd:
                 log.warning(
                     "max_spend_usd_cap_reached",
                     projected_usd=projected_daily,
@@ -799,8 +805,12 @@ async def _run_real_pilot(
                 daily_halt_reached = True
                 break
 
-            day_res = await budget.enforce_day(projected_daily, today_utc)
-            if day_res.level == "halt":
+            day_res = (
+                await budget.enforce_day(projected_daily, today_utc)
+                if not _budget_disabled
+                else None
+            )
+            if day_res is not None and day_res.level == "halt":
                 log.warning(
                     "daily_budget_halt",
                     projected_usd=projected_daily,
@@ -822,20 +832,23 @@ async def _run_real_pilot(
                 break
             daily_spent_usd = projected_daily
 
-            res = await budget.enforce_and_reserve_story(story["id"], story_reserve_decimal)
-            if not res.allowed:
-                await bus.emit(
-                    EventType.BUDGET_THRESHOLD_HIT,
-                    scope=res.scope,
-                    level="halt",
-                    spent_usd=res.current_usd,
-                    alarm_threshold=res.alarm_threshold,
-                    halt_threshold=res.halt_threshold,
-                    corrupted=False,
-                    story_id=story["id"],
-                    reason=res.reason,
+            if not _budget_disabled:
+                res = await budget.enforce_and_reserve_story(
+                    story["id"], story_reserve_decimal
                 )
-                continue
+                if not res.allowed:
+                    await bus.emit(
+                        EventType.BUDGET_THRESHOLD_HIT,
+                        scope=res.scope,
+                        level="halt",
+                        spent_usd=res.current_usd,
+                        alarm_threshold=res.alarm_threshold,
+                        halt_threshold=res.halt_threshold,
+                        corrupted=False,
+                        story_id=story["id"],
+                        reason=res.reason,
+                    )
+                    continue
 
             wt = worktree_root / f"wt-{story['id']}"
             wt.mkdir(exist_ok=True)
