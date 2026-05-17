@@ -123,6 +123,19 @@ class BudgetGuard:
         # so transient outliers (very long stories) don't permanently inflate
         # the reservation — only the most recent stories matter.
         self._recent_story_costs: deque[Decimal] = deque(maxlen=3)
+        # E6 (L2 live tuning) — per-story coverage samples feeding adaptive
+        # code-review gate thresholds. Spec §E6 names the fields _recent_*_counts
+        # but the stored values are coverage RATIOS in [0,1] derived from
+        # ReviewMetrics: a story with ``p0_found=10, p0_fixed=8`` contributes
+        # ``0.8`` to ``_recent_p0_counts``. Stories with ``p0_found==0`` (or
+        # ``expected_n_tests==0`` for test_counts) contribute nothing —
+        # there's no signal to extract. Iterations is an int count of review
+        # rounds per story (forward-looking; currently always 1 until
+        # multi-iteration support lands). maxlen=10 = rolling window over the
+        # last 10 informative stories per metric.
+        self._recent_p0_counts: deque[float] = deque(maxlen=10)
+        self._recent_test_counts: deque[float] = deque(maxlen=10)
+        self._recent_review_iterations: deque[int] = deque(maxlen=10)
 
     def attach_state_db(self, state_db: StateDB, session_id: int) -> None:
         """Late-binding helper — wire the guard to a shared StateDB after init."""
@@ -337,6 +350,53 @@ class BudgetGuard:
         if decimal_cost <= 0:
             return
         self._recent_story_costs.append(decimal_cost)
+
+    # ── E6 — L2 live tuning samples ───────────────────────────────────────────
+
+    def record_review_metrics(
+        self,
+        *,
+        p0_found: int,
+        p0_fixed: int,
+        test_files_count: int,
+        expected_n_tests: int,
+        iterations: int = 1,
+    ) -> None:
+        """Push per-story review samples into the live-tuning windows.
+
+        Called from ``code_review_subscriber`` (and any future hook on
+        CODE_REVIEW_VERDICT) once metrics have been aggregated for a story.
+
+        Recording rules:
+
+        * ``p0_found > 0`` contributes ``p0_fixed / p0_found`` clamped to [0,1].
+        * ``expected_n_tests > 0`` contributes ``test_files_count / expected_n_tests``
+          clamped to [0,1].
+        * ``iterations > 0`` contributes an int sample to the iterations deque
+          (default 1 — single-pass review until multi-iteration support lands).
+
+        Negative inputs are clamped to zero before the ratio is computed.
+        """
+        if p0_found > 0:
+            ratio = max(0, p0_fixed) / p0_found
+            self._recent_p0_counts.append(min(1.0, max(0.0, ratio)))
+        if expected_n_tests > 0:
+            ratio = max(0, test_files_count) / expected_n_tests
+            self._recent_test_counts.append(min(1.0, max(0.0, ratio)))
+        if iterations > 0:
+            self._recent_review_iterations.append(int(iterations))
+
+    def recent_p0_coverages(self) -> tuple[float, ...]:
+        """Snapshot — recent per-story P0 coverage ratios (≤ 10)."""
+        return tuple(self._recent_p0_counts)
+
+    def recent_test_coverages(self) -> tuple[float, ...]:
+        """Snapshot — recent per-story test coverage ratios (≤ 10)."""
+        return tuple(self._recent_test_counts)
+
+    def recent_review_iterations(self) -> tuple[int, ...]:
+        """Snapshot — recent per-story review iteration counts (≤ 10)."""
+        return tuple(self._recent_review_iterations)
 
     def adaptive_story_reserve(self) -> Decimal:
         """Reservation for the next ``enforce_and_reserve_story`` call.

@@ -66,6 +66,12 @@ from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
+from bmad_orchestrator.runtime.live_tuning import (
+    TuningProposal,
+    apply_proposals,
+    atomic_write_gates_yaml,
+    evaluate_threshold,
+)
 from bmad_orchestrator.runtime.sandbox import detect_sandbox
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
@@ -1294,6 +1300,12 @@ class CodeReviewGateConfig:
     wave: str
     escalation_chat_id: int | None = None
     gates_override: CodeReviewGates | None = None
+    # E6 — L2 live tuning. When both ``budget`` and ``gates_path`` are wired,
+    # the review subscriber feeds each story's metrics into BudgetGuard's
+    # rolling windows and persists tuned thresholds back to the YAML. None
+    # disables live tuning (tests + unconfigured paths).
+    budget: BudgetGuard | None = None
+    gates_path: Path | None = None
 
 
 _CODE_REVIEW_GATE: CodeReviewGateConfig | None = None
@@ -1305,6 +1317,8 @@ def configure_code_review_gate(
     wave: str | None,
     escalation_chat_id: int | None = None,
     gates_override: CodeReviewGates | None = None,
+    budget: BudgetGuard | None = None,
+    gates_path: Path | None = None,
 ) -> None:
     """Wire the W4 gate to a target project + wave.
 
@@ -1327,6 +1341,8 @@ def configure_code_review_gate(
         wave=wave,
         escalation_chat_id=escalation_chat_id,
         gates_override=gates_override,
+        budget=budget,
+        gates_path=gates_path,
     )
 
 
@@ -1486,6 +1502,119 @@ def _load_review_gates(cfg: CodeReviewGateConfig | None) -> CodeReviewGates:
     except (PolicyNotFoundError, PolicyInvalidError) as exc:
         log.warning("code_review_gates_fallback_defaults", error=str(exc))
         return CodeReviewGates.model_validate({})
+
+
+async def _apply_live_tuning(
+    *,
+    bus: EventLoop,
+    cfg: CodeReviewGateConfig,
+    gates: CodeReviewGates,
+    metrics: ReviewMetrics,
+    story_id: str,
+) -> None:
+    """Feed per-story samples into ``budget`` and persist tuned thresholds.
+
+    Pre-conditions checked by the caller: ``cfg.budget is not None``.
+
+    Workflow:
+
+    1. ``budget.record_review_metrics`` pushes coverage samples into the
+       rolling windows (skips metrics with no signal — zero p0_found, zero
+       expected_n_tests, etc.).
+    2. :func:`evaluate_threshold` computes a proposal per tunable metric from
+       the current window; returns ``None`` when the window holds fewer than
+       ``MIN_SAMPLES_FOR_TUNING`` samples.
+    3. :func:`apply_proposals` partitions proposals into «safe to write» vs
+       «out-of-bounds» (movement > 50% of max(current, proposed)).
+    4. Safe proposals are written via :func:`atomic_write_gates_yaml` when
+       ``cfg.gates_path`` is configured; out-of-bounds proposals emit
+       ``HUMAN_QUERY`` so the operator approves a large drift explicitly.
+    """
+    budget = cfg.budget
+    if budget is None:  # pragma: no cover — gated by caller, kept for mypy
+        return
+
+    budget.record_review_metrics(
+        p0_found=metrics.p0_found,
+        p0_fixed=metrics.p0_fixed,
+        test_files_count=metrics.test_files_count,
+        expected_n_tests=metrics.expected_n_tests,
+        iterations=1,
+    )
+
+    proposals: list[TuningProposal] = []
+    p0_prop = evaluate_threshold(
+        metric="p0_threshold",
+        samples=budget.recent_p0_coverages(),
+        current_value=gates.p0_threshold,
+    )
+    if p0_prop is not None:
+        proposals.append(p0_prop)
+    tc_prop = evaluate_threshold(
+        metric="test_coverage_threshold",
+        samples=budget.recent_test_coverages(),
+        current_value=gates.test_coverage_threshold,
+    )
+    if tc_prop is not None:
+        proposals.append(tc_prop)
+
+    if not proposals:
+        return
+
+    new_gates, escalations = apply_proposals(gates, tuple(proposals))
+    changed_metrics = tuple(
+        prop.metric for prop in proposals if prop.within_bounds
+    )
+
+    if changed_metrics and cfg.gates_path is not None:
+        try:
+            atomic_write_gates_yaml(new_gates, cfg.gates_path)
+        except OSError as exc:
+            log.warning(
+                "live_tuning_write_failed",
+                story_id=story_id,
+                path=str(cfg.gates_path),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        else:
+            log.info(
+                "live_tuning_applied",
+                story_id=story_id,
+                metrics=list(changed_metrics),
+                new_p0_threshold=new_gates.p0_threshold,
+                new_test_coverage_threshold=new_gates.test_coverage_threshold,
+            )
+
+    for prop in escalations:
+        log.info(
+            "live_tuning_bounds_exceeded",
+            story_id=story_id,
+            metric=prop.metric,
+            current=prop.current_value,
+            proposed=prop.proposed_value,
+            iqr=prop.iqr,
+            max_movement_fraction=prop.max_movement_fraction,
+        )
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id,
+            text=(
+                f"Live tuning bounds breach для {prop.metric} (story {story_id}):\n\n"
+                f"Current: {prop.current_value:.3f}\n"
+                f"Proposed: {prop.proposed_value:.3f} "
+                f"(median of last {len(prop.samples)} coverage samples)\n"
+                f"Movement {abs(prop.proposed_value - prop.current_value):.3f} "
+                f"exceeds {prop.max_movement_fraction:.0%} bound.\n"
+                f"Approve update or keep current threshold?"
+            ),
+            story_id=story_id,
+            verdict="live_tuning_bounds",
+            metric=prop.metric,
+            current_value=prop.current_value,
+            proposed_value=prop.proposed_value,
+            iqr=prop.iqr,
+            actions=["approve_update", "keep_current"],
+        )
 
 
 def _verdict_from_text(text: str) -> str | None:
@@ -1674,6 +1803,19 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
     if gate_reasons:
         emit_payload["gate_reasons"] = gate_reasons
     await bus.emit(EventType.CODE_REVIEW_VERDICT, **emit_payload)
+
+    # ── E6 — L2 live tuning. Feed metrics into BudgetGuard's rolling windows
+    #    and (every ``MIN_SAMPLES_FOR_TUNING`` informative stories per metric)
+    #    recompute + persist tuned thresholds. Out-of-bounds proposals
+    #    (>50% movement) emit HUMAN_QUERY instead of writing.
+    if metrics is not None and cfg is not None and cfg.budget is not None:
+        await _apply_live_tuning(
+            bus=bus,
+            cfg=cfg,
+            gates=gates,
+            metrics=metrics,
+            story_id=story_id,
+        )
 
 
 async def _ff_merge_to_integration(
