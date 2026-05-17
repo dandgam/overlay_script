@@ -43,29 +43,6 @@
 
 ### Pending
 
-- **id:** E1
-  **title:** Skills directory + copy 14 phase 4+5 BMad skills (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 80-120
-  **depends_on:** []
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **acceptance:**
-    - Create `skills/upstream/` directory в orchestrator repo
-    - Copy 14 phase 4+5 skills из `/home/server/odyssey/.claude/skills/` (canonical source):
-      bmad-auto-dev, bmad-dev-story, bmad-agent-dev, bmad-code-review,
-      bmad-review-adversarial-general, bmad-review-edge-case-hunter, bmad-correct-course,
-      bmad-quick-dev, bmad-checkpoint-preview, bmad-create-story,
-      bmad-advanced-elicitation, bmad-retrospective, bmad-customize, bmad-sprint-status
-    - `skills/upstream/.bmad-version` с Odyssey's git rev + date + source path
-    - `skills/README.md` объясняет структуру (upstream/customize/policy/lessons/patches)
-    - `pytest tests/ -q` — 798 PASS (no test changes yet)
-  **safety_gates:**
-    - L1: no force/no-verify; copy operations верны, чистые
-    - L2: deny-list freeze (sandbox/worker_spawn/budget_guard)
-    - L3: branch isolation
-
 - **id:** E2
   **title:** customize/policy/lessons/patches scaffolds + pydantic schemas (CHECKPOINT)
   **surface:** backend-python
@@ -208,7 +185,33 @@
     - Manual merge через human review (Auto merge=false)
 
 ### Current
-(none — next wake promotes E1)
+
+- **id:** E1
+  **title:** Skills directory + copy 14 phase 4+5 BMad skills (CHECKPOINT)
+  **surface:** backend-python
+  **spec_section:** 80-120
+  **depends_on:** []
+  **destructive_actions:** []
+  **checkpoint:** true
+  **estimated_retries_allowed:** 3
+  **started:** 2026-05-17 (auto-loop wake)
+  **workflow:** direct (file-copy + scaffold, not FastAPI — backend-python workflow.md not applicable to pure scaffolding)
+  **retry_count:** 0
+  **worker_branches:** []
+  **acceptance:**
+    - Create `skills/upstream/` directory в orchestrator repo
+    - Copy 14 phase 4+5 skills из `/home/server/odyssey/.claude/skills/` (canonical source):
+      bmad-auto-dev, bmad-dev-story, bmad-agent-dev, bmad-code-review,
+      bmad-review-adversarial-general, bmad-review-edge-case-hunter, bmad-correct-course,
+      bmad-quick-dev, bmad-checkpoint-preview, bmad-create-story,
+      bmad-advanced-elicitation, bmad-retrospective, bmad-customize, bmad-sprint-status
+    - `skills/upstream/.bmad-version` с Odyssey's git rev + date + source path
+    - `skills/README.md` объясняет структуру (upstream/customize/policy/lessons/patches)
+    - `pytest tests/ -q` — 798 PASS (no test changes yet)
+  **safety_gates:**
+    - L1: no force/no-verify; copy operations верны, чистые
+    - L2: deny-list freeze (sandbox/worker_spawn/budget_guard)
+    - L3: branch isolation
 
 ### Completed
 (none)
@@ -236,3 +239,4 @@
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
+[2026-05-17 wake-1] E1 promoted Pending → Current; workflow=direct (file-copy task — backend-python workflow targets FastAPI gateways, not applicable)

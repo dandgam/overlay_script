@@ -1,0 +1,22 @@
+source_path: /home/server/odyssey/.claude/skills/
+source_repo: odyssey (canonical BMad reference)
+source_git_rev: 307dfab25d59cd21fff6b4802b059adf14144b34
+source_git_date: 2026-05-17
+copied_at: 2026-05-17T12:33:47Z
+copied_by: auto-loop-spec wake-1, initiative=embed_phase45_with_selflearning, session=E1
+skills_count: 14
+skills:
+  - bmad-auto-dev
+  - bmad-dev-story
+  - bmad-agent-dev
+  - bmad-code-review
+  - bmad-review-adversarial-general
+  - bmad-review-edge-case-hunter
+  - bmad-correct-course
+  - bmad-quick-dev
+  - bmad-checkpoint-preview
+  - bmad-create-story
+  - bmad-advanced-elicitation
+  - bmad-retrospective
+  - bmad-customize
+  - bmad-sprint-status

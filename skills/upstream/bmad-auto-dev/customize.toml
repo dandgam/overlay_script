@@ -1,0 +1,73 @@
+# bmad-auto-dev — project-level customization
+# Overrides defaults from ~/.claude/skills/bmad-auto-dev/SKILL.md.
+# Place a copy of this file at <project>/.bmad/customize.toml if you need project-specific tuning.
+
+[batch]
+# Max stories per batch before checkpoint halt
+size = 20
+
+# Force checkpoint at end of each Wave (recommended for all projects)
+wave_boundary = true
+
+# Force checkpoint when story is flagged as "gate" (e.g., Story 1.7 rollback gate)
+gate_stories = true
+
+[gauntlet]
+# Default mode when auto-detect is inconclusive
+default_mode = "quick"
+
+# Epics that always trigger deep mode (per spec — IAM/Billing/Compliance/AI Gateway)
+deep_epics = ["epic-4", "epic-5", "epic-7", "epic-10"]
+
+# Tags that auto-route to deep mode (case-insensitive substring match).
+# 2026-05-15 update: restored "rls", "auth", "credential" — Patch H (timeout 1800s
+# hard ceiling) + Patch G (API retry) bound the Story 1.5-class hang. Tested 2026-05-15.
+deep_tags = [
+  "security-critical",
+  "compliance",
+  "billing",
+  "ai gateway",
+  "pii",
+  "crypto",
+  "rls",
+  "auth",
+  "credential",
+]
+
+# Max words per enriched section (token-bloat guard)
+max_section_words = 300
+
+# Total enrichment cap
+max_total_words = 2000
+
+[failure]
+# Halt-on-fail (Phase 1 — no auto-retry)
+strategy = "halt"
+
+# Future Phase 2 options: "retry-once" | "skip-and-mark-failed" | "auto-rollback"
+
+[branches]
+# Naming convention
+feature_pattern = "feature/story-{id}"
+integration_pattern = "integration/wave-{wave}-batch-{n}"
+
+# Delete feature branches after successful merge
+cleanup_after_merge = true
+
+[models]
+# Cost routing per stage (override per ~/.claude/CLAUDE.md cost-routing rules)
+create_story = "opus"
+dev_story = "sonnet"
+code_review = "opus"
+
+[state]
+# Where per-project state lives
+dir = "_bmad/auto-dev-state"
+
+# Lock file for sprint-status.yaml concurrent writes
+sprint_status_lock = "_bmad/auto-dev-state/.sprint-status.lock"
+
+[paths]
+epics = "_bmad/planning-artifacts/epics.md"
+sprint_status = "_bmad/implementation-artifacts/sprint-status.yaml"
+stories_dir = "_bmad/stories"
