@@ -176,6 +176,11 @@ def write_sprint_status_yaml(data: dict[str, Any], settings: Settings | None = N
 
 _FRONTMATTER_RE = re.compile(r"^-\s+\*\*([a-z_]+):\*\*\s*(.*?)\s*$", re.MULTILINE)
 _LIST_ITEM_RE = re.compile(r"^\s*-\s+(.+?)\s*$", re.MULTILINE)
+# H1 title: ``# Story 3.1: Lifecycle state machine`` → title="Lifecycle state machine".
+# Mock fixture uses ``# Story 1-1-tenant-signup`` (no colon) → title="" (no human title).
+_STORY_TITLE_RE = re.compile(
+    r"^\s*#\s*Story\s+[\w.\-]+\s*:\s*(.+?)\s*$", re.MULTILINE
+)
 
 
 def parse_story_md(md_text: str) -> dict[str, Any]:
@@ -223,6 +228,11 @@ def parse_story_md(md_text: str) -> dict[str, Any]:
                 break
             items.append(stripped[2:].strip())
         out[key] = items
+
+    # Title — H1 `# Story X.Y: <title>`; only set when colon-separated form is present.
+    m_title = _STORY_TITLE_RE.search(md_text)
+    if m_title:
+        out["title"] = m_title.group(1).strip()
     return out
 
 
@@ -245,7 +255,18 @@ def list_stories(settings: Settings | None = None) -> list[dict[str, Any]]:
     Returns parsed dicts merged with id (filename stem) + path. Uses
     ``stories_dir`` which probes both upstream (``_bmad/stories/``) and
     legacy (``_bmad-output/planning-artifacts/stories/``) layouts.
+
+    `epic_id` is derived from the filename via :func:`normalize_story_id` so
+    both kebab (``3-1-lifecycle-state-machine`` → epic ``3``) and dotted
+    (``3.1`` → epic ``3``) story-file naming conventions yield the same epic.
+    Sprint-status remains the canonical source when it carries explicit epic
+    mapping; the file-derived value is the fallback consumed by
+    :class:`bmad_orchestrator.runtime.dag_planner.DagPlanner`.
     """
+    # Local import to avoid circular dep: bmad_format → _common is fine, but the
+    # opposite path is created only when DagPlanner enrichment is invoked.
+    from bmad_orchestrator.runtime.bmad_format import normalize_story_id
+
     base = stories_dir(settings)
     if not base.exists():
         return []
@@ -254,8 +275,9 @@ def list_stories(settings: Settings | None = None) -> list[dict[str, Any]]:
         meta = parse_story_md(path.read_text(encoding="utf-8"))
         meta["id"] = path.stem
         meta["file_path"] = str(path)
-        # epic_id derived from id prefix
-        meta.setdefault("epic_id", path.stem.split("-", 1)[0])
+        dotted = normalize_story_id(path.stem)
+        epic_from_file = dotted.split(".", 1)[0] if "." in dotted else dotted
+        meta.setdefault("epic_id", epic_from_file)
         stories.append(meta)
     return stories
 
@@ -326,9 +348,9 @@ __all__ = [
     "now_iso",
     "parse_story_md",
     "read_sprint_status_yaml",
+    "runs_dir",
     "sprint_status_path",
     "stories_dir",
-    "runs_dir",
     "text_ok",
     "worker_jsonl_path",
     "worktree_root",

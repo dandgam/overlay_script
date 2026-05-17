@@ -22,6 +22,10 @@ from bmad_orchestrator.agent.tools._common import (
     list_stories,
     read_sprint_status_yaml,
 )
+from bmad_orchestrator.runtime.bmad_format import (
+    normalize_story_id,
+    parse_sprint_status_bmad,
+)
 
 
 def build_graph(stories: list[dict[str, Any]]) -> nx.DiGraph:
@@ -42,35 +46,54 @@ def build_graph(stories: list[dict[str, Any]]) -> nx.DiGraph:
 def filter_wave(
     stories: list[dict[str, Any]], sprint_status: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Restrict to stories enumerated in sprint-status wave block."""
+    """Restrict to stories enumerated in sprint-status wave block.
+
+    Story-id matching is tolerant: both ``stories`` and the enumerated keys
+    are folded through :func:`normalize_story_id` so kebab story files
+    (``1-1-tenant-signup``) match dotted sprint-status keys (``1.1``) and
+    vice-versa. When sprint-status carries no enumerated stories at all the
+    full input list is returned unchanged (matches prior behavior).
+    """
     enumerated: set[str] = set()
     for epic in (sprint_status.get("epics") or {}).values():
         for sid in (epic.get("stories") or {}).keys():
-            enumerated.add(str(sid))
+            enumerated.add(normalize_story_id(str(sid)))
     if not enumerated:
         return stories
-    return [s for s in stories if s["id"] in enumerated]
+    return [s for s in stories if normalize_story_id(str(s["id"])) in enumerated]
 
 
 def _status_by_id(sprint_status: dict[str, Any]) -> dict[str, str]:
+    """Return ``{normalized_story_id: status_token}`` for every story.
+
+    Normalization unifies the two BMad-world ID conventions; consumers must
+    look up by ``normalize_story_id(story_id)`` (see :func:`ready_stories`).
+    """
     out: dict[str, str] = {}
     for epic in (sprint_status.get("epics") or {}).values():
         for sid, st in (epic.get("stories") or {}).items():
-            out[str(sid)] = str(st)
+            out[normalize_story_id(str(sid))] = str(st)
     return out
 
 
 def ready_stories(
     g: nx.DiGraph, sprint_status: dict[str, Any], active_touches: set[str] | None = None
 ) -> list[dict[str, Any]]:
-    """Topological roots — deps done + status ready-for-dev/backlog + no mutex clash."""
+    """Topological roots — deps done + status ready-for-dev/backlog + no mutex clash.
+
+    Lookups go through :func:`normalize_story_id` so node ids in the raw form
+    that ``list_stories`` returns (kebab or dotted) match the dotted form that
+    :func:`parse_sprint_status_bmad` writes.
+    """
     status = _status_by_id(sprint_status)
     active = active_touches or set()
     out: list[dict[str, Any]] = []
     for nid in g.nodes:
         deps = list(g.predecessors(nid))
-        deps_done = all(status.get(d) == "done" for d in deps)
-        st = status.get(nid, "backlog")
+        deps_done = all(
+            status.get(normalize_story_id(str(d))) == "done" for d in deps
+        )
+        st = status.get(normalize_story_id(str(nid)), "backlog")
         if not (deps_done and st in ("ready-for-dev", "backlog")):
             continue
         node = dict(g.nodes[nid])
@@ -108,6 +131,37 @@ def detect_conflicts(
     return conflicts
 
 
+def _enrich_with_epic_and_title(
+    stories: list[dict[str, Any]], sprint_status: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Ensure every story carries an ``epic_id`` and ``title`` for downstream use.
+
+    Two-source ground truth per spec §2:
+
+    * ``epic_id`` — prefer sprint-status mapping (story key already grouped under
+      an epic block); fall back to filename-derived value from ``list_stories``
+      (set by :func:`bmad_orchestrator.agent.tools._common.list_stories`).
+    * ``title`` — taken verbatim from the markdown H1 by ``parse_story_md``.
+      Stories without a colon-form H1 (mock fixtures use ``# Story 1-1-foo``)
+      keep an empty title rather than ``"no title"`` — callers display
+      ``story["id"]`` when title is empty.
+    """
+    by_epic: dict[str, str] = {}
+    for epic_id, epic in (sprint_status.get("epics") or {}).items():
+        for sid in (epic.get("stories") or {}).keys():
+            by_epic[normalize_story_id(str(sid))] = str(epic_id)
+
+    out: list[dict[str, Any]] = []
+    for s in stories:
+        sid_norm = normalize_story_id(str(s.get("id", "")))
+        epic_from_status = by_epic.get(sid_norm)
+        if epic_from_status:
+            s["epic_id"] = epic_from_status
+        s.setdefault("title", "")
+        out.append(s)
+    return out
+
+
 @dataclass(slots=True)
 class DagPlanner:
     """Caches stories + DAG; tracks in-flight worker touches for mutex."""
@@ -119,15 +173,15 @@ class DagPlanner:
 
     @classmethod
     def from_target(cls) -> DagPlanner:
-        sprint = read_sprint_status_yaml()
-        raw = list_stories()
+        sprint = parse_sprint_status_bmad(read_sprint_status_yaml())
+        raw = _enrich_with_epic_and_title(list_stories(), sprint)
         wave_stories = filter_wave(raw, sprint)
         graph = build_graph(wave_stories)
         return cls(stories=wave_stories, sprint_status=sprint, graph=graph)
 
     def reload(self) -> None:
-        self.sprint_status = read_sprint_status_yaml()
-        raw = list_stories()
+        self.sprint_status = parse_sprint_status_bmad(read_sprint_status_yaml())
+        raw = _enrich_with_epic_and_title(list_stories(), self.sprint_status)
         self.stories = filter_wave(raw, self.sprint_status)
         self.graph = build_graph(self.stories)
 
