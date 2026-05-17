@@ -1,0 +1,37 @@
+# Deletion safety patterns — Patch C canonical port (2026-05-18).
+#
+# When a worker's git diff (HEAD~1..HEAD inside the worktree) shows a deleted
+# file matching any pattern below, deletion_safety_subscriber halts the
+# WORKER_COMPLETED event (mutates payload status → 'halted_unsafe_deletion')
+# and emits HUMAN_QUERY with the offending paths. The downstream
+# code_review_subscriber skips on non-success status, so no $15 Opus run fires.
+#
+# Reference: ~/.claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh
+# `migration_patterns` (lines ~566-580 of the original runner).
+#
+# Pattern semantics: each pattern is matched twice via `fnmatch.fnmatch`:
+#   1. Against the full relative path (e.g. "migrations/2026_05_add_index.sql").
+#   2. Against the basename only (e.g. "2026_05_add_index.sql").
+# A match on EITHER hit triggers the halt.
+#
+# Schema (validated by `bmad_orchestrator.runtime.deletion_safety.DeletionSafetyPolicy`):
+#   patterns: list[str]  — fnmatch patterns
+#   escalation_text: str — prepended to HUMAN_QUERY body (operator hint)
+
+patterns:
+  - "migrations/*.sql"
+  - "migrations/*.py"
+  - "*secrets*"
+  - "*.env"
+  - "*credentials*"
+  - "*.pem"
+  - "*.key"
+  - "*.keystore"
+  - "*.p12"
+  - "*.pfx"
+
+escalation_text: |
+  Worker attempted to delete files matching deletion-safety patterns.
+  These typically contain irrecoverable state (database migrations, secrets,
+  TLS material). Halting WORKER_COMPLETED → no code-review spawn, no merge.
+  Review the deletions manually before resuming the wave.

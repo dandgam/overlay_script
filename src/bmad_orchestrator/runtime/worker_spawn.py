@@ -50,15 +50,17 @@ from bmad_orchestrator.runtime.sandbox import (
 CLAUDE_BIN_DEFAULT = "claude"
 DEFAULT_SKILL_INVOCATION = "/bmad-auto-dev"
 
-# FS3 H15: Worker subprocesses run user stories that can take ~30 min each on
-# a hot path; an upper bound of 24h still catches genuinely-hung workers
-# (e.g. claude binary deadlocked on stdin) without killing legitimate runs.
-# Override via BMAD_WORKER_TIMEOUT_SEC env (positive int).
+# Patch H (canonical port 2026-05-18): default 30 min, was 24h. Long-running
+# legitimate stories should set BMAD_WORKER_TIMEOUT_SEC explicitly; the default
+# now matches Odyssey's bmad-auto-dev-runner.sh upstream value (1800s) so
+# stuck workers are killed within one orchestrator round instead of stalling
+# the wave overnight. Reference: ~/.claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh
+# lines 91-127 (`# Patch H 2026-...`).
 def _worker_timeout_sec() -> int:
     raw = os.environ.get("BMAD_WORKER_TIMEOUT_SEC", "")
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
-    return 86_400
+    return 1800
 
 # FS1 B8: workers do NOT call LLMs (per spec §16.3 dev role isolation), so the
 # only env vars they need are the bare-minimum runtime ones. Everything else —
