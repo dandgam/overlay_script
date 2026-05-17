@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import tomllib
@@ -44,8 +45,13 @@ STORY_HEADING_TITLE_RE = re.compile(
 )
 TYPE_FIELD_RE = re.compile(r"^\*\*Type:\*\*\s*(?P<value>.+?)\s*$", re.MULTILINE)
 
-DEFAULT_EPICS = Path("_bmad/planning-artifacts/epics.md")
-DEFAULT_STATUS = Path("_bmad/implementation-artifacts/sprint-status.yaml")
+DEFAULT_EPICS = Path(
+    os.environ.get("BMAD_EPICS_FILE") or "_bmad/planning-artifacts/epics.md"
+)
+DEFAULT_STATUS = Path(
+    os.environ.get("BMAD_SPRINT_STATUS")
+    or "_bmad/implementation-artifacts/sprint-status.yaml"
+)
 DEFAULT_STATE = Path("_bmad/auto-dev-state/current-batch.json")
 DEFAULT_CONFIG = SCRIPT_DIR.parent / "customize.toml"
 

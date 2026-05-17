@@ -31,7 +31,9 @@ try:
 except ImportError:  # pragma: no cover — 3.10 fallback path, not exercised in CI
     tomllib = None
 
-DEFAULT_EPICS = Path("_bmad/planning-artifacts/epics.md")
+DEFAULT_EPICS = Path(
+    os.environ.get("BMAD_EPICS_FILE") or "_bmad/planning-artifacts/epics.md"
+)
 DEFAULT_TEMPLATES = Path(__file__).resolve().parent.parent / "templates" / "gauntlet-prompts.md"
 DEFAULT_CUSTOMIZE = Path(__file__).resolve().parent.parent / "customize.toml"
 

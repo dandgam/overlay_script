@@ -48,7 +48,17 @@ from bmad_orchestrator.runtime.sandbox import (
 )
 
 CLAUDE_BIN_DEFAULT = "claude"
-DEFAULT_SKILL_INVOCATION = "/bmad-auto-dev"
+# Patch Y 2026-05-18: bypass `/bmad-auto-dev` slash-command. LLM workers
+# repeatedly halt on perceived layout mismatches even with minimal SKILL.md.
+# Replacement prompt is a direct execution order — Claude treats it as a task
+# (run this bash, report exit code), not a skill to reason about.
+DEFAULT_SKILL_INVOCATION = (
+    "Execute exactly this bash command and nothing else: "
+    "bash .claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh --max 1. "
+    "Do not read other files. Do not analyse the project layout — the runner "
+    "auto-detects everything. Do not ask me any questions. When the command "
+    "exits, report only its exit code and the last 3 lines of stderr."
+)
 
 # Patch H (canonical port 2026-05-18): default 30 min, was 24h. Long-running
 # legitimate stories should set BMAD_WORKER_TIMEOUT_SEC explicitly; the default

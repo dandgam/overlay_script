@@ -17,6 +17,7 @@ Coverage (12 tests):
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,14 @@ from bmad_orchestrator.skills_repo import CodeReviewGates
 def _make_target_with_stories(tmp_path: Path, *story_ids: str) -> Path:
     target = tmp_path / "proj"
     target.mkdir(exist_ok=True)
+    # Patch Y 2026-05-18: _ensure_git_worktree (commit 358d77f) needs a real
+    # git repo with HEAD commit at the target — initialise here.
+    subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)
+    subprocess.run(["git", "-C", str(target), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(target), "config", "user.name", "t"], check=True)
+    (target / "README").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "add", "README"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-q", "-m", "seed"], check=True)
     artifacts = target / "_bmad-output" / "planning-artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     stories_block = "\n".join(f"      {sid}: ready-for-dev" for sid in story_ids)

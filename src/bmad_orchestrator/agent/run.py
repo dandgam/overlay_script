@@ -863,6 +863,8 @@ async def _run_real_pilot(
                 branch=branch_name,
                 mock=False,
                 sandbox_network="full",
+                embedded_skills_root=settings.skills_resolution_root,
+                allowed_worktree_root=worktree_root,
             )
             handles.append(handle)
             spawned.append(story["id"])
