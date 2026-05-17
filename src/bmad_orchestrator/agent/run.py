@@ -76,8 +76,11 @@ from bmad_orchestrator.runtime.diff_size_gate import (
 from bmad_orchestrator.runtime.diff_size_gate import (
     load_diff_size_policy,
     measure_diff,
+    measure_diff_per_file,
+    partition_per_file,
 )
 from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
+from bmad_orchestrator.runtime.file_list_parser import collect_allow_list
 from bmad_orchestrator.runtime.live_tuning import (
     TuningProposal,
     apply_proposals,
@@ -1976,9 +1979,13 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         if tc_reason is not None:
             gate_reasons.append(tc_reason)
 
-    # ── Patch Q — diff size gate. Even if metrics are missing (e.g. review
-    #    emitted no structured block), the size gate runs purely on git so it
-    #    catches runaway scope regardless of the review parser's coverage.
+    # ── Patch Q (diff size) + Patch W (scope by File List allow-list).
+    #    Even if metrics are missing (e.g. review emitted no structured block),
+    #    the size + scope checks run purely on git so they catch runaway scope
+    #    regardless of the review parser's coverage. The allow-list is built
+    #    from the story's `### File List` section ∪ infra paths; when the
+    #    target_project is unconfigured (tests), Patch W silently degrades to
+    #    pure Patch Q (P3 behaviour).
     if verdict == "approve":
         try:
             diff_policy = load_diff_size_policy()
@@ -1986,10 +1993,26 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
             log.warning("diff_size_policy_load_failed", error=str(e))
         else:
             if diff_policy.enabled:
+                out_of_scope_paths: list[str] | None = None
                 diff_metrics = await measure_diff(
                     Path(worktree), range_spec=diff_policy.range_spec
                 )
-                diff_reason = _diff_size_gate_verdict(diff_metrics, diff_policy)
+                if cfg is not None and cfg.target_project is not None:
+                    allow_list = collect_allow_list(cfg.target_project, story_id)
+                    if allow_list.paths:
+                        per_file = await measure_diff_per_file(
+                            Path(worktree), range_spec=diff_policy.range_spec
+                        )
+                        in_scope_metrics, out_paths = partition_per_file(
+                            per_file, allow_list
+                        )
+                        out_of_scope_paths = out_paths
+                        diff_metrics = in_scope_metrics
+                diff_reason = _diff_size_gate_verdict(
+                    diff_metrics,
+                    diff_policy,
+                    out_of_scope_paths=out_of_scope_paths,
+                )
                 if diff_reason is not None:
                     gate_reasons.append(diff_reason)
 
@@ -2122,7 +2145,18 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
     # commit on whatever branch is currently checked out there, diverging
     # the merge target. Best-effort: failures here do NOT block the merge.
     if worktree and (Path(worktree) / ".git").exists():
-        recovery = await recover_pre_merge(Path(worktree))
+        # Patch W — scope recovery to the story's File List allow-list when
+        # the project root is configured. Out-of-scope dirty paths stay in
+        # the working tree (caller surfaces them via gate_reasons / human
+        # query downstream); only allow-listed paths get auto-staged.
+        allow_list = (
+            collect_allow_list(cfg.target_project, story_id)
+            if cfg.target_project is not None
+            else None
+        )
+        recovery = await recover_pre_merge(
+            Path(worktree), allow_list=allow_list
+        )
         if recovery.recovered:
             log.info(
                 "patch_r_pre_merge_recovery",
@@ -2130,6 +2164,7 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
                 worktree=worktree,
                 commit_sha=recovery.commit_sha,
                 staged=list(recovery.staged_paths),
+                out_of_scope=list(recovery.out_of_scope_paths),
             )
         elif recovery.error:
             log.warning(
@@ -2137,6 +2172,14 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
                 story_id=story_id,
                 worktree=worktree,
                 error=recovery.error,
+                out_of_scope=list(recovery.out_of_scope_paths),
+            )
+        elif recovery.out_of_scope_paths:
+            log.info(
+                "patch_w_all_dirty_out_of_scope",
+                story_id=story_id,
+                worktree=worktree,
+                out_of_scope=list(recovery.out_of_scope_paths),
             )
 
     integration_branch = f"integration/{cfg.wave}"
