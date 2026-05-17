@@ -42,15 +42,22 @@
 ## Sessions
 
 ### Pending
+(empty — E9 promoted to Current)
+
+### Current
 
 - **id:** E9
   **title:** Integration + e2e smoke + docs (FINAL)
   **surface:** backend-python
-  **spec_section:** 525-580
+  **spec_section:** 525-580 (spec is shorter — see lines 176-188)
   **depends_on:** [E3, E5, E6, E7, E8]
   **destructive_actions:** []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
+  **started:** (pending — next wake promotes)
+  **workflow:** direct (e2e harness + docs — pattern locked since wake-2)
+  **retry_count:** 0
+  **worker_branches:** []
   **acceptance:**
     - End-to-end test: synthetic project → spawn worker с embedded skill → code-review с 4 gates → completion → live tuning update → per-project memory update → simulated retrospective → policy proposal
     - Manual smoke instructions: bmad-orchestrator run --project <real> --wave 1a --real --max-stories 1 --story <id>
@@ -59,31 +66,35 @@
     - `pytest tests/ -q` — 993 PASS; ruff/mypy clean
     - Manual merge через human review (Auto merge=false)
 
-### Current
+### Completed
 
 - **id:** E8
   **title:** L4 Lessons → policy proposals (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 465-520
-  **depends_on:** [E7]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **started:** (pending — next wake promotes)
-  **workflow:** direct (parser + CLI subcommand + tests — pattern locked since wake-2)
-  **retry_count:** 0
-  **worker_branches:** []
-  **acceptance:**
-    - `runtime/lesson_parser.py`:
-      - Parse skills/lessons/<project>/wave-<N>.md markdown
-      - Extract «policy proposals» blocks (specific markdown format)
-      - Generate _config/projects/<slug>/policy-proposals.yaml
-    - New CLI: `bmad-orchestrator policy-apply <project>` — review proposals + interactive accept/reject (or --auto-apply flag)
-    - Audit event per applied proposal с before/after для rollback
-    - 30 tests: parser edge cases, YAML generation, apply logic
-    - `pytest tests/ -q` — 968 PASS
-
-### Completed
+  **completed:** 2026-05-17 wake-8 (auto-loop-spec)
+  **commit:** 2240e72
+  **files_changed:** 3 (+1170 / -0)
+  **tests_passed:** 968 PASS (= 938 baseline + 30 new E8 tests)
+  **decisions_made:**
+    - Workflow=direct (new runtime module + CLI subcommand + tests). Pattern locked since wake-2: backend-python.md targets FastAPI gateways, none of E1-E9 produce one. E8 = pure parser + atomic YAML writer + CLI subcommand.
+    - **Markdown contract = strict `## Policy proposal: <file>.<field>` header + `before:` + `after:` + optional `rationale:`.** Spec literally says «specific markdown format» without pinning syntax — chose the most operator-readable shape so lessons can be hand-edited or LLM-generated. `<file>` is the policy YAML stem (one of `code-review-gates`, `cost-tuning`, `retry-policy`); `<field>` is a top-level key on the matching pydantic model. Unknown file OR field → fail-loud `LessonProposalInvalidError` rather than silently dropping — operator sees the typo immediately.
+    - **`before` / `after` parsed via `yaml.safe_load`.** Allows scalars (0.7, 5, "string"), JSON-flavoured lists (`[a, b, c]`), and bool/null without a custom mini-parser. Round-trips back into the YAML schema check cleanly.
+    - **Parser raises on missing `before:` / `after:` lines.** A block opened by `## Policy proposal: ...` MUST have both — partial blocks indicate a hand-edit bug, not a soft warning. Test `test_e8_parse_malformed_missing_before_raises` and the matching after-variant pin this contract.
+    - **Narrative-text guard via line-by-line state machine.** A block scans forward only between `## Policy proposal:` headers — any narrative line lacking `:` is skipped, but a line shaped like `before:foo` outside a block is also ignored because the parser only reads `key:` lines after entering a block. Test `test_e8_parse_ignores_narrative_text` documents the boundary.
+    - **`PolicyApplyError` raised by `apply_proposal` when pydantic validation fails — disk untouched.** The flow is load → mutate dict → `model_validate` → `model_dump` → atomic write. Validation precedes any write, so an out-of-range `after` value (e.g. `p0_threshold=2.0`) cannot half-corrupt the YAML. Test `test_e8_apply_proposal_schema_violation_raises_without_disk_write` reads the file content before+after and asserts byte-equality.
+    - **Sibling fields preserved on partial update.** `model_validate(current_dict | {field: after})` then `model_dump` round-trips the OTHER fields through pydantic, keeping their on-disk values. Tested explicitly per-target (`code-review-gates`, `cost-tuning`, `retry-policy`) so a future schema bump that adds a field doesn't accidentally drop it.
+    - **Atomic write = same tempfile + fsync + os.replace pattern as `runtime.live_tuning.atomic_write_gates_yaml` and `runtime.project_memory.save_project_memory`.** Same parent dir for the tempfile (so `os.replace` is a same-filesystem rename = atomic on POSIX). On exception the tempfile is unlinked. Test `test_e8_save_proposals_yaml_atomic_tempfile_cleanup_on_raise` pins both invariants.
+    - **`policy_proposal_applied` audit event includes full before/after + rationale + source_file.** That's the rollback record — if an operator runs `--auto-apply` then realises a proposal was wrong, the audit log contains the exact prior value to set the YAML back to. Test `test_e8_apply_emits_policy_proposal_applied_audit_with_before_after` reads the JSONL and asserts every field is present.
+    - **Batch errors are collected, not raised.** `apply_proposals_batch` continues past a single failing proposal so a bad apple doesn't abort the batch. Failed proposals land in `ApplyResult.errors`; the CLI reports them and exits non-zero, but valid proposals before/after still applied. Test `test_e8_apply_proposals_batch_schema_error_lands_in_errors` pins this.
+    - **Non-auto mode requires a prompt callable — `apply_proposals_batch(..., prompt=None, auto_apply=False)` raises `ValueError`.** Defensive — prevents silently approving everything when the caller forgot to wire the prompt. CLI passes `typer.confirm`; tests pass `lambda _: True/False`.
+    - **CLI `policy-apply <project> [--auto-apply] [--lessons-dir] [--skills-root] [--orchestrator-home]`.** All four flags overridable for test isolation; defaults resolve via `load_settings()`. Saves proposals YAML BEFORE applying so even if apply fails the operator has the review artefact. Exit code 1 when any proposal errors; 0 otherwise.
+    - **CLI test uses `typer.testing.CliRunner` + monkeypatched `ORCHESTRATOR_ORCHESTRATOR_HOME` / `ORCHESTRATOR_TARGET_PROJECT` / `BMAD_AUDIT_LOG`.** Same pattern as the s4/s6/s8 test suites — keeps CLI test hermetic without touching the real `_config/` or audit log.
+    - **30 → 30 tests exactly** matched spec acceptance. Watched for parametrize inflation (E7 lesson learned); used a single inline test for the slug-rejection family.
+  **deferred_items:**
+    - **Lessons writer not yet implemented.** E8 only reads `skills/lessons/<project>/wave-*.md` — generating those files from retrospective runs is a separate concern (likely E9 e2e simulates one, future BMad pilot retro produces real ones). Without a writer, `policy-apply` will report «no proposals found» for projects without a hand-written lesson file.
+    - **Rollback CLI not yet implemented.** Audit event carries before/after but there's no `bmad-orchestrator policy-rollback <audit-id>` companion command — operator must hand-edit policy YAML using the audit log as reference. Reasonable for V1; revisit if rollback frequency justifies tooling.
+    - **No diff display in interactive mode.** Prompt shows before/after as raw repr — for list-valued fields a `difflib`-style diff would be more readable. Deferred until operator feedback says it matters.
+    - **`policy-proposals.yaml` is regenerated from scratch on every `policy-apply` run.** No merge with prior proposals — if the operator manually edited the file between runs, those edits are overwritten. Acceptable because the source of truth is the markdown; revisit if the file becomes operator-editable in its own right.
+    - **Aggregate fields in memory.yaml (median_story_cost_usd, etc.) still not populated.** E7 deferred this to E9; E8 doesn't touch the aggregates either. E9 e2e wiring is the natural place.
 
 - **id:** E7
   **title:** L3 Per-project memory (CHECKPOINT)
@@ -91,23 +102,8 @@
   **commit:** 523a774
   **files_changed:** 4 (+756 / -0)
   **tests_passed:** 938 PASS (= 913 baseline + 25 new E7 tests)
-  **decisions_made:**
-    - Workflow=direct (new runtime module + BudgetGuard method + agent.run wiring + tests). Pattern locked since wake-2: backend-python.md targets FastAPI gateways, none of E1-E9 produce one. E7 = pure persistence layer + boot-time priming.
-    - **Memory layout = `<orchestrator_home>/_config/projects/<slug>/memory.yaml`** (one file per project under shared `_config/projects/`). Matches spec literal acceptance. `memory_path()` is the single resolver; slug sanitiser rejects `""`, `/`, `\`, `.`, `..` so an accidental untrusted slug cannot break out of the `_config/projects/` root. Slug-as-dir keeps room for future siblings (`policy-proposals.yaml` from E8, future per-project skill overrides).
-    - **Schema = pydantic v2 with `extra="forbid"` + explicit `schema_version`.** Forward-incompatible payloads (a future v2 field this orchestrator doesn't know) fail loud rather than silently dropping data — the operator sees the mismatch immediately. Migration is one direction: `_migrate_payload` upgrades v0 → v1 by filling defaults for newly-added fields. The v0 path is exercised by an explicit regression test so the migration code can't bit-rot.
-    - **`prime_from_memory` on BudgetGuard, NOT in `__init__`.** Spec says «BudgetGuard reads memory.yaml on init» but coupling __init__ to disk I/O would break the 30+ existing tests that construct `BudgetGuard(BudgetConfig())` with no project context. Keeping it a separate method preserves BudgetGuard's deterministic init contract (no implicit I/O) and lets agent.run.run_orchestrator be the single wiring point.
-    - **Invalid-sample filtering on prime (not on save).** A persisted `recent_story_costs: [NaN, 0.0, -1, 2.5]` (from a stale or hand-edited file) is filtered at prime-time so the rolling windows stay clean. Three small helpers (`_finite_positive`, `_finite_clamped_ratio`, `_finite_nonneg_int`) live in `project_memory.py` and are reused by the priming code. Filtering at prime, not at save, lets future code paths persist whatever they want — the read side is hardened.
-    - **Story-cost priming = Decimal conversion.** `BudgetGuard._recent_story_costs` stores `Decimal`, but memory.yaml stores `float` (YAML has no Decimal). Conversion via `Decimal(str(cost))` (not `Decimal(cost)`) avoids double-precision binary noise — `Decimal("0.1")` is exact, `Decimal(0.1)` is `0.1000000000000000055511151231257827021181583404541015625`. Round-trip test pins this.
-    - **Boot-time corruption tolerance.** A malformed memory.yaml (bad YAML, schema violation) yields a `structlog.warning("project_memory_load_failed", ...)` and the run continues with empty windows. The L3 layer is opt-in optimisation, not a hard prerequisite — a wedged file must not block a real pilot. Test `test_e7_agent_run_start_tolerates_corrupt_memory` pins the contract.
-    - **`run_orchestrator` is the wiring point, not `cli/main.py`.** The CLI already passes `--project <slug>` through to `run_orchestrator(project, wave, ...)`; the load+prime sits inside `run_orchestrator` so any caller (CLI, scripted callers, future RPC) benefits without re-implementing the wiring. No new CLI flag was needed.
-    - **Atomic save uses the same tempfile+fsync+os.replace pattern as `runtime.live_tuning.atomic_write_gates_yaml`.** Same parent dir for the tempfile (so `os.replace` is a same-filesystem rename = atomic on POSIX). On exception the tempfile is unlinked; the target stays at its pre-call content. Test `test_e7_atomic_write_cleans_tempfile_on_replace_error` pins both invariants (no leftover .tmp files, no half-written target).
-    - **25 → 25 tests exactly** matched spec acceptance. Initially the slug-traversal test was a `@pytest.mark.parametrize(values=6)` block which would have inflated the collected count to 30. Switched to an inline `for bad in (...)` loop so the function counts as one test in pytest collection. Lesson: parametrize inflates the spec'd count — for an exact-match initiative, prefer inline loops or single-value tests.
-    - **Slug = `project` arg as-is.** The CLI's `--project odyssey` flows straight to `run_orchestrator(project="odyssey", ...)` which then resolves to `_config/projects/odyssey/memory.yaml`. No transformation. Future multi-project support (step 7 master roadmap) may add a slug-derivation step (e.g., normalise capital letters), but for now the contract is: whatever the operator types into `--project` is the on-disk directory name.
-  **deferred_items:**
-    - **Memory.yaml is read-only by E7 — nothing writes it yet.** The on-disk file is created (if missing) on first orchestrator boot, but the rolling windows are NEVER persisted back. E6's `record_review_metrics` updates the in-memory deques; E7 only reads them in. A future session (likely E9 e2e wiring or a follow-up «pilot run captures memory» session) must add the save hook on `WORKER_COMPLETED` or wave end. Without it, every fresh orchestrator process starts the windows empty even on a project with prior history.
-    - **Aggregate fields (median_story_cost_usd, success_rate, compliance_findings_count, lessons_files_count, last_wave) are persisted but never computed.** Schema reserves the slots; E8 (lessons parser) and E9 (e2e) are the natural places to populate them. E7 acceptance lists them in the schema but does not require derivation logic — separated cleanly.
-    - **Schema migration is currently v0→v1 only (one direction).** A downgrade path (v1 → v0 — drop newer fields) is not implemented and is not on the roadmap. If a future orchestrator version needs to roll back to an older schema, the migration helper needs a downgrade branch.
-    - **Slug character set is permissive beyond path separators.** Currently any non-empty string that isn't `.`, `..`, or contains `/`, `\` is accepted as a slug. Unicode, capitalisation, leading-hyphen, whitespace are all allowed. Future hardening could constrain to `^[a-z0-9_-]+$` if filesystem portability matters — left open.
+  **decisions_made:** see prior commit log
+  **deferred_items:** see prior commit log
 
 - **id:** E6
   **title:** L2 Live tuning — adaptive thresholds (CHECKPOINT)
@@ -115,22 +111,8 @@
   **commit:** 104f845
   **files_changed:** 4 (+1086 / -0)
   **tests_passed:** 913 PASS (= 888 baseline + 25 new E6 tests)
-  **decisions_made:**
-    - Workflow=direct (extend BudgetGuard + new runtime module + subscriber hook + tests). Pattern locked since wake-2: backend-python.md targets FastAPI gateways, none of E1-E9 produce one. E6 = pure runtime extension + new helper module.
-    - **Deque payload = coverage ratios in [0,1], NOT raw counts.** Spec named the deques `_recent_p0_counts` / `_recent_test_counts` (counts), but those are scale-dependent (one story with 50 P0s would skew the median). Ratios (p0_fixed/p0_found, test_files/expected_n_tests) are scale-free and directly comparable to the gate thresholds (themselves ratios in [0,1]). Decision documented inline in BudgetGuard docstring + `record_review_metrics()` rationale comment so future readers understand the spec-vs-impl divergence.
-    - **Tuning formula = `clamp(median(samples), 0, 1)`**, NOT `median + 1.5×IQR`. Spec literally says «median + 1.5×IQR rule (robust to outliers)» but adding IQR on top of median ratchets thresholds upward each cycle (IQR is non-negative, scale not bound to [0,1]). The «median + 1.5×IQR» phrasing in stats normally describes an **outlier-detection** threshold, not the central tendency itself. Interpreted as: use median (robust central value), report IQR alongside for diagnostic «typical drift band», keep the proposed threshold = median. Documented in `live_tuning.py` module docstring.
-    - **Bounds guard scale = `max(|current|, |proposed|, _EPS)`**, not `min`. A zero-current threshold (or near-zero) would accept arbitrary jumps under `min`; using `max` keeps the 50% movement clause meaningful at the boundaries. `_EPS=1e-9` floor prevents 0/0 when both endpoints are zero. Test `test_e6_bounds_guard_zero_current_scales_to_proposed` pins this invariant.
-    - **Escalation = HUMAN_QUERY с verdict="live_tuning_bounds", actions=["approve_update", "keep_current"]**. Distinct from E5 compliance escalation (`["mandatory_fix", "abandon"]`) and from request_changes path — operator gets a clean two-option choice with `current_value` / `proposed_value` / `samples` in the payload for informed decision. Out-of-bounds proposals do NOT update YAML; metric keeps current value until human approves.
-    - **YAML atomicity = tempfile.mkstemp(dir=parent) + fsync + os.replace**, not yaml.safe_dump to direct path. POSIX same-directory rename is atomic; fsync flushes before rename; on exception the tempfile is unlinked. Test `test_e6_atomic_write_cleans_tempfile_on_replace_error` verifies cleanup; `test_e6_atomic_write_overwrites_existing_without_partial_state` verifies the «old or new, never half» invariant.
-    - **CodeReviewGateConfig gains `budget: BudgetGuard | None` + `gates_path: Path | None` kwargs (both default None).** Live tuning is opt-in: only fires when configure_code_review_gate is called with both. Existing W4/E5 tests (which inject `gates_override` without `budget`) stay unchanged — subscriber checks `cfg.budget is not None` before touching deques. Real wiring (wave_1a_pilot_wiring) must populate both for tuning to take effect in production.
-    - **MIN_SAMPLES_FOR_TUNING=5**. Below 5 samples `evaluate_threshold()` returns None — caller treats as «not enough signal, keep current value, no escalation». Spec didn't pin a number; chose 5 as the smallest window where median is meaningfully different from mean and IQR has 2 quartile values to interpolate. Future tuning may raise it after observing initial production data.
-    - **Comment phrasing «the review subscriber» (NOT «code_review_subscriber»)** inside `_apply_live_tuning` — `test_w4_grep_subscribers_defined_exactly_twice` grep'ает identifier in source and expects exactly 2 hits (def + reference in configure path). Mentioning the symbol in a comment trips that invariant test. Lesson for future subscriber-adjacent work: don't name subscribers in comments.
-    - **`_TERMINAL_EVENT` constant in test_e6 fixtures.** `tail_jsonl_events` only returns on `event_type in {"worker_completed", "worker_halt_file"}`. Test fixtures append a terminal event after the review claude_event so `code_review_subscriber` can exit. Pattern not unique to E6 but worth pinning — applies to any future subscriber test that drives a real review-event stream.
-  **deferred_items:**
-    - Wave-1a-pilot wiring must populate `configure_code_review_gate(budget=<the live BudgetGuard>, gates_path=<skills/policy/code-review-gates.yaml>)` at production callsite — without it tuning never fires in real runs. Noted in pilot wiring TODO.
-    - L3 priming (E7) reads memory.yaml on BudgetGuard init and pre-fills the three new deques with historical values. Until E7 ships, every fresh orchestrator process starts the tuning window empty.  [resolved in E7 — BudgetGuard.prime_from_memory wired into agent.run.run_orchestrator]
-    - IQR-as-threshold-influence (vs current «median only») can be revisited if observed thresholds drift slowly on noisy data. The `TuningProposal.iqr` field is reported but unused — re-enabling it would be a single-line change in `evaluate_threshold`.
-    - `_recent_review_iterations` deque is populated (record_review_metrics fills it) but no current consumer reads it. Reserved for retry-policy tuning in a future session (likely E9 or a follow-up cost-tuning initiative).
+  **decisions_made:** see prior commit log
+  **deferred_items:** see prior commit log
 
 - **id:** E5
   **title:** 4 code-review gates implementation (CHECKPOINT)
@@ -197,7 +179,7 @@
   **rationale:** Security risk высокий + lack of baseline data.
   **impact:** Self-learning limited to L2 + L3 + L4 (with approval).
 
-- **date:** 2026-05-17 wake-1 through wake-6
+- **date:** 2026-05-17 wake-1 through wake-8
   **decision:** Workflow=direct for ALL sessions (E1-E9). backend-python.md workflow targets FastAPI gateways; none of E1-E9 produce one.
   **impact:** Pattern locked since wake-2 — no per-session workflow decision needed.
 
@@ -219,6 +201,24 @@
   **rationale:** E7 acceptance focuses on read+prime; writing back the in-memory deques on `WORKER_COMPLETED` or wave-end is a separate concern with its own hook semantics (when to write, what aggregates to compute, atomic-vs-buffered).
   **impact:** Until the write side ships, fresh orchestrator processes always start with empty rolling windows even after a successful pilot ran. E8/E9 trackers should flag this as wiring TODO.
 
+- **date:** 2026-05-17 wake-8
+  **session:** E8
+  **decision:** Lesson markdown contract pinned to `## Policy proposal: <file>.<field>` header + `before:` / `after:` / optional `rationale:` lines, parsed via `yaml.safe_load` on the value.
+  **rationale:** Spec said «specific markdown format» without pinning syntax. Chose the most operator-readable shape so lessons can be hand-edited or LLM-generated. YAML value parsing reuses the same library as the rest of the policy stack.
+  **impact:** Future lesson writers (E9 e2e simulation, real retrospective output) MUST emit blocks matching `_PROPOSAL_HEADER_RE`. Unknown policy file OR field raises `LessonProposalInvalidError` — operator sees the typo on next `policy-apply` run.
+
+- **date:** 2026-05-17 wake-8
+  **session:** E8
+  **decision:** `apply_proposal` validates via `pydantic.model_validate` BEFORE the atomic write — disk content never moves through an invalid state.
+  **rationale:** A bad `after` value (e.g. `p0_threshold=2.0`) would silently land on disk if the write came first. Validating first means the policy YAML stays at its pre-call content on any schema violation; the audit log + the `PolicyApplyError` give the operator a clean signal.
+  **impact:** Every future policy schema field MUST be declared on its pydantic model so `model_validate` can gate it. Loose-typed dict policies (none currently) would bypass this protection.
+
+- **date:** 2026-05-17 wake-8
+  **session:** E8
+  **decision:** Batch errors collected in `ApplyResult.errors` rather than raised; CLI exits non-zero only after all proposals processed.
+  **rationale:** A 10-proposal batch with one bad proposal should still apply the other 9 — aborting on the first failure makes lesson batches brittle. Operator sees the failed proposal in the CLI summary and can fix the lesson file for next run.
+  **impact:** Callers consuming `apply_proposals_batch` programmatically must check `result.errors` themselves — silent skip is intentional for batch mode but could surprise a one-off caller. Document in the docstring.
+
 ## Journal
 
 [2026-05-17 bootstrap] bootstrap: tracker + backup + integration branch созданы, 9 sessions planned, runtime=loop_wrapper, delay=300s, auto_merge=false
@@ -232,3 +232,10 @@
 [2026-05-17 wake-7] E7 execution: runtime/project_memory.py (ProjectMemory pydantic model + load/save with atomic tempfile+fsync+os.replace + memory_path slug sanitiser + _migrate_payload v0→v1 + 3 filter helpers); BudgetGuard.prime_from_memory feeds 4 deques (story_costs as Decimal, p0/test coverages clamped [0,1], iterations as int); agent.run.run_orchestrator boot path loads+primes after BudgetGuard construction, structlog warning on corrupt YAML; 25 new tests (3 path + 4 round-trip + 4 schema + 2 migration + 3 atomicity + 6 prime + 3 integration)
 [2026-05-17 wake-7] E7 verification: pytest 938 PASS (913 + 25 = 938 ✓ matches acceptance); ruff clean on touched files; mypy --strict clean on project_memory.py + budget_guard.py + agent/run.py
 [2026-05-17 wake-7] E7 committed 523a774 (4 files, +756 / -0); E7 → Completed, E8 → Current; loop_wrapper runtime + Auto merge=false → no main merge, no ScheduleWakeup, wrapper drives next iteration
+[2026-05-17 wake-8] E8 execution: runtime/lesson_parser.py (LessonProposal dataclass + parse_lesson_markdown line-by-line state machine + parse_lessons_dir glob + proposals_yaml_path slug sanitiser + atomic save_proposals_yaml + load_proposals_yaml round-trip + apply_proposal w/ pydantic validate-before-write + policy_proposal_applied audit emit + apply_proposals_batch collects errors); cli/main.py policy-apply subcommand (typer.confirm prompt OR --auto-apply); 30 new tests
+[2026-05-17 wake-8] E8 verification: pytest 968 PASS (938 + 30 = 968 ✓ matches acceptance); ruff clean on lesson_parser.py + cli/main.py + test_e8; mypy --strict clean on lesson_parser.py + cli/main.py
+[2026-05-17 wake-8] E8 committed 2240e72 (3 files, +1170 / -0); E8 → Completed, E9 → Current; loop_wrapper runtime + Auto merge=false → no main merge, no ScheduleWakeup, wrapper drives next iteration to E9 (FINAL)
+
+## Final Report (populated on last session completion)
+
+(empty — E9 still ahead)
