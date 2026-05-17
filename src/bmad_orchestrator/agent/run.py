@@ -851,11 +851,16 @@ async def _run_real_pilot(
                     continue
 
             wt = worktree_root / f"wt-{story['id']}"
-            wt.mkdir(exist_ok=True)
+            branch_name = f"feature/{story['id']}"
+            await _ensure_git_worktree(
+                target_project=settings.target_project,
+                worktree=wt,
+                branch=branch_name,
+            )
             handle = await runtime_spawn_worker(
                 worktree=str(wt),
                 story_id=story["id"],
-                branch=f"feature/{story['id']}",
+                branch=branch_name,
                 mock=False,
                 sandbox_network="full",
             )
@@ -974,6 +979,76 @@ def _persist_project_memory_snapshot(
         }
     )
     return save_project_memory(fresh, orchestrator_home=orchestrator_home)
+
+
+async def _ensure_git_worktree(
+    *,
+    target_project: Path,
+    worktree: Path,
+    branch: str,
+) -> None:
+    """Create (or reuse) a git worktree at ``worktree`` based on ``branch``.
+
+    First real-mode primitive — без него worker'ы спавнились в пустых
+    папках и не имели доступа ни к story file, ни к source code,
+    ни к BMad artifacts. Реализация:
+
+    * Если ``worktree/.git`` уже есть → ничего не делаем (reuse).
+    * Иначе: если ``branch`` существует в target → ``git worktree add wt branch``.
+    * Иначе: ``git worktree add -b branch wt HEAD`` (новая ветка от HEAD).
+
+    Ошибки логируются и поднимаются как RuntimeError — pilot должен
+    halt'нуться явно, а не молча запускать worker в пустой папке.
+    """
+    if (worktree / ".git").exists():
+        log.info(
+            "git_worktree_reused",
+            worktree=str(worktree),
+            branch=branch,
+        )
+        return
+
+    # If a plain dir exists from a previous failed spawn — leave it; git
+    # worktree add will fail on non-empty paths, which is the right loud
+    # signal. Operator clears the dir manually.
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check if branch already exists. ``git rev-parse`` exits 0 if yes.
+    rev_proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(target_project), "rev-parse", "--verify", branch,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await rev_proc.wait()
+    branch_exists = rev_proc.returncode == 0
+
+    if branch_exists:
+        args = ["git", "-C", str(target_project), "worktree", "add",
+                str(worktree), branch]
+    else:
+        args = ["git", "-C", str(target_project), "worktree", "add",
+                "-b", branch, str(worktree), "HEAD"]
+
+    add_proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await add_proc.communicate()
+    if add_proc.returncode != 0:
+        msg = (
+            f"git worktree add failed: rc={add_proc.returncode} "
+            f"stderr={stderr.decode(errors='replace').strip()!r}"
+        )
+        log.error("git_worktree_add_failed", error=msg, branch=branch,
+                  worktree=str(worktree))
+        raise RuntimeError(msg)
+    log.info(
+        "git_worktree_created",
+        worktree=str(worktree),
+        branch=branch,
+        new_branch=not branch_exists,
+    )
 
 
 async def _tail_and_emit_completion(
