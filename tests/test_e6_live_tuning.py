@@ -382,9 +382,11 @@ def test_e6_atomic_write_cleans_tempfile_on_replace_error(
     # Pre-existing target preserved.
     raw = yaml.safe_load(target.read_text(encoding="utf-8"))
     assert raw == {"p0_threshold": 0.5}
-    # Temp files cleaned up.
+    # Temp files cleaned up (sidecar flock lockfile is expected — F3 P1-4).
     leftovers = [
-        p.name for p in tmp_path.iterdir() if p.name != target.name
+        p.name
+        for p in tmp_path.iterdir()
+        if p.name != target.name and p.name != f".{target.name}.lock"
     ]
     assert leftovers == []
 

@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
 from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard
 from bmad_orchestrator.agent.safety.hooks import audit_tool_output, security_check_hook
+from bmad_orchestrator.agent.skills import SkillError
 from bmad_orchestrator.agent.skills import dispatch as dispatch_skills
 from bmad_orchestrator.agent.skills import load_body as load_skill_body
 from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
@@ -796,7 +797,7 @@ async def _run_real_pilot(
 
         # Per-batch budget aggregate — sum of realised story costs (W3) with a
         # fallback to the adaptive reserve when no real cost has landed yet.
-        recent_costs = list(budget._recent_story_costs)
+        recent_costs = list(budget.recent_story_costs())
         batch_spent = (
             float(sum(recent_costs))
             if recent_costs
@@ -863,7 +864,7 @@ def _persist_project_memory_snapshot(
     from statistics import median as _median
 
     memory = load_project_memory(project, orchestrator_home=orchestrator_home)
-    story_costs = [float(c) for c in budget._recent_story_costs]
+    story_costs = [float(c) for c in budget.recent_story_costs()]
     p0_window = list(budget.recent_p0_coverages())
     tc_window = list(budget.recent_test_coverages())
     it_window = list(budget.recent_review_iterations())
@@ -1191,7 +1192,7 @@ async def _dispatch_intent_router(
 
     try:
         body = load_skill_body("intent-router")
-    except Exception as exc:  #skill registry malformed → loud stub
+    except (SkillError, OSError) as exc:  # skill registry malformed → loud stub
         log.error("intent_router_skill_load_failed", error=str(exc))
         await _stub_human_response(
             bus, chat_id=chat_id, corr_id=corr_id, text=text, reason="skill_load_failed"
@@ -1221,7 +1222,19 @@ async def _dispatch_intent_router(
             tools=tools,
             messages=messages,
         )
-    except Exception as exc:  #network / API errors → stub
+    except (TimeoutError, ConnectionError, OSError) as exc:  # network/transport → stub
+        log.error(
+            "intent_router_transport_error",
+            error_type=type(exc).__name__,
+            error=str(exc)[:200],
+            chat_id=chat_id,
+            corr_id=corr_id,
+        )
+        await _stub_human_response(
+            bus, chat_id=chat_id, corr_id=corr_id, text=text, reason="transport_error"
+        )
+        return
+    except Exception as exc:  # anthropic.APIError + unexpected → stub
         log.error(
             "intent_router_api_error",
             error_type=type(exc).__name__,
@@ -1287,7 +1300,7 @@ async def _dispatch_intent_router(
                 continue
             try:
                 result = await handler_tool.handler(tool_input)
-            except Exception as exc:  #tool failure → loud, but emit response
+            except (RuntimeError, ValueError, TypeError, OSError, KeyError) as exc:  # tool failure → loud, but emit response
                 log.error(
                     "intent_router_tool_dispatch_error",
                     tool=tool_name,
@@ -1859,7 +1872,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         handle = await _spawn_code_review_worker(
             worktree=worktree, story_id=story_id, wave=wave
         )
-    except Exception as exc:  # spawn / sandbox failure → escalate
+    except (OSError, RuntimeError) as exc:  # spawn / sandbox failure → escalate
         log.exception(
             "code_review_spawn_failed", story_id=story_id, worktree=worktree
         )
@@ -2052,7 +2065,7 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
             integration_branch=integration_branch,
             feature_branch=feature_branch,
         )
-    except Exception as exc:
+    except Exception as exc:  # git library errors (GitCommandError) + subprocess
         log.exception(
             "merge_to_integration_failed",
             story_id=story_id,
@@ -2086,7 +2099,7 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
             cleanup_worktree(
                 Path(worktree), root=cfg.target_project / ".worktrees"
             )
-        except Exception as exc:  # cleanup failure must not block the merge
+        except OSError as exc:  # cleanup failure must not block the merge
             log.warning(
                 "worktree_cleanup_failed",
                 story_id=story_id,

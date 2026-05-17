@@ -33,6 +33,7 @@ human can reconstruct the prior state without parsing the lesson file.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
@@ -288,27 +289,37 @@ def _serialise_proposal(p: LessonProposal) -> dict[str, Any]:
 
 
 def _atomic_yaml_write(path: Path, payload: Any) -> None:
-    """Tempfile + fsync + os.replace (same pattern as live_tuning)."""
+    """Tempfile + fsync + os.replace (same pattern as live_tuning).
+
+    Cross-process safety: an advisory ``fcntl.flock(LOCK_EX)`` on a
+    per-target sidecar lockfile (``<parent>/.<name>.lock``) serialises
+    concurrent writers (orchestrator + CLI ``policy-apply`` /
+    ``policy-rollback``) so the last writer wins cleanly instead of
+    interleaving tempfile renames.
+    """
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
     serialised = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        prefix=path.name + ".", suffix=".tmp", dir=str(parent)
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-            fh.write(serialised)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, path)
-    except Exception:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
+    lock_path = parent / f".{path.name}.lock"
+    with open(lock_path, "w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=path.name + ".", suffix=".tmp", dir=str(parent)
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                fh.write(serialised)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            raise
 
 
 def save_proposals_yaml(

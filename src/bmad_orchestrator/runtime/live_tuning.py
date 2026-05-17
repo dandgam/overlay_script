@@ -28,6 +28,7 @@ the threshold stays at its current value and no escalation is emitted.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import tempfile
 from dataclasses import dataclass
@@ -174,23 +175,26 @@ def atomic_write_gates_yaml(gates: CodeReviewGates, path: Path) -> None:
     }
     serialised = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        prefix=path.name + ".", suffix=".tmp", dir=str(parent)
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-            fh.write(serialised)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, path)
-    except Exception:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
+    lock_path = parent / f".{path.name}.lock"
+    with open(lock_path, "w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=path.name + ".", suffix=".tmp", dir=str(parent)
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                fh.write(serialised)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            raise
 
 
 __all__ = [
