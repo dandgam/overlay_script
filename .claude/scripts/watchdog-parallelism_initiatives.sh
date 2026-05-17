@@ -9,7 +9,7 @@ MAX_COMMIT_STALE=2100    # 35 min commit staleness
 HARD_CEILING_AGE=5400    # 90 min unconditional kill
 INTERVAL=60
 
-cd "$(dirname "spec/spec_parallelism_initiatives.md")/../.." || exit 1
+cd "$(dirname "$0")/../.." || exit 1
 
 while true; do
   PID=$(pgrep -f "claude -p /auto-loop-spec spec/spec_parallelism_initiatives.md" | head -1)

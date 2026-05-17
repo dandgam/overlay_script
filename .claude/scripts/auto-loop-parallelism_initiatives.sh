@@ -9,7 +9,7 @@
 # Manual stop: tmux kill-session -t autoloop-parallelism_initiatives
 
 set -u
-cd "$(dirname "spec/spec_parallelism_initiatives.md")/../.." || exit 1
+cd "$(dirname "$0")/../.." || exit 1
 
 TRACKER=".claude/initiative-tracker-parallelism_initiatives.md"
 LOG=".claude/auto-loop-parallelism_initiatives.log"
