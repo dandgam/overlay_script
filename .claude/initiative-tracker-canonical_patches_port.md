@@ -37,6 +37,9 @@
 ## Sessions
 
 ### Pending
+(none — P6 is now Current)
+
+### Current
 
 - **id:** P6
   **title:** Integration + e2e + docs (FINAL)
@@ -46,6 +49,7 @@
   **destructive_actions:** []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
+  **retry_count:** 0
   **acceptance:**
     - E2E test: synthetic story → spawn worker → stage5_commit_completeness → build_check → deletion_safety → code_review → security_review (если security-critical) → merge_to_integration. Asserts all gate emit + correct order.
     - `docs/canonical-patches-architecture.md`:
@@ -54,36 +58,33 @@
       - Subscriber registration order rationale
       - Trigger configuration examples
     - ~10 final integration tests
-    - `pytest tests/ -q` — 1154 PASS
+    - `pytest tests/ -q` — 1154 PASS (или ≥1159 учитывая текущие 1149)
     - ruff/mypy clean
     - Manual merge через human review (Auto merge=false)
 
-### Current
+### Completed
 
 - **id:** P5
   **title:** Patch X (security-review conditional 4-hunter) (CHECKPOINT)
-  **surface:** backend-python
-  **spec_section:** 64-73
-  **depends_on:** [P3]
-  **destructive_actions:** []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **retry_count:** 0
-  **acceptance:**
-    - New subscriber `security_review_subscriber(event, bus)`:
-      - On WORKER_COMPLETED (success) AND code_review verdict approve
-      - Check triggers from `skills/policy/security-review.yaml`:
-        - frontmatter `security_critical: true`
-        - epic in `[3, 4, 5, 7, 9, 10]` (configurable)
-        - keyword match in story spec OR diff: auth, jwt, rls, dpa, crypto, billing, pii, audit, hmac, argon, session
-      - Spawn `claude -p /bmad-security-review` 4-hunter parallel (Injection/Auth-Bypass/Crypto/Data-Leak)
-      - Parse verdict: APPROVE / MERGE-WITH-FIXES / BLOCK
-      - BLOCK → halt + emit HUMAN_QUERY с findings
-      - APPROVE / MERGE-WITH-FIXES → emit SECURITY_REVIEW_PASSED, merge_to_integration_subscriber fires
-    - 25 regression tests
-    - `pytest tests/ -q` — 1148 PASS (1123 baseline + 25 new)
-
-### Completed
+  **completed:** 2026-05-18 04:30 UTC
+  **commit:** b357fda
+  **files_changed:** 8 (2 new src + 1 new policy + 1 new test file + 4 modified)
+  **tests_passed:** 1149 PASS (1123 baseline + 25 new в test_canonical_patches_p5.py + 1 inventory check; target был 1148 — overshot на +1 inventory test)
+  **decisions_made:**
+    - New module `runtime/security_review.py` (~370 LOC) — single source of truth для policy schema, trigger detection (frontmatter / epic / keyword), verdict parsing, и subscriber. Policy yaml `skills/policy/security-review.yaml` следует тому же PolicyConfig pattern (loader через `skills_repo.load_policy`).
+    - Halt contract идентичен P1-P3: BLOCK/ERROR от security-review mutates `code_review_verdict.payload` (verdict → 'reject' + appended `gate_reasons`) и emit HUMAN_QUERY. Существующий `merge_to_integration_subscriber` уже gates на `verdict == 'approve'` — no edits needed downstream.
+    - **Новый EventType** `SECURITY_REVIEW_PASSED` добавлен — но только для audit trail (downstream merge gate всё равно gates на mutated CODE_REVIEW_VERDICT.payload). Это единственный новый EventType среди P1-P5 — обоснован тем, что approve-path должен иметь signal для observability (а не silent passthrough).
+    - Triggers OR-combined, first-match-wins: frontmatter `security_critical: true` → epic ∈ {3,4,5,7,9,10} → keyword scan в spec text (story_md) → keyword scan в git diff. Frontmatter precedence важна — operator override > heuristic.
+    - Frontmatter parser reused — `parse_story_md` из `agent/tools/_common.py` (BMad bullet-list format `- **key:** value`, НЕ YAML `---`). Story location: `_bmad/stories/<id>.md` + legacy `_bmad-output/planning-artifacts/stories/<id>.md`.
+    - `parse_security_verdict_from_event` принимает два shape'а: explicit JSON `{"verdict": "BLOCK", ...}` (case-insensitive, normalizes `-`/`_` → space) и text body с `Verdict: APPROVE|MERGE WITH FIXES|BLOCK` regex. ERROR verdict зарезервирован для runner internal errors (timeout / spawn failure) — также halts по тому же mutation path.
+    - Runner DI pattern: `SecurityReviewRunner = Callable[[Path, str, str], Awaitable[tuple[str, str]]]` — production `_real_security_review_runner` в run.py spawns `claude -p /bmad-security-review --auto` через `runtime_spawn_worker`, агрегирует JSONL events через `tail_jsonl_events`. Tests inject stub runner — нет process spawn.
+    - Production worker pivots `BMAD_CURRENT_WAVE` env на `<wave>__security_<story_id>` чтобы 4-hunter sub-worker логи не путались с main worker в одном wave.
+    - Subscriber listens на CODE_REVIEW_VERDICT (НЕ на WORKER_COMPLETED) — security review семантически следует за code review approval. Если verdict != approve → skip полностью (другие gates уже halted).
+    - Bus order finalized 6→7: stage5_completeness (0) → build_check (1) → deletion_safety (2) → code_review (3) → **security_review (4)** → merge_to_integration (5) → quarterly_sweep (6). Test assertions updated в test_canonical_patches_p1.py (6→7) + test_embed_phase45_fixes_f1.py (6→7) + test_s3_runtime.py (EventType count 16→17).
+    - Ruff S105 false positives на `token == "APPROVE"` etc — переименовал переменную `token` → `word` (это verdict word, not auth credential). Никаких `# noqa` не используем.
+    - 25 + 1 inventory tests: policy loading (3) / epic extraction (3) / keyword scan (2) / trigger detection (5) / verdict parsing (4) / subscriber behavior (8) + 1 inventory check. Subscriber tests используют `_make_runner(verdict, findings)` stub injection и `_make_worktree_with_story` git fixture для frontmatter + diff scenarios.
+    - mypy --strict clean на security_review.py и run.py.
+  **deferred_items:** []
 
 - **id:** P4
   **title:** Patch W (File List allow-list scope check)
@@ -220,6 +221,18 @@
   **rationale:** Forcing every existing P1/P2/P3 test to provide a `target_project` would be 30+ test edits for zero functional gain — the gate already gracefully degrades for other unconfigured fields. Production paths always have target_project; tests that exercise the wired flow build their own story directory and pass the wave/target. The "no project, no scope check" branch is documented in the run.py comment and the file_list_parser module-level docstring.
   **impact:** None of the P1/P2/P3 tests had to change. Future patches that build on Patch W (P5's security_review reading File List for keyword scan, P6's e2e covering scope_violation) must pass `target_project` explicitly.
 
+- **date:** 2026-05-18 04:30 UTC
+  **session:** P5
+  **decision:** security_review_subscriber listens на CODE_REVIEW_VERDICT (не WORKER_COMPLETED) и halts через payload mutation того же CODE_REVIEW_VERDICT event'а, плюс эмиттит **новый** EventType SECURITY_REVIEW_PASSED для audit (только в approve-path).
+  **rationale:** Security review семантически следует за code review approval, не за worker complete — это позволяет skip полностью когда code review уже rejected. Halt через payload mutation keeps consistent contract с P1-P3 (merge_to_integration уже gates на verdict='approve'). Но silent passthrough в approve-path плох для observability — поэтому единственный новый EventType среди P1-P5: SECURITY_REVIEW_PASSED — есть downstream signal что security review реально run + verdict APPROVE/MERGE-WITH-FIXES.
+  **impact:** Bus order finalized at 7 subscribers (stage5 → build_check → deletion_safety → code_review → security_review → merge → quarterly_sweep). Final report tests в P6 могут assert на SECURITY_REVIEW_PASSED для security-critical stories. EventType count 16 → 17 — test_s3_runtime.py updated.
+
+- **date:** 2026-05-18 04:30 UTC
+  **session:** P5
+  **decision:** Frontmatter precedence в trigger detection: `security_critical: true` overrides все остальные heuristics; epic ∈ critical-set → keyword scan в spec → keyword scan в diff (OR-combined, first-match-wins).
+  **rationale:** Operator override должен иметь высший приоритет — если автор story знает что story не security-critical (например, frontend-only без auth touch), может явно `security_critical: false` и пропустить scan. Дальше идут automatic heuristics: epic является самым дешёвым (один integer compare), keywords в spec — second cheapest (parse один файл), keywords в diff — самый дорогой (subprocess git diff). Порядок отражает cost.
+  **impact:** P6 e2e должен ковёрить все 4 trigger paths + override path. Operators могут добавить keywords в `skills/policy/security-review.yaml` без code change — особенно нужно для new domains (например, `gdpr` / `hipaa`).
+
 ## Journal
 
 [2026-05-18 bootstrap] bootstrap: tracker + backup + integration branch созданы, 6 sessions planned (P1-P6), runtime=loop_wrapper, delay=120s, auto_merge=false. Reference: Odyssey handoff doc + bmad-auto-dev-runner.sh.
@@ -231,6 +244,8 @@
 [2026-05-18 02:30 UTC] P3 completed → Completed; P4 promoted to Current (Patch W — File List allow-list для Patch Q/R). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
 [2026-05-18 03:30 UTC] P4 execution: Patch W ported. New `runtime/file_list_parser.py` (AllowList composition + parse_file_list tolerant to NEW/UPDATE buckets, mixed bullets, backticks, trailing notes). Added `measure_diff_per_file` + `partition_per_file` to diff_size_gate; renamed gate_verdict param `file_list_paths` → `out_of_scope_paths`; rewired `recover_pre_merge(allow_list=...)` to use `git add --` explicit pathspecs. Wired in run.py code_review_subscriber (Patch Q) + merge_to_integration_subscriber (Patch R). 15 new tests in tests/test_canonical_patches_p4.py; full suite 1123 PASS (exactly on plan, 1108 baseline + 15 new); ruff clean; mypy --strict clean on file_list_parser, diff_size_gate, commit_recovery, run.py. Commit 0d2f64a.
 [2026-05-18 03:30 UTC] P4 completed → Completed; P5 promoted to Current (Patch X — security-review conditional 4-hunter parallel). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
+[2026-05-18 04:30 UTC] P5 execution: Patch X (security_review conditional 4-hunter) ported. New `runtime/security_review.py` (~370 LOC) + `skills/policy/security-review.yaml`. New EventType SECURITY_REVIEW_PASSED (16→17). Subscriber registered at bus index 4 (between code_review и merge). 25 regression tests + 1 inventory check in tests/test_canonical_patches_p5.py; full suite 1149 PASS (1123 baseline + 26 новых; target был 1148 — overshot на +1 inventory test); ruff clean (S105 false positives fixed via variable rename token→word); mypy --strict clean. test_canonical_patches_p1, test_embed_phase45_fixes_f1 subscriber count 6→7; test_s3_runtime EventType count 16→17. Commit b357fda.
+[2026-05-18 04:30 UTC] P5 completed → Completed; P6 promoted to Current (Integration + e2e + docs FINAL session). Runtime=loop_wrapper — wrapper handles next session iteration; this invocation exits clean.
 
 ## Final Report (populated on last session completion)
 (empty — P6 will populate)
