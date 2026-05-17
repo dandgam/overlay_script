@@ -32,20 +32,6 @@
 
 ### Pending
 
-- **id:** S6
-  **title:** Initiative #2C — validation pilot Antares Story 3.1 (Nextcloud Docker template) auto-split
-  **surface:** backend-python
-  **spec_section:** Initiative #2 Task 2.5
-  **depends_on:** [S5]
-  **acceptance:**
-    - Story 3.1 split на ≥3 sub-stories
-    - Speedup ≥2× vs sequential baseline
-    - sprint-status 3.1=done
-  **safety_gates:**
-    - L1/L2/L3 standard
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-
 - **id:** S7
   **title:** Initiative #3A — project registry yaml + CLI scan/doctor/init/resume
   **surface:** backend-python
@@ -117,24 +103,46 @@
 
 ### Current
 
-- **id:** S5
-  **title:** Initiative #2B — sub-story execution + squash-merge back to parent
+- **id:** S6
+  **title:** Initiative #2C — validation pilot Antares Story 3.1 (Nextcloud Docker template) auto-split
   **surface:** backend-python
-  **spec_section:** Initiative #2 Task 2.3-2.4
-  **depends_on:** [S4]
+  **spec_section:** Initiative #2 Task 2.5
+  **depends_on:** [S5]
   **acceptance:**
-    - Integration test с mock sub-stories
-    - Squash-merge produces single parent commit
+    - Story 3.1 split на ≥3 sub-stories
+    - Speedup ≥2× vs sequential baseline
+    - sprint-status 3.1=done
   **safety_gates:**
     - L1/L2/L3 standard
-  **checkpoint:** false
+  **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** (pending first wake on S5)
+  **started:** (pending first wake on S6)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S5
+  **title:** Initiative #2B — sub-story execution + squash-merge back to parent
+  **completed:** 2026-05-18 UTC
+  **commit:** 1fc6150
+  **files_changed:** 2 (src/bmad_orchestrator/runtime/sub_story_executor.py NEW, tests/test_initiative2b_substory_executor.py NEW)
+  **tests_passed:** 1287/1287 PASS (was 1269; +18 new in test_initiative2b_substory_executor.py); ruff 0; mypy 0 new on edited files
+  **decisions_made:**
+    - Module placed at `runtime/sub_story_executor.py` (sibling of `runtime/worker_spawn.py` + `runtime/story_splitter.py` from S4). Same rationale as S4 — Python packages cannot contain `-`, and `agent/skills/dag-planner/` is a Claude SDK skill dir, not an importable Python package. Keeps the auto-split chain (decomposer → executor → squash) at canonical import paths under `runtime/`.
+    - Sub-stories run **sequentially in shared parent worktree** per spec §Task 2.3 (KISS). Parallelism stays at the *story* level (Initiative #1 worker pool); intra-story parallelism is an explicit out-of-scope item deferred to its own spec. Setup cost amortised (one `_ensure_git_worktree` for parent vs N for subs); sequential semantics mean each sub-story observes the previous sub-story's commits naturally; squash collapses N commits → 1 mirroring how the story was authored originally.
+    - `spawn_fn` / `wait_fn` are injection points (defaults call `runtime.worker_spawn.spawn_worker`). This decouples the executor from real-mode `claude -p` so tests can drive a synthetic worker that commits a per-sub file on behalf of the mock-mode WorkerHandle. Pattern mirrors how Initiative #1's `file_conflict.py` stays free of EventBus deps.
+    - `on_event(dict)` optional hook (one dict per phase: `sub_story_started`, `sub_story_completed`, `sub_story_squash_done`, `sub_story_squash_skipped`) keeps observability available without forcing an EventBus dependency. The actual JSONL wiring lands in S6 when the validation pilot wires the executor into `_run_real_pilot_body`.
+    - Silent-failure detection (exit 0 + zero commits → `failure_reason="silent_failure_zero_commits"`) reuses the principle from Phase 0 Task 0.2 (`_validate_worker_actually_worked`). Same invariant — a worker that exits 0 without committing is a halt-on-fail event, not a success. Halts the sequential loop unless `halt_on_failure=False` is explicitly passed.
+    - Squash via `git reset --soft <base>` + `git commit -m <msg>` rather than `git rebase -i --autosquash` or `git merge --squash` — soft reset keeps tree+index identical and produces exactly one commit on the same branch (vs merge-squash which requires a target branch). `--allow-empty` fallback added for the edge case where mock sub-stories produced no tree changes (CalledProcessError caught and retried with the flag).
+    - 0-commit and 1-commit squash fast paths return `skipped=True` rather than rewriting the message — a single commit IS the parent commit, no value in `git commit --amend` here; caller can rewrite if they need the parent-message format.
+    - SubStoryResult / SquashResult are `@dataclass(frozen=True)`. Matches Initiative #2A's SplitDecision pattern — append-only execution history is immutable, callers serialise via `dataclasses.asdict()`.
+    - Branch invariant check (`worktree on branch X, expected Y`) catches misconfiguration before the first worker spawns. A worktree on the wrong branch would silently land commits in the wrong place; better to fail loud at the executor boundary.
+  **deferred_items:**
+    - Wiring executor + squash into `_run_real_pilot_body` after auto-split decision lands. Cleanest call site: after `split_story` tool succeeds in Stage 3.6, `_run_real_pilot_body` calls `execute_sub_stories` on the parent worktree (instead of dispatching the parent story to the worker pool), then `squash_sub_stories` before Stage 6 code-review. Scope of S6 (Init #2C validation pilot — Antares Story 3.1 auto-split).
+    - EventBus subscription that consumes `on_event` dicts and emits typed `EventType.SUB_STORY_*` (sub_story_started / sub_story_completed / sub_story_squash_done). Pure mechanical translation; lands in S6 alongside the call-site wiring.
+    - End-to-end test against a real `claude -p` worker (no mock spawn_fn) requires the validation pilot infrastructure. Naturally exercised by S6 (Antares 3.1 Nextcloud Docker split into ≥3 subs).
 
 - **id:** S4
   **title:** Initiative #2A — should_split heuristic + story-splitter skill scaffold + LLM decomposition
@@ -312,6 +320,24 @@
   **rationale:** Spec §21.7 says malformed JSON → fallback `keep` + warning log. Burying that policy inside the validator hides the rationale from callers who want to log the precise error before downgrading. Validator surfaces 9 specific failure modes (with messages); caller decides whether to swallow → keep or escalate.
   **impact:** S5 sub-story executor wraps `validate_decomposition` in try/except and emits `decomposition_invalid` event with the error message before falling back to monolith. Future split-decisions cache key includes the error class for dedup.
 
+- **date:** 2026-05-18 UTC
+  **session:** S5
+  **decision:** sub-story executor at `runtime/sub_story_executor.py` (sibling of `runtime/story_splitter.py`), no EventBus dep
+  **rationale:** Same placement principle as S4 — `agent/skills/story-splitter/` is a Claude SDK skill dir, not an importable package. `runtime/` keeps the auto-split chain (decomposer in `story_splitter.py` → executor in `sub_story_executor.py`) at canonical import paths. Decoupling from EventBus via `on_event(dict)` callback keeps the module trivially testable + lets S6 do the actual JSONL wiring without retroactively touching this code.
+  **impact:** S6 (Init #2C validation pilot) wires the executor into `_run_real_pilot_body` after Stage 3.6 `split_story` succeeds: dispatch sub-stories on parent worktree via `execute_sub_stories`, then squash via `squash_sub_stories` before Stage 6 code-review. EventBus subscription that translates `on_event` dicts → typed `EventType.SUB_STORY_*` is a mechanical S6 task.
+
+- **date:** 2026-05-18 UTC
+  **session:** S5
+  **decision:** Sequential sub-stories in shared parent worktree (KISS, per spec §Task 2.3)
+  **rationale:** Initiative #1 already gives parallelism at the *story* level. Adding intra-story parallelism doubles the file-conflict bookkeeping surface (which `agent/file_conflict.py` solves at the story level) and re-fragments the parent commit before squash. Sequential keeps each sub-story observing the previous sub-story's commits — closest match to how the story would have been authored monolithically. Out-of-scope item explicitly carved out in Scope Freeze.
+  **impact:** S5 ships sequential-only. Intra-story parallelism = separate spec. Speedup ≥2× target in S6 acceptance is satisfied by Initiative #1 + Init #2's reduced worker context (smaller sub-stories → fewer retries) — not by sub-story-level fan-out.
+
+- **date:** 2026-05-18 UTC
+  **session:** S5
+  **decision:** Squash via `git reset --soft <base>` + `git commit`, not `git merge --squash`
+  **rationale:** Soft-reset works in-place on the current branch — keeps tree and index identical, produces exactly one commit at the same branch head. `git merge --squash` requires a separate source branch, which sub-stories don't have (they share the parent feature branch). Soft-reset is also reversible mid-debug by `git reflog` lookup, whereas a merge-squash forfeits the original chain. `--allow-empty` fallback covers mock-only tests where sub-stories produce no tree diff.
+  **impact:** Squash collapses N→1 commit on the parent feature branch in-place; pre-squash commits remain accessible via reflog for ~90 days for postmortem. No new branch namespace introduced.
+
 ## Journal
 
 ```
@@ -326,6 +352,9 @@
 [2026-05-18 UTC] S4 plan: 0 host-destructive (pure Python additions in runtime/story_splitter.py + tests/test_initiative2a_*.py + refactor of agent/tools/splitter.py + SKILL.md doc). pre-action-snapshot captured 3/4 components (env/systemd/git HEAD; no DB).
 [2026-05-18 UTC] S4 execution: Task 2.1 evaluate_split / should_split / classify_layers / count_acceptance_criteria pure-python helpers (5 thresholds: AC≥7 / minutes≥240 / tokens≥5k / files≥10 / layers≥3, SplitDecision dataclass + as_dict()). Task 2.2 validate_decomposition + DECOMPOSITION_PROMPT (9 failure modes incl. cycle check; raises DecompositionError so caller picks fallback rationale). Refactored agent/tools/splitter.py::check_should_split to delegate. Fixture 1-1-tenant-signup.md tokens 40000→1000 (was 8× new threshold; preserves "small_story" intent). 38 new tests in test_initiative2a_story_splitter.py; 1269/1269 PASS, ruff 0, mypy 0 new on edited files. Commit 0220844 on integration/parallelism_initiatives. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
 [2026-05-18 UTC] S4 completed, S5 promoted to Current (surface=backend-python, Init #2B sub-story execution + squash-merge).
+[2026-05-18 UTC] S5 plan: 0 host-destructive (pure Python addition runtime/sub_story_executor.py + test_initiative2b_substory_executor.py). Acceptance literally "integration test с mock sub-stories" + "squash-merge produces single parent commit" — no wiring into _run_real_pilot_body (that lands in S6 alongside the Antares 3.1 validation pilot).
+[2026-05-18 UTC] S5 execution: Task 2.3 execute_sub_stories (sequential dispatch into shared parent worktree, spawn_fn/wait_fn injection, halt-on-failure + silent-failure detection, branch + git-repo invariant checks, on_event observability hook). Task 2.4 squash_sub_stories (git reset --soft + recommit; 0/1-commit fast paths skipped=True; --allow-empty fallback; sub_ids listed in body for Stage 6 review scope). 18 new tests in test_initiative2b_substory_executor.py (happy path + halt-on-failure + custom wait_fn + missing id / branch mismatch / no-git-repo errors + 0/1/N-commit squash + end-to-end execute+squash + frozen dataclasses). Commit 1fc6150 on integration/parallelism_initiatives. 1287/1287 PASS (was 1269); ruff 0; mypy 0 new on edited files. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
+[2026-05-18 UTC] S5 completed, S6 promoted to Current (surface=backend-python, Init #2C validation pilot Antares Story 3.1 auto-split, checkpoint=true).
 ```
 
 ## Final Report (populated on last session completion)
