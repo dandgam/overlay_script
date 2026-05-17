@@ -36,6 +36,10 @@ from bmad_orchestrator.agent.tools._common import (
     worker_jsonl_path,
 )
 from bmad_orchestrator.config import DEFAULT_BUDGET_CAP_USD, DEFAULT_MODEL
+from bmad_orchestrator.runtime.embedded_skills import (
+    ApplyResult,
+    apply_embedded_skills,
+)
 from bmad_orchestrator.runtime.sandbox import (
     NetworkPolicy,
     NoSandbox,
@@ -184,15 +188,38 @@ async def spawn_worker(
     env: dict[str, str] | None = None,
     use_sandbox: bool = True,
     sandbox_network: NetworkPolicy = "none",
+    embedded_skills_root: Path | str | None = None,
+    allowed_worktree_root: Path | str | None = None,
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 
     Returns immediately; subprocess лог-стрим продолжается в фоне как создаваемые
     asyncio.Tasks. Caller получает PID + JSONL path для observation.
+
+    If ``embedded_skills_root`` is provided (path to orchestrator's ``skills/``
+    directory containing ``upstream/`` + optional ``customize/``), the helper
+    :func:`apply_embedded_skills` copies all 14 canonical phase 4+5 skills into
+    ``<worktree>/.claude/skills/`` before the subprocess launches. The worker
+    then resolves skills locally without touching the target project's main
+    ``.claude/skills/``. ``allowed_worktree_root`` (required when the previous
+    parameter is set) gates the copy to worktrees strictly inside the configured
+    root — typically ``<target>/.worktrees``.
     """
     wt_path = Path(worktree)
     if not wt_path.exists():
         raise FileNotFoundError(f"worktree path missing: {worktree}")
+
+    skills_result: ApplyResult | None = None
+    if embedded_skills_root is not None:
+        if allowed_worktree_root is None:
+            raise ValueError(
+                "allowed_worktree_root must be provided when embedded_skills_root is set"
+            )
+        skills_result = apply_embedded_skills(
+            worktree=wt_path,
+            skills_resolution_root=embedded_skills_root,
+            allowed_worktree_root=allowed_worktree_root,
+        )
 
     bin_path = _resolve_claude_bin()
     auto_mock = bin_path is None
@@ -211,6 +238,21 @@ async def spawn_worker(
 
     jsonl_path = worker_jsonl_path(worktree)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if skills_result is not None:
+        _emit(
+            jsonl_path,
+            {
+                "event_type": "embedded_skills_applied",
+                "worktree": worktree,
+                "story_id": story_id,
+                "skills_applied": skills_result.skills_applied,
+                "skills_skipped_disabled": skills_result.skills_skipped_disabled,
+                "files_written": skills_result.files_written,
+                "overlays_applied": skills_result.overlays_applied,
+                "target_root": str(skills_result.target_root) if skills_result.target_root else None,
+            },
+        )
 
     if use_mock:
         # Synthetic spawn + completion — useful for pipeline E2E без CLI.

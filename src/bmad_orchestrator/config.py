@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     orchestrator_home: Path = Path("/home/server/bmad-orchestrator")
     state_db: Path = Path("./state.db")
 
+    # Embedded skills overlay root (spec_embed_phase45_with_selflearning §4 E3).
+    # Workers receive a copy of `<skills_resolution_root>/upstream/` overlaid by
+    # `customize/` in their worktree's `.claude/skills/`. Default = orchestrator's
+    # `skills/` dir; override via ORCHESTRATOR_SKILLS_RESOLUTION_ROOT for tests.
+    skills_resolution_root: Path = Path("/home/server/bmad-orchestrator/skills")
+
     # BMad-canonical artifact location (NOT _bmad/planning-artifacts — that was wrong)
     # _bmad/         = framework itself
     # _bmad-output/  = generated artifacts (planning + implementation)
