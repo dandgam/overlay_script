@@ -165,12 +165,14 @@ def _project_context_sources(
     epics = _first_existing(
         project_root / "_bmad" / "planning-artifacts" / "epics.md",
         project_root / "_bmad-output" / "planning-artifacts" / "epics.md",
+        project_root / "_bmad" / "output" / "planning" / "epics.md",
     )
 
     sprint_status = _first_existing(
         project_root / "_bmad" / "implementation-artifacts" / "sprint-status.yaml",
         project_root / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml",
         project_root / "_bmad" / "planning-artifacts" / "sprint-status.yaml",
+        project_root / "_bmad" / "output" / "planning" / "stories" / "sprint-status.yaml",
     )
 
     return [

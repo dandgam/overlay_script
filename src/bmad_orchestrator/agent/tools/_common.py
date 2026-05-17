@@ -57,15 +57,16 @@ def _first_existing_file(*candidates: Path) -> Path:
 def artifacts_dir(settings: Settings | None = None) -> Path:
     """Planning-artifacts directory.
 
-    Prefers upstream BMad ``_bmad/planning-artifacts/``; falls back to
-    legacy orchestrator ``_bmad-output/planning-artifacts/`` when only
-    the latter exists. Kept under the historic name for back-compat with
-    existing callers; semantics = «planning artefacts directory».
+    Probes (in priority order):
+      1. ``_bmad/planning-artifacts/`` — legacy upstream BMad
+      2. ``<artifacts_dir_name>/planning-artifacts/`` — legacy orchestrator scaffold
+      3. ``_bmad/output/planning/`` — BMad v6+ layout (Antares-style)
     """
     s = settings or get_settings()
     return _first_existing_dir(
         s.target_project / "_bmad" / "planning-artifacts",
         s.target_project / s.artifacts_dir_name / "planning-artifacts",
+        s.target_project / "_bmad" / "output" / "planning",
     )
 
 
@@ -79,12 +80,18 @@ def implementation_dir(settings: Settings | None = None) -> Path:
 
 
 def stories_dir(settings: Settings | None = None) -> Path:
-    """Stories directory. Upstream BMad keeps stories in a flat ``_bmad/stories/``
-    folder; legacy orchestrator nested them under planning-artifacts."""
+    """Stories directory.
+
+    Probes (in priority order):
+      1. ``_bmad/stories/`` — upstream BMad flat layout
+      2. ``<artifacts_dir_name>/planning-artifacts/stories/`` — legacy
+      3. ``_bmad/output/planning/stories/`` — BMad v6+ layout (Antares-style)
+    """
     s = settings or get_settings()
     return _first_existing_dir(
         s.target_project / "_bmad" / "stories",
         s.target_project / s.artifacts_dir_name / "planning-artifacts" / "stories",
+        s.target_project / "_bmad" / "output" / "planning" / "stories",
     )
 
 
@@ -148,6 +155,8 @@ def sprint_status_path(settings: Settings | None = None) -> Path:
         s.target_project / s.artifacts_dir_name / "planning-artifacts" / "sprint-status.yaml",
         # Legacy in-orchestrator scaffold path — kept last for back-compat.
         s.target_project / "_bmad" / "planning-artifacts" / "sprint-status.yaml",
+        # BMad v6+ layout (Antares-style) — sprint-status lives alongside stories.
+        s.target_project / "_bmad" / "output" / "planning" / "stories" / "sprint-status.yaml",
     )
 
 
