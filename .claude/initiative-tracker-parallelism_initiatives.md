@@ -32,20 +32,6 @@
 
 ### Pending
 
-- **id:** S3
-  **title:** Initiative #1B — cgroup limits + per-worker HOME isolation + parallel validation pilot
-  **surface:** infra-with-recovery
-  **spec_section:** Initiative #1 Task 1.3-1.5
-  **depends_on:** [S2]
-  **acceptance:**
-    - cgroup `MemoryMax=8G CPUQuota=200%` applied per worker
-    - Per-worker HOME isolated (no shared ~/.claude/ writes)
-    - Antares stories 1.3+1.5 параллельно ~30 мин wall-clock
-  **safety_gates:**
-    - L1: sandbox modifications need rollback script; L2: validation pilot must merge cleanly
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-
 - **id:** S4
   **title:** Initiative #2A — should_split heuristic + story-splitter skill scaffold + LLM decomposition
   **surface:** backend-python
@@ -154,30 +140,43 @@
   **safety_gates:**
     - L1: never `--no-verify`, never force-push
     - L2/L3 standard
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
 
 ### Current
 
-- **id:** S2
-  **title:** Initiative #1A — CLI --parallel flag + presets + file-conflict pre-check
-  **surface:** backend-python
-  **spec_section:** Initiative #1 Task 1.1-1.2
-  **depends_on:** [S1]
+- **id:** S3
+  **title:** Initiative #1B — cgroup limits + per-worker HOME isolation + parallel validation pilot
+  **surface:** infra-with-recovery
+  **spec_section:** Initiative #1 Task 1.3-1.5
+  **depends_on:** [S2]
   **acceptance:**
-    - `--parallel 3` спавнит 3 worker'а параллельно
-    - File-conflict detector splits batch при перекрытии touches_files
-    - Tests pass
+    - cgroup `MemoryMax=8G CPUQuota=200%` applied per worker
+    - Per-worker HOME isolated (no shared ~/.claude/ writes)
+    - Antares stories 1.3+1.5 параллельно ~30 мин wall-clock
   **safety_gates:**
-    - L1: no destructive ops; L2: ruff+mypy must pass; L3: 1184+ tests
-  **checkpoint:** false
+    - L1: sandbox modifications need rollback script; L2: validation pilot must merge cleanly
+  **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** (pending first wake on S2)
-  **workflow:** workflows/backend-python.md
+  **started:** (pending first wake on S3)
+  **workflow:** workflows/infra-with-recovery.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S2
+  **title:** Initiative #1A — CLI --parallel flag + presets + file-conflict pre-check
+  **completed:** 2026-05-17 22:47 UTC
+  **commit:** 8200f1c
+  **files_changed:** 4 (src/bmad_orchestrator/agent/file_conflict.py NEW, src/bmad_orchestrator/agent/run.py, src/bmad_orchestrator/cli/main.py, tests/test_initiative1_parallel.py NEW)
+  **tests_passed:** 1213/1213 PASS (was 1184; +29 new); ruff PASS; mypy clean on edited files (pre-existing FS2 warning in main_merge_token.py unrelated)
+  **decisions_made:**
+    - `--parallel` flag is preset-only ({1,3,5,10}); `--max-parallel` retained as advanced/escape hatch — `--parallel` wins when both given. Rationale: each preset bakes assumptions about RAM/CPU caps (Task 1.3 cgroup work); locking presets prevents silent over-subscription on busy hosts.
+    - `agent/file_conflict.py` placed in `agent/` (not `runtime/`) per spec section path. Decoupled from `agent/tools/dag.py` (LLM tool) and `runtime/dag_planner.py` (active-set filter at find_ready) — those operate at planning stage; this one closes the intra-batch race that `planner.find_ready` cannot see without an `in_flight_touches` reservation (out of S2 scope).
+    - `split_batch` returns `(parallel, deferred)` first-come-first-served — first owner of each touches_files entry keeps the parallel slot; later collisions land in deferred. Deferred stories naturally re-surface in the next round (they are not in `spawned`, and conflicting peer has finished by `asyncio.gather`'s end).
+    - `touches_shared` treated identically to `touches_files` for conflict detection (both are merge-conflict risks). Matches `runtime/dag_planner.py::detect_conflicts` behavior.
+    - Daemon spawn line in cli/main.py keeps only `--max-parallel str(max_parallel)` — `--parallel` collapsed to integer before daemonisation so child reproduces slot count without re-validating preset (avoids surprise BadParameter on env-driven scripts).
+  **deferred_items:**
+    - Wiring `planner.reserve()` / `planner.release()` around batch spawn (would let `find_ready` skip in-flight-touching candidates across rounds) — left as a follow-up; deferred-list mechanism already handles within-batch conflicts and intra-round mutex is the next concern.
 
 - **id:** S1
   **title:** Phase 0 — pilot followups (zombie cleanup, post-worker validation, cost honesty, pre-spawn freshness)
@@ -256,12 +255,20 @@
   **rationale:** Attempted pilot 1.2 from supervised shell session failed with `RuntimeError: --story '1-2-docker-compose-dev-stack' not found in target project's stories dir`. Antares только имеет 1.1 + 4.8 story files. Создавать 1.2 файл через Stage 4 чтобы потом запустить полный pilot на нём = busy work, не valid validation. Pipeline END-TO-END уже validated в pilot v7 Story 1.1 (Stage 1-5 confirmed, manual close demonstrated integrity). Phase 0 code fixes 0.1-0.4 покрыты 22 новыми unit-тестами + полным 1184-test suite. Natural validation pipeline exercise resumes в S2-S11 (каждая сессия задействует pipeline).
   **impact:** Blocker marked resolved_skipped → autoloop resumes на S2 без human-in-loop. Если в S2-S11 pipeline reveal'ит регрессию в Phase 0 surfaces — будет caught там, не до.
 
+- **date:** 2026-05-17 22:47 UTC
+  **session:** S2
+  **decision:** Defer `planner.reserve()` / `planner.release()` wiring around batch spawn to a follow-up (or absorb into S3 cgroup work)
+  **rationale:** S2's `split_batch` already removes within-batch races. The remaining hole (next-round `find_ready` returning still-in-flight-touching candidates) is bound by `asyncio.gather` at the round boundary in `_run_real_pilot_body` (line ~993) — every batch is fully drained before the loop advances, so cross-round mutex degenerates into zero-flight at the moment `find_ready` runs. Adding the wiring now is dead code; Task 1.3 will be the natural place to revisit if cgroup-isolated workers reveal new races.
+  **impact:** S3 owner (next wake) may consider adding the wiring opportunistically while editing the sandbox path; no behavior change for parallel pilots until that decision lands.
+
 ## Journal
 
 ```
 [2026-05-18 05:00 UTC] bootstrap: tracker + integration/parallelism_initiatives + backup/parallelism_initiatives-pre-2026-05-18 + launcher + watchdog created. 11 sessions planned. S1=Current. delay=180s, runtime=loop_wrapper, auto_merge=false.
 [2026-05-18 UTC] S1 code work done: 0.1 zombie cleanup + 0.2 silent-failure + 0.3 cost honesty + 0.4 freshness check committed as 9897124 on integration/parallelism_initiatives. 22 new tests in tests/test_phase0_pilot_followups.py; 1184/1184 PASS, ruff 0, mypy 0 new. 0.5 pilot validation deferred — see Blockers/Pauses (PENDING).
 [2026-05-18 UTC] human-resolved: 0.5 PENDING blocker resolved_skipped (Option B). Story 1.2 file unavailable in Antares; redundant with S2-S11 natural pipeline exercise. S1 → Completed, S2 promoted → Current. Autoloop resumes.
+[2026-05-17 22:47 UTC] S2 execution: --parallel preset CLI flag (1/3/5/10) + agent/file_conflict.py (find_conflicts + split_batch) wired into _run_real_pilot_body batch selection. 29 new tests, 1213/1213 PASS, ruff PASS, mypy clean on edited files. Commit 8200f1c on integration/parallelism_initiatives. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
+[2026-05-17 22:47 UTC] S2 completed, S3 promoted to Current (surface=infra-with-recovery, checkpoint=true).
 ```
 
 ## Final Report (populated on last session completion)
