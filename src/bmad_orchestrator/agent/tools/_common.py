@@ -28,12 +28,70 @@ def get_settings() -> Settings:
     return load_settings()
 
 
+def _first_existing_dir(*candidates: Path) -> Path:
+    """Return the first candidate directory that exists; else the first one.
+
+    Used to support both BMad layouts transparently:
+      • Upstream BMad: ``<target>/_bmad/planning-artifacts/``,
+        ``<target>/_bmad/implementation-artifacts/``, ``<target>/_bmad/stories/``.
+      • Legacy orchestrator scaffold (this repo's earlier convention):
+        everything under ``<target>/_bmad-output/planning-artifacts/``.
+
+    When neither exists (fresh project), returns the FIRST candidate so the
+    default write location is the preferred (upstream BMad) layout.
+    """
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+    return candidates[0]
+
+
+def _first_existing_file(*candidates: Path) -> Path:
+    """File-level twin of ``_first_existing_dir``."""
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return candidates[0]
+
+
 def artifacts_dir(settings: Settings | None = None) -> Path:
+    """Planning-artifacts directory.
+
+    Prefers upstream BMad ``_bmad/planning-artifacts/``; falls back to
+    legacy orchestrator ``_bmad-output/planning-artifacts/`` when only
+    the latter exists. Kept under the historic name for back-compat with
+    existing callers; semantics = «planning artefacts directory».
+    """
     s = settings or get_settings()
-    return s.target_project / s.artifacts_dir_name / "planning-artifacts"
+    return _first_existing_dir(
+        s.target_project / "_bmad" / "planning-artifacts",
+        s.target_project / s.artifacts_dir_name / "planning-artifacts",
+    )
+
+
+def implementation_dir(settings: Settings | None = None) -> Path:
+    """Implementation-artifacts directory (sprint-status, story journals)."""
+    s = settings or get_settings()
+    return _first_existing_dir(
+        s.target_project / "_bmad" / "implementation-artifacts",
+        s.target_project / s.artifacts_dir_name / "implementation-artifacts",
+    )
+
+
+def stories_dir(settings: Settings | None = None) -> Path:
+    """Stories directory. Upstream BMad keeps stories in a flat ``_bmad/stories/``
+    folder; legacy orchestrator nested them under planning-artifacts."""
+    s = settings or get_settings()
+    return _first_existing_dir(
+        s.target_project / "_bmad" / "stories",
+        s.target_project / s.artifacts_dir_name / "planning-artifacts" / "stories",
+    )
 
 
 def runs_dir(settings: Settings | None = None) -> Path:
+    """Runs directory (worker JSONL events). Both layouts agree on
+    ``_bmad-output/runs/`` — this path is created during execution, not by
+    planning-phase BMad skills."""
     s = settings or get_settings()
     return s.target_project / s.artifacts_dir_name / "runs"
 
@@ -75,9 +133,27 @@ def error(message: str, *, code: str = "tool_error") -> dict[str, Any]:
     }
 
 
+def sprint_status_path(settings: Settings | None = None) -> Path:
+    """Resolve sprint-status.yaml across both BMad layouts.
+
+    Upstream BMad puts it under ``implementation-artifacts/``; the legacy
+    orchestrator scaffold wrote it to ``planning-artifacts/``. Probe in
+    priority: implementation (upstream) → planning (legacy). When neither
+    file exists, default write target = implementation under upstream layout.
+    """
+    s = settings or get_settings()
+    return _first_existing_file(
+        s.target_project / "_bmad" / "implementation-artifacts" / "sprint-status.yaml",
+        s.target_project / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml",
+        s.target_project / s.artifacts_dir_name / "planning-artifacts" / "sprint-status.yaml",
+        # Legacy in-orchestrator scaffold path — kept last for back-compat.
+        s.target_project / "_bmad" / "planning-artifacts" / "sprint-status.yaml",
+    )
+
+
 def read_sprint_status_yaml(settings: Settings | None = None) -> dict[str, Any]:
     """Parse sprint-status.yaml. Returns empty dict if missing."""
-    path = artifacts_dir(settings) / "sprint-status.yaml"
+    path = sprint_status_path(settings)
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as f:
@@ -86,8 +162,13 @@ def read_sprint_status_yaml(settings: Settings | None = None) -> dict[str, Any]:
 
 
 def write_sprint_status_yaml(data: dict[str, Any], settings: Settings | None = None) -> None:
-    """Overwrite sprint-status.yaml. Caller is responsible for flock in real use."""
-    path = artifacts_dir(settings) / "sprint-status.yaml"
+    """Overwrite sprint-status.yaml. Caller is responsible for flock in real use.
+
+    Writes to whichever location ``sprint_status_path`` resolved. If neither
+    candidate file exists yet, the first candidate (upstream BMad layout) is
+    used and its parent directory is created.
+    """
+    path = sprint_status_path(settings)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
@@ -161,9 +242,11 @@ def _coerce_scalar(val: str) -> Any:
 def list_stories(settings: Settings | None = None) -> list[dict[str, Any]]:
     """Enumerate stories from fixtures/target.
 
-    Returns parsed dicts merged with id (filename stem) + path.
+    Returns parsed dicts merged with id (filename stem) + path. Uses
+    ``stories_dir`` which probes both upstream (``_bmad/stories/``) and
+    legacy (``_bmad-output/planning-artifacts/stories/``) layouts.
     """
-    base = artifacts_dir(settings) / "stories"
+    base = stories_dir(settings)
     if not base.exists():
         return []
     stories: list[dict[str, Any]] = []
@@ -234,6 +317,7 @@ __all__ = [
     "artifacts_dir",
     "error",
     "get_settings",
+    "implementation_dir",
     "is_pid_alive",
     "json_ok",
     "jsonl_tail",
@@ -242,6 +326,8 @@ __all__ = [
     "now_iso",
     "parse_story_md",
     "read_sprint_status_yaml",
+    "sprint_status_path",
+    "stories_dir",
     "runs_dir",
     "text_ok",
     "worker_jsonl_path",
