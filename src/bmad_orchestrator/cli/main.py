@@ -39,7 +39,7 @@ from bmad_orchestrator.cli.tui import DashboardSnapshot, render_once, run_live
 from bmad_orchestrator.config import ModelConfig, load_settings
 
 app = typer.Typer(
-    help="bmad-orchestrator — autonomous BMad Phase 4 agent",
+    help="Virgil — autonomous BMad Phase 4 agent (package: bmad-orchestrator)",
     no_args_is_help=True,
 )
 console = Console()
@@ -178,7 +178,8 @@ def run(
         return
 
     console.print(
-        f"[cyan]starting[/cyan] project={project} wave={wave} "
+        f"[bold cyan]Virgil[/bold cyan] [cyan]starting[/cyan] "
+        f"project={project} wave={wave} "
         f"max_parallel={max_parallel} mock={mock}",
     )
     console.print(
@@ -429,7 +430,7 @@ def _skill_status_table(snapshot: dict[str, object]) -> Table:
     pending_raw = snapshot.get("pending_conflicts") or []
     patches: list[str] = [str(p) for p in patches_raw] if isinstance(patches_raw, list) else []
     pending: list[str] = [str(p) for p in pending_raw] if isinstance(pending_raw, list) else []
-    table = Table(title="bmad-orchestrator skills", show_header=True)
+    table = Table(title="Virgil — skills", show_header=True)
     table.add_column("field", style="bold")
     table.add_column("value")
     if isinstance(version_raw, dict):

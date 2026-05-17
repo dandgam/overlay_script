@@ -139,7 +139,7 @@ def test_tui_layout_smoke_no_data() -> None:
     layout = build_layout(DashboardSnapshot())
     # Layout exposes a tree of regions; smoke is that rendering doesn't raise.
     out = render_once(DashboardSnapshot(), width=120)
-    assert "bmad-orchestrator" in out
+    assert "Virgil" in out
     # When workers list пуст — placeholder row '—' печатается
     assert "—" in out
     assert layout is not None
@@ -171,7 +171,7 @@ def test_cli_status_snapshot_runs() -> None:
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     # Header rendered
-    assert "bmad-orchestrator" in result.stdout
+    assert "Virgil" in result.stdout
 
 
 def test_cli_model_show_lists_all_roles() -> None:
