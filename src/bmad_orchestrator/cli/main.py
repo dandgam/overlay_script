@@ -416,6 +416,225 @@ def model_save() -> None:
     console.print(f"[green]saved[/green] {path}")
 
 
+# ── skill upgrade pipeline (§4 E4) ───────────────────────────────────────────
+
+
+_DEFAULT_SKILLS_ROOT = Path(__file__).resolve().parents[3] / "skills"
+
+
+def _skill_status_table(snapshot: dict[str, object]) -> Table:
+    version_raw = snapshot.get("version")
+    patches_raw = snapshot.get("patches") or []
+    pending_raw = snapshot.get("pending_conflicts") or []
+    patches: list[str] = [str(p) for p in patches_raw] if isinstance(patches_raw, list) else []
+    pending: list[str] = [str(p) for p in pending_raw] if isinstance(pending_raw, list) else []
+    table = Table(title="bmad-orchestrator skills", show_header=True)
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    if isinstance(version_raw, dict):
+        table.add_row("source_repo", str(version_raw.get("source_repo", "?")))
+        table.add_row("source_git_rev", str(version_raw.get("source_git_rev", "?")))
+        table.add_row("source_git_date", str(version_raw.get("source_git_date", "?")))
+        table.add_row("copied_at", str(version_raw.get("copied_at", "?")))
+        table.add_row("skills_count", str(version_raw.get("skills_count", "?")))
+    else:
+        table.add_row("version", "[red]missing[/red] (run skill-update)")
+    table.add_row("patches", ", ".join(patches) if patches else "(none)")
+    table.add_row(
+        "pending_conflicts",
+        ", ".join(pending) if pending else "(none)",
+    )
+    return table
+
+
+@app.command(name="skill-update")
+def skill_update(
+    source: Path | None = typer.Option(  # noqa: B008 — typer pattern
+        None,
+        "--source",
+        help=(
+            "Override upstream source path. Defaults to source_path "
+            "recorded in skills/upstream/.bmad-version."
+        ),
+    ),
+    skills_root: Path = typer.Option(  # noqa: B008 — typer pattern
+        _DEFAULT_SKILLS_ROOT,
+        "--skills-root",
+        help="Root of orchestrator skills dir (default: <repo>/skills).",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply changes to disk. Default is dry-run (no writes).",
+    ),
+) -> None:
+    """Pull upstream BMad skills, diff, re-apply patches.
+
+    Default: dry-run — prints summary, never writes. Use ``--apply`` to swap
+    the on-disk ``skills/upstream/`` tree and update ``.bmad-version``.
+    ``skills/customize/``, ``skills/policy/``, ``skills/lessons/`` are never
+    touched.
+    """
+    from bmad_orchestrator.runtime.skill_update import (
+        BmadVersionInvalidError,
+        BmadVersionNotFoundError,
+        PatchConflictError,
+        SourceMissingError,
+        update_skills,
+    )
+
+    try:
+        result = update_skills(
+            skills_root=skills_root,
+            source=source,
+            dry_run=not apply,
+        )
+    except (BmadVersionNotFoundError, BmadVersionInvalidError) as exc:
+        console.print(f"[red]bad .bmad-version:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    except SourceMissingError as exc:
+        console.print(f"[red]source missing:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    except PatchConflictError as exc:
+        console.print(f"[red]patch conflict during apply:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    diff = result.diff
+    console.print(
+        f"[cyan]source:[/cyan] {result.source_path}  "
+        f"[cyan]rev:[/cyan] {result.source_git_rev or '(unknown)'}"
+    )
+    console.print(
+        f"[cyan]diff:[/cyan] +{len(diff.added)} / "
+        f"~{len(diff.modified)} / -{len(diff.removed)}"
+    )
+    conflicts = result.conflicts
+    if conflicts:
+        console.print(
+            f"[red]patch conflicts:[/red] {len(conflicts)} "
+            f"(report: {result.conflict_report})"
+        )
+        for r in conflicts:
+            console.print(f"  - {r.patch_name}: {r.detail or '(no detail)'}")
+        raise typer.Exit(code=1)
+    if result.patch_results:
+        console.print(f"[green]patches ok:[/green] {len(result.patch_results)}")
+    if result.applied:
+        console.print("[green]applied[/green] — .bmad-version updated")
+    else:
+        console.print("[dim]dry-run — no writes. Re-run with --apply to commit.[/dim]")
+
+
+@app.command(name="policy-apply")
+def policy_apply(
+    project: str = typer.Argument(..., help="Project slug (e.g. odyssey)"),
+    auto_apply: bool = typer.Option(
+        False,
+        "--auto-apply",
+        help="Apply every proposal without prompting (CI / scripted use).",
+    ),
+    lessons_dir: Path | None = typer.Option(  # noqa: B008 — typer pattern
+        None,
+        "--lessons-dir",
+        help=(
+            "Override lessons directory. Defaults to "
+            "<skills_root>/lessons/<project>/."
+        ),
+    ),
+    skills_root: Path = typer.Option(  # noqa: B008 — typer pattern
+        _DEFAULT_SKILLS_ROOT,
+        "--skills-root",
+        help="Root of orchestrator skills dir (default: <repo>/skills).",
+    ),
+    orchestrator_home: Path | None = typer.Option(  # noqa: B008 — typer pattern
+        None,
+        "--orchestrator-home",
+        help="Override orchestrator_home (where _config/projects/ lives).",
+    ),
+) -> None:
+    """Review policy proposals harvested from lessons; accept or reject.
+
+    Scans ``skills/lessons/<project>/`` for ``## Policy proposal`` blocks,
+    persists them to ``_config/projects/<project>/policy-proposals.yaml``,
+    then prompts (or auto-applies with ``--auto-apply``) each against the
+    live policy YAML. Every applied proposal emits a ``policy_proposal_applied``
+    audit event with before/after values for rollback.
+    """
+    from bmad_orchestrator.runtime.lesson_parser import (
+        LessonProposal,
+        LessonProposalInvalidError,
+        apply_proposals_batch,
+        parse_lessons_dir,
+        save_proposals_yaml,
+    )
+
+    settings = load_settings()
+    home = orchestrator_home or settings.orchestrator_home
+    lessons = lessons_dir or (skills_root / "lessons" / project)
+
+    try:
+        proposals = parse_lessons_dir(lessons)
+    except LessonProposalInvalidError as exc:
+        console.print(f"[red]invalid lesson markdown:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    if not proposals:
+        console.print(f"[dim]no proposals found under {lessons}[/dim]")
+        return
+
+    out_path = save_proposals_yaml(
+        proposals, slug=project, orchestrator_home=home
+    )
+    console.print(
+        f"[cyan]found:[/cyan] {len(proposals)} proposal(s) → {out_path}"
+    )
+
+    def _prompt(proposal: LessonProposal) -> bool:
+        console.print(
+            f"\n[bold]{proposal.policy_file}.{proposal.field}[/bold]"
+            f"  [dim]({proposal.source_file})[/dim]"
+        )
+        console.print(f"  before: {proposal.before!r}")
+        console.print(f"  after:  {proposal.after!r}")
+        if proposal.rationale:
+            console.print(f"  rationale: {proposal.rationale}")
+        return typer.confirm("apply?", default=False)
+
+    result = apply_proposals_batch(
+        proposals,
+        skills_root=skills_root,
+        auto_apply=auto_apply,
+        prompt=None if auto_apply else _prompt,
+    )
+
+    console.print(
+        f"\n[green]applied:[/green] {len(result.applied)}  "
+        f"[yellow]rejected:[/yellow] {len(result.rejected)}  "
+        f"[red]errors:[/red] {len(result.errors)}"
+    )
+    for prop, msg in result.errors:
+        console.print(
+            f"  [red]error[/red] {prop.policy_file}.{prop.field}: {msg}"
+        )
+    if result.errors:
+        raise typer.Exit(code=1)
+
+
+@app.command(name="skill-status")
+def skill_status_cmd(
+    skills_root: Path = typer.Option(  # noqa: B008 — typer pattern
+        _DEFAULT_SKILLS_ROOT,
+        "--skills-root",
+        help="Root of orchestrator skills dir (default: <repo>/skills).",
+    ),
+) -> None:
+    """Show current upstream version + applied patches + pending conflict reports."""
+    from bmad_orchestrator.runtime.skill_update import skill_status
+
+    snapshot = skill_status(skills_root)
+    console.print(_skill_status_table(snapshot))
+
+
 # ── bot ──────────────────────────────────────────────────────────────────────
 
 

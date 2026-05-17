@@ -66,6 +66,16 @@ from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
+from bmad_orchestrator.runtime.live_tuning import (
+    TuningProposal,
+    apply_proposals,
+    atomic_write_gates_yaml,
+    evaluate_threshold,
+)
+from bmad_orchestrator.runtime.project_memory import (
+    ProjectMemoryInvalidError,
+    load_project_memory,
+)
 from bmad_orchestrator.runtime.sandbox import detect_sandbox
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
@@ -75,6 +85,12 @@ from bmad_orchestrator.runtime.worker_spawn import (
     spawn_worker as runtime_spawn_worker,
 )
 from bmad_orchestrator.runtime.worktree import cleanup_worktree
+from bmad_orchestrator.skills_repo import (
+    CodeReviewGates,
+    PolicyInvalidError,
+    PolicyNotFoundError,
+    load_policy,
+)
 from bmad_orchestrator.state.db import StateDB
 
 SESSION_ENV_VAR = "BMAD_ORCHESTRATOR_SESSION_ID"
@@ -146,6 +162,19 @@ async def run_orchestrator(
     budget = BudgetGuard(settings.budget, event_loop=bus)
     if state_db is not None and session_id is not None:
         budget.attach_state_db(state_db, session_id)
+
+    # E7 — prime BudgetGuard rolling windows from persisted per-project memory
+    # so live tuning has historical signal from the very first story of the
+    # new run instead of starting empty. Malformed memory files are tolerated
+    # (logged, then run continues with empty windows) — a corrupt file must
+    # not block a real-mode pilot launch.
+    try:
+        memory = load_project_memory(
+            project, orchestrator_home=settings.orchestrator_home
+        )
+        budget.prime_from_memory(memory)
+    except ProjectMemoryInvalidError as exc:
+        log.warning("project_memory_load_failed", project=project, error=str(exc))
 
     if mock:
         await _run_mock_pilot(bus, wave=wave, max_parallel=max_parallel, budget=budget)
@@ -1287,6 +1316,13 @@ class CodeReviewGateConfig:
     target_project: Path
     wave: str
     escalation_chat_id: int | None = None
+    gates_override: CodeReviewGates | None = None
+    # E6 — L2 live tuning. When both ``budget`` and ``gates_path`` are wired,
+    # the review subscriber feeds each story's metrics into BudgetGuard's
+    # rolling windows and persists tuned thresholds back to the YAML. None
+    # disables live tuning (tests + unconfigured paths).
+    budget: BudgetGuard | None = None
+    gates_path: Path | None = None
 
 
 _CODE_REVIEW_GATE: CodeReviewGateConfig | None = None
@@ -1297,6 +1333,9 @@ def configure_code_review_gate(
     target_project: Path | None,
     wave: str | None,
     escalation_chat_id: int | None = None,
+    gates_override: CodeReviewGates | None = None,
+    budget: BudgetGuard | None = None,
+    gates_path: Path | None = None,
 ) -> None:
     """Wire the W4 gate to a target project + wave.
 
@@ -1304,6 +1343,11 @@ def configure_code_review_gate(
     project root, wave name and escalation chat id. Passing ``None`` for either
     required field clears the gate (tests use this to assert the unconfigured
     branch).
+
+    ``gates_override`` lets callers (mostly tests + future L2 live tuning)
+    bypass the on-disk ``skills/policy/code-review-gates.yaml`` file. When
+    ``None`` (the default), :func:`_load_review_gates` reads the YAML at
+    subscriber call time.
     """
     global _CODE_REVIEW_GATE
     if target_project is None or wave is None:
@@ -1313,7 +1357,281 @@ def configure_code_review_gate(
         target_project=target_project,
         wave=wave,
         escalation_chat_id=escalation_chat_id,
+        gates_override=gates_override,
+        budget=budget,
+        gates_path=gates_path,
     )
+
+
+# ── E5 — 4 code-review gates ─────────────────────────────────────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class ReviewMetrics:
+    """Aggregated review metrics extracted from the review JSONL stream.
+
+    Populated by :func:`_extract_metrics_from_event` from `claude_event`
+    payloads emitted by the ``/bmad-code-review`` skill. Accepts either an
+    ``metrics: {...}`` sub-object OR top-level fields. Fields accumulate across
+    events (last-write wins for ``expected_n_tests``).
+    """
+
+    p0_found: int = 0
+    p0_fixed: int = 0
+    compliance_tags: tuple[str, ...] = ()
+    test_files_count: int = 0
+    todo_placeholders: int = 0
+    expected_n_tests: int = 0
+
+
+def _extract_metrics_from_event(ev: dict[str, Any]) -> ReviewMetrics | None:
+    """Return :class:`ReviewMetrics` if event carries metrics fields; else None.
+
+    Reads either ``ev["metrics"]`` (preferred — keeps the review event tidy)
+    or top-level fields on the event itself. Returns ``None`` when no metrics
+    fields are present so the caller can distinguish «no metrics emitted» from
+    «metrics all zero».
+    """
+    if not isinstance(ev, dict):
+        return None
+    src: dict[str, Any]
+    metrics_obj = ev.get("metrics")
+    if isinstance(metrics_obj, dict):
+        src = metrics_obj
+    else:
+        # Fall back to top-level — accept if AT LEAST one known key is present.
+        keys = {
+            "p0_found",
+            "p0_fixed",
+            "compliance_tags",
+            "test_files_count",
+            "todo_placeholders",
+            "expected_n_tests",
+        }
+        if not keys.intersection(ev.keys()):
+            return None
+        src = ev
+
+    tags_raw = src.get("compliance_tags") or ()
+    if isinstance(tags_raw, str):
+        tags: tuple[str, ...] = (tags_raw,)
+    else:
+        try:
+            tags = tuple(str(t) for t in tags_raw)
+        except TypeError:
+            tags = ()
+
+    def _to_int(key: str) -> int:
+        v = src.get(key, 0)
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+
+    return ReviewMetrics(
+        p0_found=_to_int("p0_found"),
+        p0_fixed=_to_int("p0_fixed"),
+        compliance_tags=tags,
+        test_files_count=_to_int("test_files_count"),
+        todo_placeholders=_to_int("todo_placeholders"),
+        expected_n_tests=_to_int("expected_n_tests"),
+    )
+
+
+def _merge_metrics(acc: ReviewMetrics | None, new: ReviewMetrics) -> ReviewMetrics:
+    """Accumulate metrics across multiple review events.
+
+    Counts add up; tags union; ``expected_n_tests`` takes the latest non-zero
+    value (the spec'ed count is per-story, not per-event).
+    """
+    if acc is None:
+        return new
+    expected = new.expected_n_tests or acc.expected_n_tests
+    merged_tags = tuple(sorted({*acc.compliance_tags, *new.compliance_tags}))
+    return ReviewMetrics(
+        p0_found=acc.p0_found + new.p0_found,
+        p0_fixed=acc.p0_fixed + new.p0_fixed,
+        compliance_tags=merged_tags,
+        test_files_count=acc.test_files_count + new.test_files_count,
+        todo_placeholders=acc.todo_placeholders + new.todo_placeholders,
+        expected_n_tests=expected,
+    )
+
+
+def _gate_p0_threshold(metrics: ReviewMetrics, threshold: float) -> str | None:
+    """P0-count gate. Returns reason string when tripped, ``None`` otherwise.
+
+    ``fixed / found < threshold`` → trip. ``found == 0`` is a no-op (nothing to
+    fix). ``threshold == 0`` is also a no-op (gate disabled).
+    """
+    if metrics.p0_found == 0 or threshold <= 0:
+        return None
+    coverage = metrics.p0_fixed / metrics.p0_found
+    if coverage + 1e-9 < threshold:
+        return (
+            f"P0 auto-fix coverage {coverage:.0%} < {threshold:.0%} "
+            f"({metrics.p0_fixed}/{metrics.p0_found} P0 findings fixed)"
+        )
+    return None
+
+
+def _gate_compliance(
+    metrics: ReviewMetrics, compliance_tags: list[str] | tuple[str, ...]
+) -> str | None:
+    """Compliance gate. Returns reason when any policy tag is in findings."""
+    if not compliance_tags or not metrics.compliance_tags:
+        return None
+    policy = {t.strip() for t in compliance_tags if t.strip()}
+    hits = sorted({t for t in metrics.compliance_tags if t in policy})
+    if hits:
+        return f"compliance tags require mandatory fix: {hits}"
+    return None
+
+
+def _gate_test_coverage(metrics: ReviewMetrics, threshold: float) -> str | None:
+    """Test-coverage gate. Returns reason when ratio < threshold OR todo!() > 0.
+
+    Disabled when ``expected_n_tests == 0`` (no spec'ed test count → cannot
+    judge coverage). ``threshold == 0`` disables the ratio check but the
+    ``todo!()`` placeholder check still trips on any non-zero count.
+    """
+    reasons: list[str] = []
+    if metrics.expected_n_tests > 0 and threshold > 0:
+        ratio = metrics.test_files_count / metrics.expected_n_tests
+        if ratio + 1e-9 < threshold:
+            reasons.append(
+                f"test coverage {ratio:.0%} < {threshold:.0%} "
+                f"({metrics.test_files_count}/{metrics.expected_n_tests} test files)"
+            )
+    if metrics.todo_placeholders > 0:
+        reasons.append(
+            f"{metrics.todo_placeholders} todo!() placeholder(s) in tests"
+        )
+    return "; ".join(reasons) if reasons else None
+
+
+def _load_review_gates(cfg: CodeReviewGateConfig | None) -> CodeReviewGates:
+    """Resolve the active gate config: override → policy YAML → built-in defaults."""
+    if cfg is not None and cfg.gates_override is not None:
+        return cfg.gates_override
+    try:
+        return load_policy().code_review_gates
+    except (PolicyNotFoundError, PolicyInvalidError) as exc:
+        log.warning("code_review_gates_fallback_defaults", error=str(exc))
+        return CodeReviewGates.model_validate({})
+
+
+async def _apply_live_tuning(
+    *,
+    bus: EventLoop,
+    cfg: CodeReviewGateConfig,
+    gates: CodeReviewGates,
+    metrics: ReviewMetrics,
+    story_id: str,
+) -> None:
+    """Feed per-story samples into ``budget`` and persist tuned thresholds.
+
+    Pre-conditions checked by the caller: ``cfg.budget is not None``.
+
+    Workflow:
+
+    1. ``budget.record_review_metrics`` pushes coverage samples into the
+       rolling windows (skips metrics with no signal — zero p0_found, zero
+       expected_n_tests, etc.).
+    2. :func:`evaluate_threshold` computes a proposal per tunable metric from
+       the current window; returns ``None`` when the window holds fewer than
+       ``MIN_SAMPLES_FOR_TUNING`` samples.
+    3. :func:`apply_proposals` partitions proposals into «safe to write» vs
+       «out-of-bounds» (movement > 50% of max(current, proposed)).
+    4. Safe proposals are written via :func:`atomic_write_gates_yaml` when
+       ``cfg.gates_path`` is configured; out-of-bounds proposals emit
+       ``HUMAN_QUERY`` so the operator approves a large drift explicitly.
+    """
+    budget = cfg.budget
+    if budget is None:  # pragma: no cover — gated by caller, kept for mypy
+        return
+
+    budget.record_review_metrics(
+        p0_found=metrics.p0_found,
+        p0_fixed=metrics.p0_fixed,
+        test_files_count=metrics.test_files_count,
+        expected_n_tests=metrics.expected_n_tests,
+        iterations=1,
+    )
+
+    proposals: list[TuningProposal] = []
+    p0_prop = evaluate_threshold(
+        metric="p0_threshold",
+        samples=budget.recent_p0_coverages(),
+        current_value=gates.p0_threshold,
+    )
+    if p0_prop is not None:
+        proposals.append(p0_prop)
+    tc_prop = evaluate_threshold(
+        metric="test_coverage_threshold",
+        samples=budget.recent_test_coverages(),
+        current_value=gates.test_coverage_threshold,
+    )
+    if tc_prop is not None:
+        proposals.append(tc_prop)
+
+    if not proposals:
+        return
+
+    new_gates, escalations = apply_proposals(gates, tuple(proposals))
+    changed_metrics = tuple(
+        prop.metric for prop in proposals if prop.within_bounds
+    )
+
+    if changed_metrics and cfg.gates_path is not None:
+        try:
+            atomic_write_gates_yaml(new_gates, cfg.gates_path)
+        except OSError as exc:
+            log.warning(
+                "live_tuning_write_failed",
+                story_id=story_id,
+                path=str(cfg.gates_path),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        else:
+            log.info(
+                "live_tuning_applied",
+                story_id=story_id,
+                metrics=list(changed_metrics),
+                new_p0_threshold=new_gates.p0_threshold,
+                new_test_coverage_threshold=new_gates.test_coverage_threshold,
+            )
+
+    for prop in escalations:
+        log.info(
+            "live_tuning_bounds_exceeded",
+            story_id=story_id,
+            metric=prop.metric,
+            current=prop.current_value,
+            proposed=prop.proposed_value,
+            iqr=prop.iqr,
+            max_movement_fraction=prop.max_movement_fraction,
+        )
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id,
+            text=(
+                f"Live tuning bounds breach для {prop.metric} (story {story_id}):\n\n"
+                f"Current: {prop.current_value:.3f}\n"
+                f"Proposed: {prop.proposed_value:.3f} "
+                f"(median of last {len(prop.samples)} coverage samples)\n"
+                f"Movement {abs(prop.proposed_value - prop.current_value):.3f} "
+                f"exceeds {prop.max_movement_fraction:.0%} bound.\n"
+                f"Approve update or keep current threshold?"
+            ),
+            story_id=story_id,
+            verdict="live_tuning_bounds",
+            metric=prop.metric,
+            current_value=prop.current_value,
+            proposed_value=prop.proposed_value,
+            iqr=prop.iqr,
+            actions=["approve_update", "keep_current"],
+        )
 
 
 def _verdict_from_text(text: str) -> str | None:
@@ -1425,10 +1743,65 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
 
     verdict = "error"
     summary = ""
+    metrics: ReviewMetrics | None = None
     async for ev in tail_jsonl_events(handle.jsonl_path):
         extracted = _extract_verdict_from_event(ev)
         if extracted is not None:
             verdict, summary = extracted
+        new_metrics = _extract_metrics_from_event(ev)
+        if new_metrics is not None:
+            metrics = _merge_metrics(metrics, new_metrics)
+
+    gates = _load_review_gates(cfg)
+
+    # ── Compliance gate — fires regardless of verdict; escalates HUMAN_QUERY
+    #    directly (defer запрещён, no merge_to_integration approve path).
+    if metrics is not None:
+        compliance_hit = _gate_compliance(metrics, gates.compliance_tags)
+        if compliance_hit is not None:
+            log.info(
+                "code_review_compliance_gate_tripped",
+                story_id=story_id,
+                tags=list(metrics.compliance_tags),
+                policy_tags=list(gates.compliance_tags),
+            )
+            await bus.emit(
+                EventType.HUMAN_QUERY,
+                chat_id=cfg.escalation_chat_id if cfg is not None else None,
+                text=(
+                    f"Code-review compliance violation для {story_id}:\n\n"
+                    f"{compliance_hit}\n\n"
+                    f"Original verdict: {verdict}\nSummary: {summary}\n\n"
+                    f"Worktree: {worktree}"
+                ),
+                story_id=story_id,
+                verdict="compliance_violation",
+                gate_reason=compliance_hit,
+                compliance_tags=list(metrics.compliance_tags),
+                worktree=worktree,
+                review_jsonl=str(handle.jsonl_path),
+                actions=["mandatory_fix", "abandon"],
+            )
+            return
+
+    # ── P0 + test-coverage gates — override approve → reject if tripped.
+    gate_reasons: list[str] = []
+    if metrics is not None and verdict == "approve":
+        p0_reason = _gate_p0_threshold(metrics, gates.p0_threshold)
+        if p0_reason is not None:
+            gate_reasons.append(p0_reason)
+        tc_reason = _gate_test_coverage(metrics, gates.test_coverage_threshold)
+        if tc_reason is not None:
+            gate_reasons.append(tc_reason)
+        if gate_reasons:
+            verdict = "reject"
+            prefix = "; ".join(gate_reasons)
+            summary = f"{prefix}\n\n(original: {summary})" if summary else prefix
+            log.info(
+                "code_review_gate_override",
+                story_id=story_id,
+                reasons=gate_reasons,
+            )
 
     log.info(
         "code_review_dispatched",
@@ -1437,14 +1810,29 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         worktree=worktree,
         review_jsonl=str(handle.jsonl_path),
     )
-    await bus.emit(
-        EventType.CODE_REVIEW_VERDICT,
-        story_id=story_id,
-        verdict=verdict,
-        summary=summary,
-        worktree=worktree,
-        review_jsonl=str(handle.jsonl_path),
-    )
+    emit_payload: dict[str, Any] = {
+        "story_id": story_id,
+        "verdict": verdict,
+        "summary": summary,
+        "worktree": worktree,
+        "review_jsonl": str(handle.jsonl_path),
+    }
+    if gate_reasons:
+        emit_payload["gate_reasons"] = gate_reasons
+    await bus.emit(EventType.CODE_REVIEW_VERDICT, **emit_payload)
+
+    # ── E6 — L2 live tuning. Feed metrics into BudgetGuard's rolling windows
+    #    and (every ``MIN_SAMPLES_FOR_TUNING`` informative stories per metric)
+    #    recompute + persist tuned thresholds. Out-of-bounds proposals
+    #    (>50% movement) emit HUMAN_QUERY instead of writing.
+    if metrics is not None and cfg is not None and cfg.budget is not None:
+        await _apply_live_tuning(
+            bus=bus,
+            cfg=cfg,
+            gates=gates,
+            metrics=metrics,
+            story_id=story_id,
+        )
 
 
 async def _ff_merge_to_integration(
@@ -1574,6 +1962,47 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
                 worktree=worktree,
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+
+# ── E5 — Quarterly compliance sweep ──────────────────────────────────────────
+
+
+async def quarterly_sweep_subscriber(event: Event, bus: EventLoop) -> None:
+    """On ``WAVE_BOUNDARY_REACHED`` emit ``COMPLIANCE_SWEEP_NEEDED`` каждые N stories.
+
+    Threshold ``sweep_every_stories`` from ``code-review-gates.yaml`` (default
+    50). Trips when ``completed_stories > 0 and completed_stories % N == 0``.
+    Payload carries ``wave`` + ``completed_stories`` for downstream consumers.
+    """
+    if event.type != EventType.WAVE_BOUNDARY_REACHED:
+        return
+    payload = event.payload or {}
+    raw = payload.get("completed_stories", 0)
+    try:
+        completed = int(raw)
+    except (TypeError, ValueError):
+        return
+    if completed <= 0:
+        return
+
+    gates = _load_review_gates(_CODE_REVIEW_GATE)
+    n = gates.sweep_every_stories
+    if n <= 0 or completed % n != 0:
+        return
+
+    wave = str(payload.get("wave") or "")
+    log.info(
+        "compliance_sweep_emitted",
+        wave=wave,
+        completed_stories=completed,
+        threshold=n,
+    )
+    await bus.emit(
+        EventType.COMPLIANCE_SWEEP_NEEDED,
+        wave=wave,
+        completed_stories=completed,
+        threshold=n,
+    )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

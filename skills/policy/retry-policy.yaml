@@ -1,0 +1,13 @@
+# Retry policy — initial defaults.
+#
+# Schema: src/bmad_orchestrator/skills_repo.py::RetryPolicy
+#
+# Applied per-story в worker_spawn retry loop + при failure events
+# bubble через event_loop.
+
+max_retries: 3
+backoff_seconds: 30
+escalation_triggers:
+  - "auto_rollback_failed"
+  - "compliance_violation"
+  - "sandbox_unavailable"

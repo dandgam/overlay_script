@@ -30,6 +30,12 @@ from bmad_orchestrator.config import BudgetConfig
 from bmad_orchestrator.models import Budget
 from bmad_orchestrator.runtime.budget import is_finite_spend
 from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
+from bmad_orchestrator.runtime.project_memory import (
+    ProjectMemory,
+    _finite_clamped_ratio,
+    _finite_nonneg_int,
+    _finite_positive,
+)
 
 if TYPE_CHECKING:
     from bmad_orchestrator.state.db import BudgetEnforceResult, StateDB
@@ -123,11 +129,51 @@ class BudgetGuard:
         # so transient outliers (very long stories) don't permanently inflate
         # the reservation — only the most recent stories matter.
         self._recent_story_costs: deque[Decimal] = deque(maxlen=3)
+        # E6 (L2 live tuning) — per-story coverage samples feeding adaptive
+        # code-review gate thresholds. Spec §E6 names the fields _recent_*_counts
+        # but the stored values are coverage RATIOS in [0,1] derived from
+        # ReviewMetrics: a story with ``p0_found=10, p0_fixed=8`` contributes
+        # ``0.8`` to ``_recent_p0_counts``. Stories with ``p0_found==0`` (or
+        # ``expected_n_tests==0`` for test_counts) contribute nothing —
+        # there's no signal to extract. Iterations is an int count of review
+        # rounds per story (forward-looking; currently always 1 until
+        # multi-iteration support lands). maxlen=10 = rolling window over the
+        # last 10 informative stories per metric.
+        self._recent_p0_counts: deque[float] = deque(maxlen=10)
+        self._recent_test_counts: deque[float] = deque(maxlen=10)
+        self._recent_review_iterations: deque[int] = deque(maxlen=10)
 
     def attach_state_db(self, state_db: StateDB, session_id: int) -> None:
         """Late-binding helper — wire the guard to a shared StateDB after init."""
         self.state_db = state_db
         self.session_id = session_id
+
+    # ── E7 — L3 per-project memory priming ────────────────────────────────────
+
+    def prime_from_memory(self, memory: ProjectMemory) -> None:
+        """Pre-fill rolling windows from a persisted :class:`ProjectMemory`.
+
+        Called once at boot when ``--project <slug>`` resolves to a memory
+        file. Idempotent in spirit but not enforced — repeated priming
+        just adds more samples to the rolling deques (deque maxlen caps
+        memory). All four windows are extended in oldest-first order so
+        the newest persisted sample lands at the right of each deque,
+        matching :meth:`record_review_metrics` and :meth:`record_story_cost`
+        runtime behaviour.
+
+        Invalid samples (NaN, inf, non-positive story costs, negative
+        iteration counts) are dropped silently — the persisted file may
+        be a few schema-versions old or hand-edited; the guard fails safe
+        by ignoring rather than crashing boot.
+        """
+        for cost in _finite_positive(memory.recent_story_costs):
+            self._recent_story_costs.append(Decimal(str(cost)))
+        for ratio in _finite_clamped_ratio(memory.recent_p0_coverages):
+            self._recent_p0_counts.append(ratio)
+        for ratio in _finite_clamped_ratio(memory.recent_test_coverages):
+            self._recent_test_counts.append(ratio)
+        for it in _finite_nonneg_int(memory.recent_review_iterations):
+            self._recent_review_iterations.append(it)
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -337,6 +383,53 @@ class BudgetGuard:
         if decimal_cost <= 0:
             return
         self._recent_story_costs.append(decimal_cost)
+
+    # ── E6 — L2 live tuning samples ───────────────────────────────────────────
+
+    def record_review_metrics(
+        self,
+        *,
+        p0_found: int,
+        p0_fixed: int,
+        test_files_count: int,
+        expected_n_tests: int,
+        iterations: int = 1,
+    ) -> None:
+        """Push per-story review samples into the live-tuning windows.
+
+        Called from ``code_review_subscriber`` (and any future hook on
+        CODE_REVIEW_VERDICT) once metrics have been aggregated for a story.
+
+        Recording rules:
+
+        * ``p0_found > 0`` contributes ``p0_fixed / p0_found`` clamped to [0,1].
+        * ``expected_n_tests > 0`` contributes ``test_files_count / expected_n_tests``
+          clamped to [0,1].
+        * ``iterations > 0`` contributes an int sample to the iterations deque
+          (default 1 — single-pass review until multi-iteration support lands).
+
+        Negative inputs are clamped to zero before the ratio is computed.
+        """
+        if p0_found > 0:
+            ratio = max(0, p0_fixed) / p0_found
+            self._recent_p0_counts.append(min(1.0, max(0.0, ratio)))
+        if expected_n_tests > 0:
+            ratio = max(0, test_files_count) / expected_n_tests
+            self._recent_test_counts.append(min(1.0, max(0.0, ratio)))
+        if iterations > 0:
+            self._recent_review_iterations.append(int(iterations))
+
+    def recent_p0_coverages(self) -> tuple[float, ...]:
+        """Snapshot — recent per-story P0 coverage ratios (≤ 10)."""
+        return tuple(self._recent_p0_counts)
+
+    def recent_test_coverages(self) -> tuple[float, ...]:
+        """Snapshot — recent per-story test coverage ratios (≤ 10)."""
+        return tuple(self._recent_test_counts)
+
+    def recent_review_iterations(self) -> tuple[int, ...]:
+        """Snapshot — recent per-story review iteration counts (≤ 10)."""
+        return tuple(self._recent_review_iterations)
 
     def adaptive_story_reserve(self) -> Decimal:
         """Reservation for the next ``enforce_and_reserve_story`` call.

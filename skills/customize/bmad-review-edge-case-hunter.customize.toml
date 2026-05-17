@@ -1,0 +1,14 @@
+# Customize overlay for bmad-review-edge-case-hunter
+#
+# Empty stub — upstream SKILL.md applies as-is.
+# Available fields (all optional; defaults shown):
+#
+#   enabled = true                              # disable skill entirely
+#   description_override = "..."                # replaces upstream frontmatter description
+#   extra_triggers = ["...", "..."]             # additional trigger phrases
+#   body_overlay = """..."""                    # markdown appended to SKILL.md body
+#
+#   [variables]
+#   key = "value"                                # variable substitutions in SKILL.md
+#
+# Schema: src/bmad_orchestrator/skills_repo.py::Customize

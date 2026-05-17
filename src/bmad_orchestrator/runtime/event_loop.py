@@ -45,6 +45,7 @@ class EventType(StrEnum):
     HUMAN_RESPONSE = "human_response"
     SCHEDULED_WAKEUP = "scheduled_wakeup_5min"
     CODE_REVIEW_VERDICT = "code_review_verdict"
+    COMPLIANCE_SWEEP_NEEDED = "compliance_sweep_needed"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
