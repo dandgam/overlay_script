@@ -77,6 +77,48 @@ _ENV_AS = "BMAD_SANDBOX_MAX_AS_BYTES"
 _ENV_FSIZE = "BMAD_SANDBOX_MAX_FSIZE_BYTES"
 _ENV_NOFILE = "BMAD_SANDBOX_MAX_NOFILE"
 
+# Initiative #1 Task 1.3 — per-worker cgroup limits via ``systemd-run --user
+# --scope``. prlimit's RLIMIT_NPROC is per-UID (see DEFAULT_MAX_NPROC note),
+# so on a host that runs N parallel workers the per-UID total trivially
+# exceeds the per-process cap and `clone()` fails. Cgroup-scoped limits
+# (MemoryMax/CPUQuota/TasksMax) apply per scope unit instead, giving every
+# worker its own enforced budget independent of host concurrency.
+#
+# These are layered ON TOP of prlimit (defence-in-depth). When systemd-run
+# is unavailable the sandbox proceeds with prlimit only; pass
+# ``BMAD_REQUIRE_CGROUP=1`` to make the cgroup layer mandatory in prod.
+DEFAULT_CGROUP_MEMORY_MAX = "8G"
+DEFAULT_CGROUP_CPU_QUOTA = "200%"
+DEFAULT_CGROUP_TASKS_MAX = "16384"
+DEFAULT_CGROUP_LIMITS: dict[str, str] = {
+    "MemoryMax": DEFAULT_CGROUP_MEMORY_MAX,
+    "CPUQuota": DEFAULT_CGROUP_CPU_QUOTA,
+    "TasksMax": DEFAULT_CGROUP_TASKS_MAX,
+}
+
+
+def _systemd_run_available() -> tuple[bool, str | None]:
+    """Return ``(available, path)`` for ``systemd-run --user --scope``.
+
+    Requires both the binary on PATH *and* a usable user systemd
+    (``$XDG_RUNTIME_DIR`` set + directory exists). On a host that booted
+    without user-session systemd (`systemctl --user` would fail) the
+    ``systemd-run --user`` invocation hangs trying to reach the user manager,
+    so we refuse to prepend it rather than silently breaking spawn.
+    """
+    path = shutil.which("systemd-run")
+    if not path:
+        return False, None
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if not runtime_dir or not Path(runtime_dir).exists():
+        return False, path
+    return True, path
+
+
+def _cgroup_required() -> bool:
+    """``BMAD_REQUIRE_CGROUP=1`` (or true/yes) → fail-loud when cgroup unavailable."""
+    return os.environ.get("BMAD_REQUIRE_CGROUP", "").strip().lower() in {"1", "true", "yes"}
+
 
 def _env_positive_int(name: str, default: int, minimum: int | None = None) -> int:
     """Read ``name`` as positive int from env, fall back to ``default``.
@@ -118,6 +160,8 @@ class Sandbox(Protocol):
         readonly_paths: list[Path] | None = None,
         network: NetworkPolicy = "none",
         env: dict[str, str] | None = None,
+        worker_home_overlay: Path | None = None,
+        cgroup_limits: dict[str, str] | None = None,
     ) -> list[str]:
         """Return ``cmd`` wrapped with backend isolation flags.
 
@@ -134,6 +178,15 @@ class Sandbox(Protocol):
             env: env vars to inject. Caller is responsible for already
                 running them through their allow-list; sandbox only
                 forwards.
+            worker_home_overlay: Initiative #1 Task 1.4 — per-worker HOME
+                snapshot dir; when set the host's ``~/.claude*`` paths are
+                replaced with same-named entries under this overlay.
+                ``NoSandbox`` ignores this.
+            cgroup_limits: Initiative #1 Task 1.3 — when set + systemd-run
+                available, the spawn is wrapped in a per-worker
+                ``systemd-run --user --scope`` with the given ``-p Key=Value``
+                properties (e.g. ``{"MemoryMax": "8G", "CPUQuota": "200%"}``).
+                ``NoSandbox`` ignores this.
 
         Returns:
             New argv list. ``NoSandbox`` returns ``cmd`` unchanged.
@@ -190,12 +243,45 @@ class BwrapSandbox:
         readonly_paths: list[Path] | None = None,
         network: NetworkPolicy = "none",
         env: dict[str, str] | None = None,
+        worker_home_overlay: Path | None = None,
+        cgroup_limits: dict[str, str] | None = None,
     ) -> list[str]:
+        """Wrap ``cmd`` with bwrap isolation + optional cgroup + HOME overlay.
+
+        Initiative #1 Task 1.3/1.4 additions:
+
+        * ``worker_home_overlay`` — when supplied, the host's ``~/.claude``,
+          ``~/.claude.json``, ``~/.local/share/claude`` binds are replaced
+          with the same-named paths under this directory. Caller is
+          responsible for snapshotting/creating the overlay (see
+          :func:`runtime.worker_spawn._create_isolated_home`). Parallel
+          workers each get their own overlay so they no longer race on the
+          host's shared Claude state files.
+
+        * ``cgroup_limits`` — when supplied and ``systemd-run --user --scope``
+          is available, prepend a transient scope unit with the given
+          ``-p Key=Value`` properties (typical: ``MemoryMax``, ``CPUQuota``,
+          ``TasksMax``). The scope wraps prlimit+bwrap so the inner process
+          tree is bound by per-cgroup quotas. If systemd-run is unavailable
+          and ``BMAD_REQUIRE_CGROUP=1`` is set, raises; otherwise logs a
+          warning and continues with prlimit only.
+        """
         if not cmd:
             raise ValueError("cmd must be non-empty")
         wt_abs = Path(worktree).resolve(strict=False)
         if not wt_abs.is_absolute():
             raise ValueError(f"worktree must be absolute: {worktree!r}")
+        overlay_abs: Path | None = None
+        if worker_home_overlay is not None:
+            if not Path(worker_home_overlay).is_absolute():
+                raise ValueError(
+                    f"worker_home_overlay must be absolute: {worker_home_overlay!r}"
+                )
+            overlay_abs = Path(worker_home_overlay).resolve(strict=False)
+            if not overlay_abs.exists():
+                raise FileNotFoundError(
+                    f"worker_home_overlay does not exist: {overlay_abs}"
+                )
 
         wrapped: list[str] = [
             self.bwrap_path,
@@ -225,19 +311,30 @@ class BwrapSandbox:
         # Claude CLI state: the binary writes config to ~/.claude.json,
         # plugin manifest to ~/.claude/, and version state to
         # ~/.local/share/claude/. Without writable mounts the worker
-        # `claude -p` exits with EROFS / EACCES on startup. Bind these
-        # ONLY when they exist on the host (treat as best-effort).
-        # Concurrency: workers share host state; multiple parallel
-        # workers may contend on lock files — acceptable for single-tenant
-        # pilot, follow-up: per-worker HOME (backlog).
+        # `claude -p` exits with EROFS / EACCES on startup.
+        #
+        # Initiative #1 Task 1.4: when ``worker_home_overlay`` is supplied,
+        # bind from the overlay copy at <overlay>/.claude (etc) over the
+        # host paths instead. The bwrap mount makes the worker see its
+        # private snapshot at the same destination path the claude binary
+        # resolves via $HOME — so no env change required.
         home = Path(os.path.expanduser("~"))
-        for claude_path in (
-            home / ".claude",
-            home / ".claude.json",
-            home / ".local" / "share" / "claude",
-        ):
-            if claude_path.exists():
-                wrapped += ["--bind", str(claude_path), str(claude_path)]
+        claude_subpaths = (
+            (".claude",),
+            (".claude.json",),
+            (".local", "share", "claude"),
+        )
+        for parts in claude_subpaths:
+            host_path = home.joinpath(*parts)
+            if overlay_abs is not None:
+                src = overlay_abs.joinpath(*parts)
+                # Only bind when overlay has the path; missing entries fall
+                # through to no bind (the worker will create them in the
+                # overlay's writable tmpfs at /tmp via $HOME-resolution).
+                if src.exists():
+                    wrapped += ["--bind", str(src), str(host_path)]
+            elif host_path.exists():
+                wrapped += ["--bind", str(host_path), str(host_path)]
 
         if network == "none":
             wrapped += ["--unshare-net"]
@@ -281,7 +378,65 @@ class BwrapSandbox:
             f"--nofile={_env_positive_int(_ENV_NOFILE, DEFAULT_MAX_NOFILE, _MIN_NOFILE)}",
             "--",
         ]
-        return rlimit_wrapper + wrapped
+        full = rlimit_wrapper + wrapped
+
+        if cgroup_limits:
+            cgroup_prefix = _build_cgroup_prefix(cgroup_limits, worktree=wt_abs)
+            if cgroup_prefix:
+                full = cgroup_prefix + full
+        return full
+
+
+def _scope_unit_name(worktree: Path) -> str:
+    """Build a deterministic-but-unique systemd scope unit name per spawn.
+
+    Format: ``bmad-worker-<wt_basename>-<pid>-<monotonic_ms>.scope``. systemd
+    requires names ≤256 chars and within ``[A-Za-z0-9:_.\\-]``; we sanitise
+    the worktree basename to satisfy that and keep the human-readable hint.
+    """
+    import re
+    import time
+    base = re.sub(r"[^A-Za-z0-9_.-]", "_", worktree.name)[:64] or "wt"
+    return f"bmad-worker-{base}-{os.getpid()}-{int(time.monotonic_ns() // 1_000_000)}"
+
+
+def _build_cgroup_prefix(
+    limits: dict[str, str], *, worktree: Path
+) -> list[str] | None:
+    """Return ``systemd-run --user --scope -p ... --`` argv prefix or ``None``.
+
+    Returns ``None`` (silent skip) when ``systemd-run`` is unavailable AND
+    ``BMAD_REQUIRE_CGROUP`` is unset. Raises ``RuntimeError`` when required
+    but unavailable.
+    """
+    available, path = _systemd_run_available()
+    if not available:
+        if _cgroup_required():
+            raise RuntimeError(
+                "BMAD_REQUIRE_CGROUP=1 set but systemd-run --user is "
+                "unavailable on this host (need systemd user manager + "
+                "$XDG_RUNTIME_DIR). Install systemd or unset the env var."
+            )
+        log.warning(
+            "cgroup_limits requested but systemd-run --user unavailable; "
+            "proceeding with prlimit only (set BMAD_REQUIRE_CGROUP=1 to "
+            "make this fatal in prod)"
+        )
+        return None
+    assert path is not None
+    prefix: list[str] = [
+        path,
+        "--user",
+        "--scope",
+        "--quiet",
+        f"--unit={_scope_unit_name(worktree)}.scope",
+    ]
+    for key, value in limits.items():
+        # systemd-run -p KEY=VALUE — values are passed verbatim to systemd
+        # property parsing; we keep this minimal (no shell expansion).
+        prefix += ["-p", f"{key}={value}"]
+    prefix += ["--"]
+    return prefix
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +458,8 @@ class NoSandbox:
         readonly_paths: list[Path] | None = None,
         network: NetworkPolicy = "none",
         env: dict[str, str] | None = None,
+        worker_home_overlay: Path | None = None,
+        cgroup_limits: dict[str, str] | None = None,
     ) -> list[str]:
         if not cmd:
             raise ValueError("cmd must be non-empty")
@@ -411,6 +568,10 @@ def detect_sandbox() -> Sandbox:
 
 
 __all__ = [
+    "DEFAULT_CGROUP_CPU_QUOTA",
+    "DEFAULT_CGROUP_LIMITS",
+    "DEFAULT_CGROUP_MEMORY_MAX",
+    "DEFAULT_CGROUP_TASKS_MAX",
     "BwrapSandbox",
     "NetworkPolicy",
     "NoSandbox",

@@ -100,7 +100,7 @@ from bmad_orchestrator.runtime.project_memory import (
     load_project_memory,
     save_project_memory,
 )
-from bmad_orchestrator.runtime.sandbox import detect_sandbox
+from bmad_orchestrator.runtime.sandbox import DEFAULT_CGROUP_LIMITS, detect_sandbox
 from bmad_orchestrator.runtime.security_review import (
     SECURITY_REVIEW_SKILL_INVOCATION,
     parse_security_verdict_from_event,
@@ -990,6 +990,11 @@ async def _run_real_pilot_body(
                 worktree=wt,
                 branch=branch_name,
             )
+            # Initiative #1 Task 1.3+1.4 — when running >1 worker in parallel,
+            # opt in to per-worker HOME snapshot + cgroup scope so concurrent
+            # ``claude -p`` processes don't race on shared ``~/.claude*`` state
+            # and don't blow past the host's per-UID RLIMIT_NPROC.
+            parallel_isolation = max_parallel > 1
             handle = await runtime_spawn_worker(
                 worktree=str(wt),
                 story_id=story["id"],
@@ -999,6 +1004,8 @@ async def _run_real_pilot_body(
                 embedded_skills_root=settings.skills_resolution_root,
                 allowed_worktree_root=worktree_root,
                 base_sha=base_sha,
+                isolated_home=parallel_isolation,
+                cgroup_limits=DEFAULT_CGROUP_LIMITS if parallel_isolation else None,
             )
             handles.append(handle)
             spawned_handles.append(handle)
