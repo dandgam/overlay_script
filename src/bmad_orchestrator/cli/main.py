@@ -37,6 +37,17 @@ from bmad_orchestrator.cli import models_yaml
 from bmad_orchestrator.cli.i18n import t
 from bmad_orchestrator.cli.tui import DashboardSnapshot, render_once, run_live
 from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.runtime.project_registry import (
+    ProjectRegistryError,
+    ProjectsRegistry,
+    load_registry,
+    register_project,
+    registry_path,
+    resume_hint,
+    save_registry,
+    scan_registry,
+)
+from bmad_orchestrator.runtime.project_registry import doctor as run_doctor
 
 app = typer.Typer(
     help="Virgil — autonomous BMad Phase 4 agent (package: bmad-orchestrator)",
@@ -439,6 +450,104 @@ def model_save() -> None:
     path = models_yaml.config_path(settings.target_project)
     models_yaml.save_models(path, settings.models)
     console.print(f"[green]saved[/green] {path}")
+
+
+# ── multi-project registry (Initiative #3 Task 3.1-3.2) ──────────────────────
+
+
+def _load_registry_for_cli() -> tuple[Path, ProjectsRegistry]:
+    settings = load_settings()
+    path = registry_path(orchestrator_home=settings.orchestrator_home)
+    try:
+        reg = load_registry(path)
+    except Exception as exc:
+        console.print(f"[red]registry load failed[/red] {path}: {exc}")
+        raise typer.Exit(code=2) from exc
+    return path, reg
+
+
+@app.command()
+def init(
+    project_path: Path = typer.Argument(  # noqa: B008 — typer pattern
+        ..., help="Absolute path to the BMad project to register"
+    ),
+    slug: str | None = typer.Option(
+        None, "--slug", help="Override auto-derived slug (default = basename)"
+    ),
+) -> None:
+    """Register a project in the multi-project registry (Init #3 Task 3.1)."""
+    path, reg = _load_registry_for_cli()
+    try:
+        new_reg, final_slug, entry = register_project(reg, project_path, slug=slug)
+    except ProjectRegistryError as exc:
+        console.print(f"[red]init failed[/red]: {exc}")
+        raise typer.Exit(code=2) from exc
+    save_registry(new_reg, path)
+    console.print(
+        f"[green]registered[/green] {final_slug} → {entry.path} "
+        f"(layout={entry.bmad_layout}) at {path}"
+    )
+
+
+@app.command()
+def scan() -> None:
+    """List all known projects with on-disk status (Init #3 Task 3.2)."""
+    _, reg = _load_registry_for_cli()
+    rows = scan_registry(reg)
+    if not rows:
+        console.print("[dim]registry empty — run `bmad-orchestrator init <path>` first[/dim]")
+        return
+    table = Table(title="Known projects", show_header=True)
+    table.add_column("slug", style="bold")
+    table.add_column("layout")
+    table.add_column("status")
+    table.add_column("path")
+    table.add_column("detail")
+    for row in rows:
+        colour = {"ok": "green", "stale": "yellow", "missing": "red"}[row.status]
+        table.add_row(
+            row.slug,
+            row.bmad_layout,
+            f"[{colour}]{row.status}[/{colour}]",
+            str(row.path),
+            row.detail or "",
+        )
+    console.print(table)
+
+
+@app.command()
+def doctor(
+    project: str = typer.Argument(..., help="Project slug (from `scan`)"),
+) -> None:
+    """Run health checks on one project (Init #3 Task 3.2)."""
+    _, reg = _load_registry_for_cli()
+    report = run_doctor(reg, project)
+    table = Table(title=f"doctor {project}", show_header=True)
+    table.add_column("check", style="bold")
+    table.add_column("ok")
+    table.add_column("detail")
+    for check in report.checks:
+        table.add_row(
+            check.name,
+            "[green]ok[/green]" if check.ok else "[red]fail[/red]",
+            check.detail,
+        )
+    console.print(table)
+    if not report.healthy:
+        raise typer.Exit(code=1)
+
+
+@app.command(name="resume-project")
+def resume_project(
+    project: str = typer.Argument(..., help="Project slug to resume"),
+) -> None:
+    """Print a shell hint to resume work on a project (Init #3 Task 3.2).
+
+    Named ``resume-project`` because the top-level ``resume`` verb is already
+    bound to the orchestrator pause/resume daemon control.
+    """
+    _, reg = _load_registry_for_cli()
+    console.print(resume_hint(reg, project))
 
 
 # ── skill upgrade pipeline (§4 E4) ───────────────────────────────────────────
