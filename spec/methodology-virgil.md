@@ -216,6 +216,17 @@
 - Manual merge `integration/canonical_patches_port → main` — оргвопрос
 - Doc-of-experiment Pilot 2 retrospective (опционально, memory уже captured)
 
+### Backlog — research findings из утёкшего Claude Code (отложено 2026-05-19)
+
+Источник: анализ `/home/server/crm/claude-code-main/` (leaked Claude Code source, npm sourcemap leak 2026-03-31). Идеи — архитектурные паттерны, НЕ копирование кода (proprietary Anthropic PBC).
+
+- ⬜ **R1 (P1): AbortController per worker** — отдельный cancellation token на каждого worker'а вместо опоры на SIGTERM + 1800s timeout. Coordinator может kill stuck worker мгновенно. Ref: `tools/AgentTool/runAgent.ts:520`. ~1 сессия
+- ⬜ **R2 (P1): MCP server readiness polling** — перед spawn worker'а проверять что required MCP tools не просто connected, но authenticated (30s max, 500ms interval). Защита от падения «tool not found» через 5 мин. Ref: `tools/AgentTool/AgentTool.tsx:371`. ~1 сессия
+- ⬜ **R3 (P2): Per-turn token snapshot** — сохранять token count по каждому шагу worker'а (не только aggregated total). Mid-wave cost tracking + pause-resume без потери granularity. Ref: `tasks/LocalAgentTask:41-104`
+- ⬜ **R4 (P2): Stale worktree GC** — periodic cleanup orphan worktrees из crashed workers (regex slug pattern + 30-day mtime cutoff). Ref: `utils/worktree.ts:1058`
+- ⬜ **R5 (P3): Fail-closed cleanup policy** — не удалять worktree если `git status` вернул ошибку или есть unpushed commits (guard для R4). Ref: `utils/worktree.ts:1113`
+- 💡 Дополнительно: bundled skills которых нет у нас — `skillify` (command→skill конвертер), `stuck` (escape failure loop), `remember` (auto-memory → CLAUDE.md promotion)
+
 ---
 
 ## 6. References
@@ -238,6 +249,6 @@
 
 ---
 
-**Last updated:** 2026-05-19 (v13.3 — Phase 4 hardening Session 3 (#5 + #6 + #7))
+**Last updated:** 2026-05-19 (v13.4 — +5 research findings R1-R5 из leaked Claude Code в backlog)
 **Status:** v13.3 — Phase 4 hardening epic complete (7/7 items). Session 3 closed: #5 two-stage merge-gate split (`c6d240c`) + #6 stop-hook cost+learning (`e4eadfb`) + #7 pass^k metric (`b7649fc`). Tier 2 instrumentation complete. Tests: **1860 PASS** (+29 vs Session 2 close 1831). mypy/ruff clean. EventType count: 29. **Phase 4 ready for #10 production pilot** — all hardening items done, no blockers.
 **Owner:** user + Claude orchestrator
