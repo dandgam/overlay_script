@@ -53,6 +53,12 @@ class EventType(StrEnum):
     # invoked. Distinct from STORY_SPLIT_TRIGGERED (heuristic-only); this fires
     # on the recovery path after Sonnet hit the 300-LOC diff cap.
     STORY_AUTO_SPLIT = "story_auto_split"
+    # Initiative pilot_findings_closure S4 (#4 R1): emitted by
+    # ``runtime/worker_cancellation.cancel_worker`` after a per-worker
+    # cancellation token is tripped. Payload carries ``worker_id``, ``reason``
+    # and ``cancelled_by`` (supervisor | user | timeout) so the audit trail and
+    # downstream subscribers can attribute kills.
+    WORKER_CANCELLED = "worker_cancelled"
     SUB_STORY_STARTED = "sub_story_started"
     SUB_STORY_COMPLETED = "sub_story_completed"
     SUB_STORY_SQUASH_DONE = "sub_story_squash_done"

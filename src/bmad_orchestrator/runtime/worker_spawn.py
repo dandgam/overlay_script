@@ -56,6 +56,12 @@ from bmad_orchestrator.runtime.sandbox import (
     Sandbox,
     detect_sandbox,
 )
+from bmad_orchestrator.runtime.worker_cancellation import (
+    CancellationToken,
+    build_worker_id,
+    register_worker,
+    unregister_worker,
+)
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +142,12 @@ class WorkerHandle:
     base_sha: str | None = None
     isolated_home_path: str | None = None
     cgroup_limits_applied: dict[str, str] | None = None
+    # Initiative pilot_findings_closure S4 (#4 R1): per-worker cancellation
+    # token registered in :mod:`runtime.worker_cancellation`. The supervisor
+    # can flip this token via the ``cancel_worker`` action to kill a stuck
+    # worker without waiting for the orchestrator-wide timeout.
+    worker_id: str | None = None
+    cancellation_token: CancellationToken | None = None
 
 
 # Initiative #1 Task 1.4 — per-worker HOME snapshot.
@@ -452,6 +464,7 @@ async def _wait_and_finalize(
     story_id: str,
     *,
     isolated_home_overlay: Path | None = None,
+    worker_id: str | None = None,
 ) -> None:
     """Wait for subprocess exit; append final worker_completed event.
 
@@ -497,6 +510,8 @@ async def _wait_and_finalize(
         },
     )
     _cleanup_isolated_home(isolated_home_overlay)
+    if worker_id is not None:
+        unregister_worker(worker_id)
 
 
 async def spawn_worker(
@@ -634,6 +649,19 @@ async def spawn_worker(
                 "review_iteration": _read_review_iteration(worktree, story_id),
             },
         )
+        mock_worker_id = build_worker_id(story_id=story_id, branch=branch, pid=0)
+        mock_token = register_worker(
+            worker_id=mock_worker_id,
+            story_id=story_id,
+            worktree=worktree,
+            branch=branch,
+            jsonl_path=jsonl_path,
+            process=None,
+        )
+        # Mock workers exit synchronously above, so deregister immediately —
+        # the token stays available on the handle for tests that want to flip
+        # it post-hoc, but the registry no longer points to it.
+        unregister_worker(mock_worker_id)
         return WorkerHandle(
             worktree=worktree,
             story_id=story_id,
@@ -646,6 +674,8 @@ async def spawn_worker(
             real_requested=real_requested,
             sandbox_kind=sandbox_kind,
             base_sha=base_sha,
+            worker_id=mock_worker_id,
+            cancellation_token=mock_token,
         )
 
     # Real-mode subprocess.
@@ -713,6 +743,15 @@ async def spawn_worker(
     )
 
     pid = process.pid
+    worker_id = build_worker_id(story_id=story_id, branch=branch, pid=pid)
+    cancellation_token = register_worker(
+        worker_id=worker_id,
+        story_id=story_id,
+        worktree=worktree,
+        branch=branch,
+        jsonl_path=jsonl_path,
+        process=process,
+    )
 
     _emit(
         jsonl_path,
@@ -745,6 +784,7 @@ async def spawn_worker(
         _wait_and_finalize(
             process, jsonl_path, worktree, story_id,
             isolated_home_overlay=overlay_path,
+            worker_id=worker_id,
         ),
         name=f"worker_wait_{pid}",
     )
@@ -763,6 +803,8 @@ async def spawn_worker(
         base_sha=base_sha,
         isolated_home_path=str(overlay_path) if overlay_path else None,
         cgroup_limits_applied=dict(cgroup_limits) if cgroup_limits else None,
+        worker_id=worker_id,
+        cancellation_token=cancellation_token,
     )
 
 

@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from bmad_orchestrator.runtime.worker_cancellation import (
+    cancel_worker as runtime_cancel_worker,
+)
 from bmad_orchestrator.supervisor.policy import SupervisorDecision
 
 if TYPE_CHECKING:
@@ -104,6 +107,58 @@ async def execute_decision(
         log.error(
             "supervisor_abort_pipeline",
             source=source_event_type,
+            reason=decision.reason,
+        )
+        return
+
+    if decision.action == "cancel_worker":
+        # Initiative pilot_findings_closure S4 (#4 R1): per-worker cancellation.
+        # We require ``tool_calls=[{name="cancel_worker", args={worker_id: ...}}]``
+        # OR a ``worker_id`` in the source payload (e.g. WORKER_SILENT_FAILURE).
+        worker_id: str | None = None
+        story_id: str | None = source_payload.get("story_id")
+        for tc in decision.tool_calls:
+            if tc.name != "cancel_worker":
+                continue
+            args = tc.args or {}
+            worker_id = args.get("worker_id") or worker_id
+            story_id = args.get("story_id") or story_id
+        if worker_id is None:
+            worker_id = source_payload.get("worker_id")
+        if worker_id is None and story_id is not None:
+            # Fallback: look up by story_id in the registry. Avoids forcing the
+            # judge to know PID-suffixed worker_ids that orchestrator built.
+            from bmad_orchestrator.runtime.worker_cancellation import (
+                active_worker_ids,
+                get_token_for_story,
+            )
+            tok = get_token_for_story(story_id)
+            if tok is not None:
+                worker_id = tok.worker_id
+            else:
+                log.warning(
+                    "supervisor_cancel_worker_no_match",
+                    story_id=story_id,
+                    active=active_worker_ids(),
+                )
+        if worker_id is None:
+            log.warning(
+                "supervisor_cancel_worker_missing_id",
+                source=source_event_type,
+                reason=decision.reason,
+            )
+            return
+        cancelled_by = "supervisor"
+        result = await runtime_cancel_worker(
+            worker_id,
+            reason=decision.reason,
+            cancelled_by=cancelled_by,
+        )
+        log.info(
+            "supervisor_cancel_worker",
+            worker_id=worker_id,
+            story_id=story_id,
+            result=result,
             reason=decision.reason,
         )
         return

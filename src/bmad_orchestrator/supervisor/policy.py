@@ -17,6 +17,12 @@ SupervisorAction = Literal[
     "abort_pipeline",
     "escalate_human",
     "no_op",
+    # Initiative pilot_findings_closure S4 (#4 R1): cancel a single stuck
+    # worker via per-worker token (faster than ``pause_workers`` which targets
+    # the whole pool). Requires ``tool_calls=[{name="cancel_worker", args={
+    # worker_id: ..., reason: ...}}]`` so the actions module knows which
+    # registry entry to trip.
+    "cancel_worker",
 ]
 
 WatchedEventType = Literal[
