@@ -311,7 +311,7 @@ class StubExtractor:
 
 ## 10. References
 
-- Universal methodology: `~/.claude/skills/build-agent/REFERENCE.md`
+- Universal methodology: `~/.claude/skills/888/REFERENCE.md`
 - Patterns используемые: P5 Evaluator-Optimizer (main) + P1 Chaining (extract→propose→gate→apply)
 - Template applied: `templates/memory-engineering.md` §4 (consolidation: episodic → semantic)
 - Project methodology: `spec/methodology-virgil.md` Phase 5 + vision step 6

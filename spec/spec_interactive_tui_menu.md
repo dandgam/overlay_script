@@ -430,7 +430,7 @@ async def execute_command(node: CommandNode, values: dict[str, Any]) -> ExecuteR
 
 ## 10. References
 
-- Universal methodology: `~/.claude/skills/build-agent/REFERENCE.md`
+- Universal methodology: `~/.claude/skills/888/REFERENCE.md`
 - Patterns используемые:
   - P2 Routing (navigation: tree level → next level)
   - P1 Chaining (browse → form → confirm → execute → result)
