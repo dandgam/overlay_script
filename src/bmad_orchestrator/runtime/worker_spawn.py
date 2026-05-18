@@ -232,7 +232,7 @@ def _cleanup_isolated_home(overlay: Path | None) -> None:
         log.warning("isolated_home cleanup failed for %s: %s", overlay, exc)
 
 
-def cleanup_stale_worker_homes(max_age_seconds: float = 3600.0) -> int:
+def cleanup_stale_worker_homes(max_age_seconds: float = 86400.0) -> int:
     """Remove ``/tmp/bmad-worker-*`` snapshots older than ``max_age_seconds``.
 
     Review finding H-2: ``_create_isolated_home`` copies live OAuth tokens
@@ -249,8 +249,12 @@ def cleanup_stale_worker_homes(max_age_seconds: float = 3600.0) -> int:
       symlinked ``/tmp`` does not redirect deletion elsewhere).
     * Only entries owned by the current UID are removed (so a multi-user
       host cannot have one user clean another user's snapshots).
-    * Mtime check uses ``max_age_seconds`` so an in-flight sibling pilot
-      whose worker is < 1h old is never touched.
+    * Mtime check uses ``max_age_seconds`` (default 24h) so an in-flight
+      sibling pilot whose worker dir mtime hasn't bumped in N hours is
+      never touched. The default sits well above
+      ``MultiProjectPlan.per_project_timeout_sec`` (4h) so even a
+      maximally-long real-mode wave whose worker dir mtime only reflects
+      creation time is safe from cleanup by a sibling pilot startup.
 
     Returns the count of removed entries.
     """
