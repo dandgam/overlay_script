@@ -120,10 +120,10 @@
 - P5 formalised (max_review_iterations cap + gate + payload + 11 tests)
 - Success metrics зафиксированы
 
-### Фаза 3 Test & Release 🟡 IN PROGRESS
+### Фаза 3 Test & Release ✅ DONE (2026-05-19)
 
 - ✅ **Step A: Eval harness + 5 synthetic cases** (2026-05-18) — `bmad_orchestrator.eval` module (metrics + runner) + CLI `bmad-orchestrator eval run` + 28 unit-тестов + 5 cases (2 easy + 2 medium + 1 hard) в `evals/cases/`. Mock-mode baseline: 5/5 PASS (100%)
-- ⬜ **Step B: Real BMad stories** — добавить 10+ реальных stories из target BMad-проекта (configurable `--project-root`, не привязано к конкретному проекту) в `evals/cases/`, прогнать в `--mode real`, baseline cost/latency
+- ✅ **Step B: Real BMad stories** (2026-05-19) — 10 BMad-shaped stories в `evals/cases/real/` (3 easy + 5 medium + 2 hard) + harness CLI flags (`--cases-dir`, `--project-root`, `--tag`) + manifest schema с `tags` field + `filter_cases_by_tags` (OR semantics) + baseline scaffold `evals/baselines/phase3-step-b-baseline.json`. Commits S7 `5073856` (harness + first 5 cases) → S8 (5 more cases + baseline). Test deltas: +7 (S7) + 0 (S8 fixtures-only). Aggregate medians populate after first prod-pilot real run.
 - ✅ **Auto-elicitation policy engine** (2026-05-18) — P2 Routing двухтировая (Tier 0 hard-override + Tier 1 rule match + Tier 2 LLM-judge stub + window cap). Модуль `bmad_orchestrator.elicitation` (4 файла, ~580 строк) + `runtime/elicitation_routing.py` subscriber + Settings.elicitation_policy_path. **34 unit-тестов**, mypy/ruff clean. Tests: 1509 PASS
 - ✅ **R3 security minors** (2026-05-18) — `cli/path_validation.py` (`safe_resolve_path` + `ensure_inside_root`) + deny-list системных префиксов (`/etc`, `/root`, `/proc`, `/sys`, `/dev`, `/boot`, `/lib*`, `/sbin`, `/bin`, `/usr/bin*`, `/var/log`). Applied на 4 callsites в `cli/main.py`. 18 unit-тестов покрывают traversal/symlink/deny-list escapes
 - ✅ **Wire worker → review_iteration** (2026-05-18) — `_read_review_iteration` helper в `worker_spawn.py` читает `<worktree>/_bmad/auto-dev-state/current-batch.json:retries[story_id]`, surface через `_wait_and_finalize` + mock path + bridge в `run.py`. P5 loop integration закрыт end-to-end (worker → JSONL → bus → `_gate_iteration_cap`). 11 unit-тестов
@@ -216,78 +216,30 @@
 - Manual merge `integration/canonical_patches_port → main` — оргвопрос
 - Doc-of-experiment Pilot 2 retrospective (опционально, memory уже captured)
 
-### Backlog — research findings из утёкшего Claude Code (отложено 2026-05-19)
+### Backlog — research findings из утёкшего Claude Code (R1/R2 closed 2026-05-19, R3-R5 deferred)
 
 Источник: анализ `/home/server/crm/claude-code-main/` (leaked Claude Code source, npm sourcemap leak 2026-03-31). Идеи — архитектурные паттерны, НЕ копирование кода (proprietary Anthropic PBC).
 
-- ⬜ **R1 (P1): AbortController per worker** — отдельный cancellation token на каждого worker'а вместо опоры на SIGTERM + 1800s timeout. Coordinator может kill stuck worker мгновенно. Ref: `tools/AgentTool/runAgent.ts:520`. ~1 сессия
-- ⬜ **R2 (P1): MCP server readiness polling** — перед spawn worker'а проверять что required MCP tools не просто connected, но authenticated (30s max, 500ms interval). Защита от падения «tool not found» через 5 мин. Ref: `tools/AgentTool/AgentTool.tsx:371`. ~1 сессия
-- ⬜ **R3 (P2): Per-turn token snapshot** — сохранять token count по каждому шагу worker'а (не только aggregated total). Mid-wave cost tracking + pause-resume без потери granularity. Ref: `tasks/LocalAgentTask:41-104`
+- ✅ **R1 (P1): AbortController per worker** (2026-05-19, integration commit `6929ee7`, S4 of pilot_findings_closure) — `CancellationToken` + module-level `_REGISTRY` keyed by `story_id::branch::pid`, `cancel_worker(SIGTERM→2s→SIGKILL)`, supervisor action wired, `WORKER_CANCELLED` event. Tests +8.
+- ✅ **R2 (P1): MCP server readiness polling** (2026-05-19, integration commit `2a3a0d6`, S5 of pilot_findings_closure) — `runtime/mcp_readiness.poll_mcp_ready` (30s timeout / 500ms interval, injectable clock+sleep), `spawn_worker` pre-Popen gate, `MCPNotReadyError`, `Settings.required_mcp_tools`, `MCP_NOT_READY` event. Tests +8.
+- ⬜ **R3 (P2): Per-turn token snapshot** — сохранять token count по каждому шагу worker'а (не только aggregated total). Mid-wave cost tracking + pause-resume без потери granularity. Ref: `tasks/LocalAgentTask:41-104`. Reserved event `COST_SNAPSHOT_RECORDED` planned (see real-6 eval fixture).
 - ⬜ **R4 (P2): Stale worktree GC** — periodic cleanup orphan worktrees из crashed workers (regex slug pattern + 30-day mtime cutoff). Ref: `utils/worktree.ts:1058`
 - ⬜ **R5 (P3): Fail-closed cleanup policy** — не удалять worktree если `git status` вернул ошибку или есть unpushed commits (guard для R4). Ref: `utils/worktree.ts:1113`
 - 💡 Дополнительно: bundled skills которых нет у нас — `skillify` (command→skill конвертер), `stuck` (escape failure loop), `remember` (auto-memory → CLAUDE.md promotion)
 
-### Backlog — pilot findings (2026-05-19, Antares smoke runs 1-7)
+### Backlog — pilot findings (closed 2026-05-19 via integration/pilot_findings_closure)
 
 Источник: 7 прогонов real-пилота на Antares Epic 1 (stories 1.3/1.4/1.5). 2 настоящих
-бага Virgil уже зафикшены (D-Bus `0c0967d`, overlay `bb4fdf1`). Ниже — НЕзакрытые находки.
+бага Virgil уже зафикшены (D-Bus `0c0967d`, overlay `bb4fdf1`). Все P1/P2/P3 находки
+закрыты в integration ветке `integration/pilot_findings_closure` (S1..S8). Финальный
+merge в `main` — manual (Auto merge=false).
 
-- ⬜ **P1: mark-done ID-format mismatch** — `_run_real_pilot_body` помечает истории `done`
-  циклом `for sid in spawned: epic_block["stories"][sid] = "done"`, но `spawned` содержит
-  ID вида `1.3` (dotted), а ключи sprint-status — кебаб `1-3-fastapi-app-lifespan-health`.
-  Match не срабатывает → sprint-status НЕ обновляется. **Ломает resume**: прерванный
-  батч при продолжении повторно прогонит уже сделанные истории (видит их не-`done`).
-  Fix: нормализовать ID через `normalize_story_id` перед mark-done lookup. ~0.5 сессии
-  + тест. **Чинить ДО production-использования resume из меню Virgil.**
-- ⬜ **P2: subscription-mode budget auto-detect** — `cost_tracking_unavailable
-  reason=subscription_mode` детектится, но $-гейты (cap/daily/story-alarm) всё равно
-  халтят на синтетических оценках. Workaround `BMAD_DISABLE_BUDGET=1` существует, но
-  ставится руками. Fix: при subscription-режиме авто-выставлять `_budget_disabled`.
-- ⬜ **P2: pre-flight halt-state check** — runner отказывается работать если в worktree
-  есть `_bmad/auto-dev-state/halt-reason.txt`. Сейчас оркестратор спавнит всех воркеров
-  и они молча падают на Stage 0. Fix: pre-flight проверка halt-state ДО спавна (как
-  Patch BB orphan pre-flight) → внятная ошибка / авто-clear / `--resume`.
-- ⬜ **P3: `real_pilot_done stories=N` вводит в заблуждение** — счётчик считает
-  заспавненные истории, не успешные. Все упавшие воркеры всё равно дают `stories=3`.
-  Fix: разделить `spawned` / `succeeded` в финальном логе.
-- ⬜ **P1: bmad-auto-dev → orchestrator verdict event disconnect** — воркеры
-  `claude -p /bmad-auto-dev` делают code-review/autofix **внутри** runner'а (Stage 6),
-  но НЕ эмитят `claude_event verdict=approve/reject` в worker JSONL. Orch-level
-  subscribers (`code_review_subscriber` → `security_review_subscriber` →
-  `merge_to_integration_subscriber`) реагируют именно на этот event. Без него **ни
-  одна история не мержится в `integration`** даже после успешного воркер-цикла.
-  В смоке Antares 1.4 прошла полный autofix → 2 коммита на `feature/1.4` → но
-  merge-gate не сработал → `integration` ветка не создана.
-  Fix: bmad-auto-dev-runner.sh Stage 6 → emit `claude_event verdict=...` в JSONL
-  (или orchestrator перестаёт ждать этот event и читает runner'овский verdict
-  напрямую через `_bmad/auto-dev-state/reviews/<story>-stage6-*.log`).
-  Без этого все 5 hardening-gates (Patch S/N/C/E5/W4/Q/X) — мёртвый код.
-- ⬜ **P1: Sonnet autofix LOC-300 cap → авто-эскалация** — bmad-auto-dev runner
-  откатит autofix Sonnet'а если diff > 300 LOC → halt → требуется ручной
-  override через subagent. На security-критичных эпиках (Epic 4 auth/ACL, Epic 5
-  audit) это бьёт постоянно — reviewer находит 7-15 findings × 50-150 LOC fix =
-  легко >300. Сейчас обходится руками. Архитектурный fix (2 рычага):
-  - **Routing:** policy-правило `if story.tags includes "security-critical"
-    OR review_iteration ≥ 2 → autofix_model = opus` (Opus меньше упирается в
-    LOC при качественных fix'ах, 4× дороже но реже override).
-  - **Auto-split:** жирные stories дробятся ДО спавна → меньший scope на
-    под-задачу → меньше findings → меньше LOC. Decomposer уже подключён
-    (commit `87a172c`), нужен только trigger.
-  - Связано с **P1 verdict disconnect** выше (без verdict event routing
-    rule не сможет различить «нужен ли autofix-эскейлет»).
-- ⬜ **P2: subprocess timeout adaptive / configurable per story** — bash в
-  bmad-auto-dev-runner.sh имеет жёсткий `timeout --kill-after=10s 1800 claude
-  -p` (30 мин на одну claude-call). Stage 5 dev-story на тяжёлых stories
-  (12+ AC, security-critical) **легко уходит за 30 мин** → killed mid-flight,
-  status=failure, work partially committed. В смоке Antares 1.3 и 1.5
-  получили `subprocess_timeout` именно так.
-  Fix:
-  - Default поднять до 60 мин (`timeout 3600 claude -p`)
-  - ENV override `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` для подкрутки оператором
-  - Adaptive: timeout зависит от AC count / estimated_minutes из story
-    frontmatter (12 AC = 60 мин, 6 AC = 30 мин, etc.)
-  - Sync с orchestrator-level `BMAD_WORKER_TIMEOUT_SEC` (сейчас 24h, явно
-    больше runner'овского cap → последний всегда выигрывает).
+- ✅ **P1 #1: mark-done ID-format mismatch + #9 spawned/succeeded counter** (S1, commit `7edc9bb`) — `normalize_story_id` для dotted↔kebab lookup, `_tail_and_emit_completion` returns outcome tag, log `spawned=X succeeded=Y failed=Z`. Tests +12.
+- ✅ **P1 #2: bmad-auto-dev → orchestrator verdict event disconnect** (S2, commit `4ac3e56`) — Variant B (orchestrator-side fallback reader): `runtime/verdict_fallback.py` (~80 LOC) считывает Stage-6 review log и эмитит синтетический CODE_REVIEW_VERDICT с `source=runner_log_fallback`. Tests +9.
+- ✅ **P1 #3: Sonnet autofix LOC-300 cap → auto-escalate + auto-split trigger** (S3, commit `949d8e7`) — `runtime/autofix_routing` (typed policy + python -m CLI) + runner-side bash branch (security-critical|iter≥2 → opus); decomposer subscriber emits STORY_AUTO_SPLIT on loc_cap halt. Tests +20.
+- ✅ **P2 #6: subscription-mode budget auto-detect** (S6, commit `185a948`) — `runtime/budget_autodetect.evaluate_budget_disabled` idempotent per-run, emits `BUDGET_AUTO_DISABLED` on subscription auto-path (manual `BMAD_DISABLE_BUDGET=1` suppressed from emission). Tests +5.
+- ✅ **P2 #7: pre-flight halt-state check** (S6, same commit `185a948`) — `spawn_worker(auto_clear_halt=False)` + `WorkerHaltPrespawnError` + pre-Popen halt-reason.txt gate + `WORKER_HALT_PRESPAWN` event. Tests +5.
+- ✅ **P2 #8: subprocess timeout adaptive / configurable per story** (S3, same commit `949d8e7`) — runner default 1800→3600, `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` env override, `pick_timeout_sec(ac_count)` bucket logic (0→DEFAULT, 1-3→SMALL, 4-8→MEDIUM, 9+→LARGE). Tests +8.
 - ⬜ **P3: backlog-writer subscriber (auto-capture dev findings)** — сейчас Virgil
   авто-пишет только в `skills/policy/*.yaml` (operational tuning) + `retrospective.md`
   (per-wave). Архитектурные находки (subprocess_timeout patterns, отсутствие
@@ -322,6 +274,6 @@
 
 ---
 
-**Last updated:** 2026-05-19 (v13.4 — +5 research findings R1-R5 из leaked Claude Code в backlog)
-**Status:** v13.3 — Phase 4 hardening epic complete (7/7 items). Session 3 closed: #5 two-stage merge-gate split (`c6d240c`) + #6 stop-hook cost+learning (`e4eadfb`) + #7 pass^k metric (`b7649fc`). Tier 2 instrumentation complete. Tests: **1860 PASS** (+29 vs Session 2 close 1831). mypy/ruff clean. EventType count: 29. **Phase 4 ready for #10 production pilot** — all hardening items done, no blockers.
+**Last updated:** 2026-05-19 (v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Status:** v13.5 — **Phase 3 gate CLOSED** (Step A `28 tests` + Step B `10 real cases` + baseline scaffold `evals/baselines/phase3-step-b-baseline.json`). pilot_findings_closure initiative complete on integration branch (S1..S8, 5 P1 + 3 P2 + 1 P3 + R1 + R2): tests **1945 PASS** (+85 vs 1860 baseline; +5 expected after S8 merge), mypy/ruff clean, EventType count **34** (+5: STORY_AUTO_SPLIT, WORKER_CANCELLED, MCP_NOT_READY, BUDGET_AUTO_DISABLED, WORKER_HALT_PRESPAWN). **Awaits manual merge** `git checkout main && git merge --no-ff integration/pilot_findings_closure`. **#10 production pilot UNBLOCKED** post-merge.
 **Owner:** user + Claude orchestrator

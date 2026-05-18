@@ -1,4 +1,4 @@
-# Phase 3 Step B — real BMad story manifest (3 easy + 2 medium).
+# Phase 3 Step B — real BMad story manifest (3 easy + 5 medium + 2 hard = 10 cases).
 #
 # Each case mirrors the schema of evals/cases.yaml (id/level/story_id/story_path/
 # expected) and adds an optional `tags` list for filter-by-tag.
@@ -77,6 +77,76 @@ cases:
       final_verdict: approve
       max_iterations: 2
       max_cost_usd: 0.30
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: REAL-006
+    level: medium
+    story_id: "real-6-add-event-type"
+    story_path: real-6-add-event-type.md
+    tags: [runtime, events]
+    expected:
+      final_verdict: approve
+      max_iterations: 2
+      max_cost_usd: 0.25
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: REAL-007
+    level: medium
+    story_id: "real-7-add-cli-subcommand"
+    story_path: real-7-add-cli-subcommand.md
+    tags: [cli, runtime]
+    expected:
+      final_verdict: approve
+      max_iterations: 2
+      max_cost_usd: 0.30
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: REAL-008
+    level: medium
+    story_id: "real-8-bump-default-timeout"
+    story_path: real-8-bump-default-timeout.md
+    tags: [runtime, config]
+    expected:
+      final_verdict: approve
+      max_iterations: 2
+      max_cost_usd: 0.20
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: REAL-009
+    level: hard
+    story_id: "real-9-wire-mcp-subscriber"
+    story_path: real-9-wire-mcp-subscriber.md
+    tags: [runtime, subscriber, security-critical]
+    expected:
+      final_verdict: approve
+      max_iterations: 3
+      max_cost_usd: 0.60
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: REAL-010
+    level: hard
+    story_id: "real-10-rls-policy-gate"
+    story_path: real-10-rls-policy-gate.md
+    tags: [compliance, security-critical, sql]
+    expected:
+      final_verdict: approve
+      max_iterations: 3
+      max_cost_usd: 0.80
       must_emit:
         - worker_spawned
         - worker_completed

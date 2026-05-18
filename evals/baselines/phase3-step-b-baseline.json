@@ -1,0 +1,43 @@
+{
+  "manifest": "evals/cases/real/cases.yaml",
+  "schema_version": "1.0",
+  "captured_at": null,
+  "captured_status": "pending_first_real_run",
+  "captured_note": "Phase 3 Step B baseline scaffold. Aggregate fields populate after the first `bmad-orchestrator eval run --mode real --project-root <target> --cases-dir evals/cases/real --repeat 1` against a live target BMad project. The per-case expectation table below freezes the target thresholds the suite asserts against; aggregate medians/pass_rate land here once a real run completes.",
+  "case_count": 10,
+  "level_distribution": {
+    "easy": 3,
+    "medium": 5,
+    "hard": 2
+  },
+  "aggregate": {
+    "pass_rate": null,
+    "median_latency_s": null,
+    "median_cost_usd": null,
+    "p95_latency_s": null,
+    "p95_cost_usd": null,
+    "total_cost_usd": null,
+    "total_iterations": null
+  },
+  "targets": {
+    "pass_rate_min": 0.80,
+    "median_cost_usd_max": 0.30,
+    "median_latency_s_max": 1800,
+    "p95_cost_usd_max": 0.80,
+    "p95_latency_s_max": 5400
+  },
+  "per_case_expectations": [
+    {"case_id": "REAL-001", "level": "easy",   "max_iterations": 1, "max_cost_usd": 0.10, "tags": ["cli", "low-risk"]},
+    {"case_id": "REAL-002", "level": "easy",   "max_iterations": 1, "max_cost_usd": 0.05, "tags": ["docs", "low-risk"]},
+    {"case_id": "REAL-003", "level": "easy",   "max_iterations": 1, "max_cost_usd": 0.05, "tags": ["deps", "low-risk"]},
+    {"case_id": "REAL-004", "level": "medium", "max_iterations": 2, "max_cost_usd": 0.25, "tags": ["runtime", "validation"]},
+    {"case_id": "REAL-005", "level": "medium", "max_iterations": 2, "max_cost_usd": 0.30, "tags": ["refactor", "runtime"]},
+    {"case_id": "REAL-006", "level": "medium", "max_iterations": 2, "max_cost_usd": 0.25, "tags": ["runtime", "events"]},
+    {"case_id": "REAL-007", "level": "medium", "max_iterations": 2, "max_cost_usd": 0.30, "tags": ["cli", "runtime"]},
+    {"case_id": "REAL-008", "level": "medium", "max_iterations": 2, "max_cost_usd": 0.20, "tags": ["runtime", "config"]},
+    {"case_id": "REAL-009", "level": "hard",   "max_iterations": 3, "max_cost_usd": 0.60, "tags": ["runtime", "subscriber", "security-critical"]},
+    {"case_id": "REAL-010", "level": "hard",   "max_iterations": 3, "max_cost_usd": 0.80, "tags": ["compliance", "security-critical", "sql"]}
+  ],
+  "produced_by": "spec/spec_pilot_findings_closure.md §4 #10 part 2 (S8 of integration/pilot_findings_closure)",
+  "consumer_hint": "After first real run, replace `aggregate` nulls with median/p95 from the suite results JSON. `captured_at` ISO-8601 UTC. `captured_status` flips to `live` (or `degraded` if any target breached)."
+}
