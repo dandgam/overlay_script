@@ -688,6 +688,12 @@ async def _run_real_pilot(
     _ = detect_sandbox()
 
     spawned_handles: list[WorkerHandle] = []
+    # Mutable carry — body updates as spend accrues so the finally block can
+    # still emit a partial spend report when the body raises mid-pilot.
+    # Without this the P1-A handshake is silent on BudgetHalt / SDK error /
+    # network drop, and the multi-run parent's SharedSpendTracker stays at
+    # zero for the slot.
+    spend_carry: list[float] = [0.0]
     try:
         await _run_real_pilot_body(
             bus,
@@ -703,12 +709,17 @@ async def _run_real_pilot(
             options=options,
             story_filter=story_filter,
             spawned_handles=spawned_handles,
+            spend_carry=spend_carry,
         )
     finally:
         # Phase 0 Task 0.1 — kill child processes (claude -p, bwrap) if the
         # orchestrator crashes mid-pilot. Without this, zombie workers
         # accumulate and collide on next launch.
         _kill_orphan_workers(spawned_handles)
+        # Review finding P1-A follow-up — flush spend even on body exception
+        # so the multi-run parent's SharedSpendTracker sees the partial spend
+        # that already occurred before the crash.
+        _emit_spend_report(spend_carry[0])
 
 
 def _cmdline_matches_project(pid: int, project: str) -> bool:
@@ -820,11 +831,15 @@ async def _run_real_pilot_body(
     options: dict[str, Any],
     story_filter: tuple[str, ...] | None,
     spawned_handles: list[WorkerHandle],
+    spend_carry: list[float],
 ) -> None:
     """Body of ``_run_real_pilot`` — wrapped in try/finally for orphan cleanup.
 
     ``spawned_handles`` accumulates every WorkerHandle spawned across all
     rounds so the finally block in the outer function can SIGKILL leftovers.
+    ``spend_carry[0]`` is mutated after each story-budget projection so the
+    caller's finally block can emit a partial spend report even on a
+    body-mid-pilot exception (P1-A follow-up).
     """
 
     from bmad_orchestrator.agent.tools._common import (
@@ -1047,6 +1062,12 @@ async def _run_real_pilot_body(
                 daily_halt_reached = True
                 break
             daily_spent_usd = projected_daily
+            # P1-A follow-up — mirror running total into caller's mutable
+            # carry so the outer finally still emits spend on body crash
+            # (BudgetHalt, SDK error, network drop). Without this, the
+            # multi-run parent's SharedSpendTracker stays at zero for the
+            # slot even after real spend has occurred.
+            spend_carry[0] = daily_spent_usd
 
             if not _budget_disabled:
                 res = await budget.enforce_and_reserve_story(
@@ -1230,8 +1251,11 @@ async def _run_real_pilot_body(
     # Review finding P1-A — feed total spend back to a multi-run parent (if
     # spawned via cli/main.py::_subprocess_runner) so the shared
     # ``SharedSpendTracker`` aggregate halts subsequent waves at the configured
-    # cap. Single-project runs leave the env unset and skip this hop.
-    _emit_spend_report(daily_spent_usd)
+    # cap. Single-project runs leave the env unset and skip this hop. Emit
+    # also lives in ``_run_real_pilot``'s finally via ``spend_carry`` so that
+    # a body-mid-pilot exception still flushes partial spend to the parent
+    # (P1-A follow-up).
+    spend_carry[0] = daily_spent_usd
 
 
 def _emit_spend_report(spent_usd: float) -> None:
