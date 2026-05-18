@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -33,8 +34,13 @@ STATUS_RE = re.compile(
     r"^\s{2,}(?P<key>[a-z0-9][a-z0-9-]+):\s*(?P<value>[a-z][a-z-]*)\s*(?P<comment>#.*)?$"
 )
 
-DEFAULT_EPICS = Path("_bmad/planning-artifacts/epics.md")
-DEFAULT_STATUS = Path("_bmad/implementation-artifacts/sprint-status.yaml")
+DEFAULT_EPICS = Path(
+    os.environ.get("BMAD_EPICS_FILE") or "_bmad/planning-artifacts/epics.md"
+)
+DEFAULT_STATUS = Path(
+    os.environ.get("BMAD_SPRINT_STATUS")
+    or "_bmad/implementation-artifacts/sprint-status.yaml"
+)
 
 
 def parse_epics(path: Path) -> dict:

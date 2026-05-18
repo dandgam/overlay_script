@@ -17,6 +17,7 @@ Coverage (12 tests):
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,14 @@ from bmad_orchestrator.skills_repo import CodeReviewGates
 def _make_target_with_stories(tmp_path: Path, *story_ids: str) -> Path:
     target = tmp_path / "proj"
     target.mkdir(exist_ok=True)
+    # Patch Y 2026-05-18: _ensure_git_worktree (commit 358d77f) needs a real
+    # git repo with HEAD commit at the target — initialise here.
+    subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)
+    subprocess.run(["git", "-C", str(target), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(target), "config", "user.name", "t"], check=True)
+    (target / "README").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "add", "README"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-q", "-m", "seed"], check=True)
     artifacts = target / "_bmad-output" / "planning-artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     stories_block = "\n".join(f"      {sid}: ready-for-dev" for sid in story_ids)
@@ -137,10 +146,12 @@ async def _drain(bus: EventLoop) -> list[Event]:
 async def test_p0_1_real_pilot_wires_three_subscribers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """``_run_real_pilot`` must register exactly 3 subscribers on the bus
-    (code_review_subscriber + merge_to_integration_subscriber +
-    quarterly_sweep_subscriber). Pre-call ``len(bus._subs) == 0``;
-    post-call ``len(bus._subs) == 3``."""
+    """``_run_real_pilot`` must register exactly 7 subscribers on the bus
+    (stage5_completeness [Patch S] + build_check [Patch N] + deletion_safety
+    [Patch C] + code_review + security_review [Patch X] + merge_to_integration
+    + quarterly_sweep).
+    Pre-call ``len(bus._subs) == 0``; post-call ``len(bus._subs) == 7``.
+    """
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
     target = _make_target_with_stories(tmp_path)  # zero stories → empty DAG
     monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(target))
@@ -158,8 +169,8 @@ async def test_p0_1_real_pilot_wires_three_subscribers(
     finally:
         await bus.stop()
 
-    assert len(bus._subs) == 3, (
-        f"Expected 3 subscribers wired after _run_real_pilot, "
+    assert len(bus._subs) == 7, (
+        f"Expected 7 subscribers wired after _run_real_pilot, "
         f"got {len(bus._subs)}"
     )
 

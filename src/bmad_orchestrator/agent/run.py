@@ -40,9 +40,13 @@ tools cover the workflow until SDK exposes server-managed tool blocks.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import secrets
+import shutil
+import signal
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,6 +60,7 @@ import structlog
 if TYPE_CHECKING:
     from claude_agent_sdk.types import HookCallback
 
+from bmad_orchestrator.agent.file_conflict import split_batch
 from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard
 from bmad_orchestrator.agent.safety.hooks import audit_tool_output, security_check_hook
 from bmad_orchestrator.agent.skills import SkillError
@@ -64,10 +69,32 @@ from bmad_orchestrator.agent.skills import load_body as load_skill_body
 from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
 from bmad_orchestrator.agent.tools import ALL_TOOLS
 from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.runtime.auto_split import (
+    AutoSplitOutcome,
+    DecomposeFn,
+    auto_split_and_execute,
+    auto_split_enabled,
+)
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
+from bmad_orchestrator.runtime.build_check import build_check_subscriber
+from bmad_orchestrator.runtime.commit_recovery import recover_pre_merge
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
+from bmad_orchestrator.runtime.deletion_safety import deletion_safety_subscriber
+from bmad_orchestrator.runtime.diff_size_gate import (
+    gate_verdict as _diff_size_gate_verdict,
+)
+from bmad_orchestrator.runtime.diff_size_gate import (
+    load_diff_size_policy,
+    measure_diff,
+    measure_diff_per_file,
+    partition_per_file,
+)
 from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
+from bmad_orchestrator.runtime.file_list_parser import (
+    collect_allow_list,
+    has_explicit_file_list,
+)
 from bmad_orchestrator.runtime.live_tuning import (
     TuningProposal,
     apply_proposals,
@@ -80,7 +107,19 @@ from bmad_orchestrator.runtime.project_memory import (
     load_project_memory,
     save_project_memory,
 )
-from bmad_orchestrator.runtime.sandbox import detect_sandbox
+from bmad_orchestrator.runtime.project_registry import (
+    validate_project_path as _validate_project_path,
+)
+from bmad_orchestrator.runtime.sandbox import DEFAULT_CGROUP_LIMITS, detect_sandbox
+from bmad_orchestrator.runtime.security_review import (
+    SECURITY_REVIEW_SKILL_INVOCATION,
+    parse_security_verdict_from_event,
+    security_review_subscriber,
+)
+from bmad_orchestrator.runtime.security_review import (
+    VERDICT_ERROR as SECURITY_VERDICT_ERROR,
+)
+from bmad_orchestrator.runtime.stage5_completeness import stage5_completeness_subscriber
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
     tail_jsonl_events,
@@ -100,6 +139,31 @@ from bmad_orchestrator.state.db import StateDB
 SESSION_ENV_VAR = "BMAD_ORCHESTRATOR_SESSION_ID"
 
 log = structlog.get_logger(__name__)
+
+
+# Initiative #2C — auto-split pipeline hook. Module-level callable so tests can
+# swap in a stub via ``set_decomposer`` without monkey-patching environment.
+# Default ``None`` keeps the auto-split path inert even when ``BMAD_AUTO_SPLIT=1``
+# is set in env — production callers must wire a real ``claude -p`` decomposer
+# (or a multi-LLM router) before opting in. Until then large stories fall
+# through to the legacy single-worker pipeline.
+_DECOMPOSER: DecomposeFn | None = None
+
+
+def set_decomposer(fn: DecomposeFn | None) -> None:
+    """Inject (or clear) the auto-split decomposer used by ``_run_real_pilot_body``.
+
+    Production: wire a callable that spawns ``claude -p --model opus`` and pipes
+    the rendered prompt to its stdin. Tests: pass a synchronous async stub that
+    returns canned JSON.
+    """
+    global _DECOMPOSER
+    _DECOMPOSER = fn
+
+
+def get_decomposer() -> DecomposeFn | None:
+    """Return the currently-installed decomposer (or ``None``)."""
+    return _DECOMPOSER
 
 
 # 5 always-on tools per spec FS4 B11. Names match @tool registrations exactly
@@ -143,6 +207,12 @@ async def run_orchestrator(
     ``_run_real_pilot`` — DAG → spawn worker → tail JSONL → bridge
     ``worker_completed`` → bus, with caller-supplied ``max_stories`` /
     ``max_spend_usd`` hard caps and ``BMAD_REQUIRE_SANDBOX=1`` guard.
+
+    Auth model: real-mode runs on Claude subscription via the `claude -p`
+    CLI binary spawned by `runtime_spawn_worker`. ANTHROPIC_API_KEY is only
+    needed for the bot's NL intent-router (graceful slash-command fallback
+    without it). When multi-LLM support lands, this comment becomes outdated.
+    See memory: feedback_no_anthropic_api.
     """
     settings = load_settings()
     models = models or settings.models
@@ -589,10 +659,188 @@ async def _run_real_pilot(
     The per-story spend reserve here is a placeholder (story_alarm_usd / 6 ≈
     $5/story) — W3 wires real cost parsing from worker JSONL ``usage`` blocks.
     """
+    # Review finding P1-E — L1 forbidden-path gate at single-project entry.
+    # ``register_project`` enforces this at registry insertion, but a stale
+    # registry from a prior version (or test fixture) can still hold a
+    # poisoned entry; refuse here before any subprocess spawns.
+    settings = load_settings()
+    _validate_project_path(settings.target_project)
+
+    # Review finding H-2 — sweep stale ``/tmp/bmad-worker-*`` snapshots from
+    # prior crashes that left live OAuth tokens on disk. Best-effort; never
+    # raises (cleanup helper returns a count, logs internally).
+    from bmad_orchestrator.runtime.worker_spawn import (
+        cleanup_stale_worker_homes,
+    )
+
+    cleanup_stale_worker_homes()
+
+    # Phase 0 Task 0.1 — pre-cleanup of stale orchestrator processes from
+    # prior failed runs. Excludes self + PPID to avoid suicide. See
+    # spec_parallelism_initiatives §Phase 0 / Task 0.1.
+    killed_stale = _kill_stale_orchestrators(project)
+    if killed_stale:
+        log.info("stale_orchestrators_killed", project=project, count=killed_stale)
+
     # W1.3 — sandbox guard. ``detect_sandbox()`` itself enforces
     # ``BMAD_REQUIRE_SANDBOX=1`` + NoSandbox → RuntimeError (FS9 H5). Calling at
     # entry surfaces the missing-bwrap failure BEFORE any DAG / spawn work.
     _ = detect_sandbox()
+
+    spawned_handles: list[WorkerHandle] = []
+    # Mutable carry — body updates as spend accrues so the finally block can
+    # still emit a partial spend report when the body raises mid-pilot.
+    # Without this the P1-A handshake is silent on BudgetHalt / SDK error /
+    # network drop, and the multi-run parent's SharedSpendTracker stays at
+    # zero for the slot.
+    spend_carry: list[float] = [0.0]
+    try:
+        await _run_real_pilot_body(
+            bus,
+            project=project,
+            wave=wave,
+            max_parallel=max_parallel,
+            max_stories=max_stories,
+            max_spend_usd=max_spend_usd,
+            budget=budget,
+            state_db=state_db,
+            session_id=session_id,
+            models=models,
+            options=options,
+            story_filter=story_filter,
+            spawned_handles=spawned_handles,
+            spend_carry=spend_carry,
+        )
+    finally:
+        # Phase 0 Task 0.1 — kill child processes (claude -p, bwrap) if the
+        # orchestrator crashes mid-pilot. Without this, zombie workers
+        # accumulate and collide on next launch.
+        _kill_orphan_workers(spawned_handles)
+        # Review finding P1-A follow-up — flush spend even on body exception
+        # so the multi-run parent's SharedSpendTracker sees the partial spend
+        # that already occurred before the crash.
+        _emit_spend_report(spend_carry[0])
+
+
+def _cmdline_matches_project(pid: int, project: str) -> bool:
+    """Return True iff ``/proc/<pid>/cmdline`` has ``--project <project>`` exactly.
+
+    Review finding H-3: ``pgrep -f "bmad-orchestrator run --project odyssey"``
+    also matches ``odyssey-staging`` / ``odyssey-prod`` siblings (substring
+    match). Multi-project registries (Init #3) make this a destructive misfire
+    waiting to happen — staging cleanup SIGKILLs production.
+
+    Resolves by reading the target proc's own argv (NUL-separated) and
+    asserting one token equals ``--project`` followed by an exact-match next
+    token equal to ``project``. Returns False on any read error (proc gone,
+    permission denied) — better to miss a kill than kill the wrong sibling.
+    """
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    try:
+        raw = cmdline_path.read_bytes()
+    except OSError:
+        return False
+    args = [a.decode("utf-8", errors="replace") for a in raw.split(b"\x00") if a]
+    for i, arg in enumerate(args):
+        if arg == "--project" and i + 1 < len(args) and args[i + 1] == project:
+            return True
+        if arg.startswith("--project=") and arg.removeprefix("--project=") == project:
+            return True
+    return False
+
+
+def _kill_stale_orchestrators(project: str) -> int:
+    """Kill orchestrator processes for the same project, excluding self/PPID.
+
+    Two-stage matching to avoid the substring hazard from review finding H-3:
+    pgrep produces a candidate set with a loose ``bmad-orchestrator run``
+    pattern (cheap pre-filter), then each pid's ``/proc/<pid>/cmdline`` is
+    parsed and we kill only those whose argv has ``--project`` followed
+    *exactly* by ``project`` (no ``odyssey`` matching ``odyssey-staging``).
+    Returns number killed.
+    """
+    exclude_pids = {os.getpid(), os.getppid()}
+    pgrep_bin = shutil.which("pgrep")
+    if pgrep_bin is None:
+        return 0
+    try:
+        # Loose pre-filter — exact-match decision lives in
+        # ``_cmdline_matches_project`` so substring overlap can never reach
+        # the SIGKILL below.
+        proc = subprocess.run(  # noqa: S603
+            [pgrep_bin, "-f", "bmad-orchestrator run"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return 0
+    killed = 0
+    for line in proc.stdout.split():
+        line = line.strip()
+        if not line.isdigit():
+            continue
+        pid = int(line)
+        if pid in exclude_pids:
+            continue
+        if not _cmdline_matches_project(pid, project):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            continue
+    return killed
+
+
+def _kill_orphan_workers(handles: list[WorkerHandle]) -> None:
+    """SIGKILL any worker subprocess still alive when the pilot exits.
+
+    Called from ``_run_real_pilot`` finally — covers the case where the
+    orchestrator crashes between spawn and ``_tail_and_emit_completion``
+    completion, leaving claude/bwrap children alive.
+    """
+    for handle in handles:
+        proc = handle.process
+        if proc is None or proc.returncode is not None:
+            continue
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            continue
+        log.warning(
+            "orphan_worker_killed",
+            story_id=handle.story_id,
+            pid=handle.pid,
+        )
+
+
+async def _run_real_pilot_body(
+    bus: EventLoop,
+    *,
+    project: str,
+    wave: str,
+    max_parallel: int,
+    max_stories: int,
+    max_spend_usd: float,
+    budget: BudgetGuard,
+    state_db: StateDB | None,
+    session_id: int | None,
+    models: ModelConfig,
+    options: dict[str, Any],
+    story_filter: tuple[str, ...] | None,
+    spawned_handles: list[WorkerHandle],
+    spend_carry: list[float],
+) -> None:
+    """Body of ``_run_real_pilot`` — wrapped in try/finally for orphan cleanup.
+
+    ``spawned_handles`` accumulates every WorkerHandle spawned across all
+    rounds so the finally block in the outer function can SIGKILL leftovers.
+    ``spend_carry[0]`` is mutated after each story-budget projection so the
+    caller's finally block can emit a partial spend report even on a
+    body-mid-pilot exception (P1-A follow-up).
+    """
 
     from bmad_orchestrator.agent.tools._common import (
         list_stories,
@@ -619,7 +867,49 @@ async def _run_real_pilot(
     # pipeline (code review → ff-merge → quarterly sweep). Subscribers take
     # ``(event, bus)`` while EventLoop dispatches with ``(event,)`` only, so
     # ``partial`` binds the bus to satisfy the EventCallback contract.
+    #
+    # Final canonical-patches order (after P3 — stage5 → build → deletion →
+    # code_review → merge → quarterly_sweep). Each WORKER_COMPLETED gate is
+    # ordered cheapest-first so a halt skips the more expensive downstream
+    # steps. The two halters (build_check, deletion_safety) mutate
+    # ``payload['status']``; downstream gates (code_review,
+    # merge_to_integration) short-circuit on non-success status.
+    #
+    # Patch S (2026-05-18): stage5_completeness_subscriber runs FIRST so it
+    # auto-stages any Stage 5 residue BEFORE build_check / deletion_safety
+    # see the worktree (the residue would otherwise be silently lost when
+    # the worktree is cleaned post-merge).
+    # Patch N (2026-05-18): build_check_subscriber runs second so a broken
+    # build halts the chain before deletion_safety / code_review fire — the
+    # cheap pytest+ruff guard saves the ~$15 Opus review on broken code.
+    # Patch C (2026-05-18): deletion_safety_subscriber runs third so an
+    # unsafe-deletion halt mutates the WORKER_COMPLETED payload status
+    # BEFORE code_review_subscriber sees it.
+    # Patch Q (2026-05-18): diff size gate is embedded INSIDE
+    # code_review_subscriber (downgrades approve→reject on oversize diff,
+    # not a new subscriber — see _gate_diff_size below).
+    # Patch R (2026-05-18): commit recovery is embedded INSIDE
+    # merge_to_integration_subscriber (auto-commits residue before ff-merge,
+    # not a new subscriber).
+    # Patch X (2026-05-18): security_review_subscriber sits AFTER code_review
+    # and BEFORE merge — on CODE_REVIEW_VERDICT(approve) for security-critical
+    # stories it spawns the 4-hunter `/bmad-security-review`. BLOCK mutates
+    # verdict→reject + appends gate_reasons so the merge subscriber (next in
+    # chain) naturally skips.
+    bus.on(cast(EventCallback, partial(stage5_completeness_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(build_check_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(deletion_safety_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
+    bus.on(
+        cast(
+            EventCallback,
+            partial(
+                security_review_subscriber,
+                bus=bus,
+                runner=_real_security_review_runner,
+            ),
+        )
+    )
     bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
 
@@ -694,7 +984,21 @@ async def _run_real_pilot(
 
         remaining_slots = max_stories - len(spawned)
         effective_max = min(max_parallel, remaining_slots)
-        batch = ready[:effective_max]
+        # Initiative #1 Task 1.2 — file-conflict pre-check. ``planner.find_ready``
+        # is round-based and not informed by ``in_flight_touches`` here, so two
+        # ready stories that touch the same file would otherwise spawn in
+        # parallel and race their writes. ``split_batch`` keeps the first owner
+        # of each file in the parallel slot; later collisions land in
+        # ``deferred`` and naturally re-appear in the next round (they are not
+        # in ``spawned``, and their conflicting peer has finished by then).
+        batch, deferred = split_batch(ready[:effective_max * 2], effective_max)
+        if deferred:
+            log.info(
+                "file_conflict_split",
+                parallel=[s.get("id") for s in batch],
+                deferred=[s.get("id") for s in deferred],
+                effective_max=effective_max,
+            )
         if not batch:
             break
 
@@ -704,8 +1008,14 @@ async def _run_real_pilot(
             story_reserve = float(story_reserve_decimal)
             projected_daily = daily_spent_usd + story_reserve
 
+            # Subscription-mode bypass: на Claude subscription нет per-token
+            # billing'а — $ метрика фантомная. BMAD_DISABLE_BUDGET=1 skip'ает
+            # все $$ гейты (cap, daily, story alarm) сохраняя token tracking
+            # для observability. См. feedback_no_anthropic_api.
+            _budget_disabled = os.environ.get("BMAD_DISABLE_BUDGET") == "1"
+
             # Local user-supplied hard cap (W1.2 --max-spend-usd).
-            if projected_daily > max_spend_usd:
+            if not _budget_disabled and projected_daily > max_spend_usd:
                 log.warning(
                     "max_spend_usd_cap_reached",
                     projected_usd=projected_daily,
@@ -726,8 +1036,12 @@ async def _run_real_pilot(
                 daily_halt_reached = True
                 break
 
-            day_res = await budget.enforce_day(projected_daily, today_utc)
-            if day_res.level == "halt":
+            day_res = (
+                await budget.enforce_day(projected_daily, today_utc)
+                if not _budget_disabled
+                else None
+            )
+            if day_res is not None and day_res.level == "halt":
                 log.warning(
                     "daily_budget_halt",
                     projected_usd=projected_daily,
@@ -748,32 +1062,125 @@ async def _run_real_pilot(
                 daily_halt_reached = True
                 break
             daily_spent_usd = projected_daily
+            # P1-A follow-up — mirror running total into caller's mutable
+            # carry so the outer finally still emits spend on body crash
+            # (BudgetHalt, SDK error, network drop). Without this, the
+            # multi-run parent's SharedSpendTracker stays at zero for the
+            # slot even after real spend has occurred.
+            spend_carry[0] = daily_spent_usd
 
-            res = await budget.enforce_and_reserve_story(story["id"], story_reserve_decimal)
-            if not res.allowed:
-                await bus.emit(
-                    EventType.BUDGET_THRESHOLD_HIT,
-                    scope=res.scope,
-                    level="halt",
-                    spent_usd=res.current_usd,
-                    alarm_threshold=res.alarm_threshold,
-                    halt_threshold=res.halt_threshold,
-                    corrupted=False,
-                    story_id=story["id"],
-                    reason=res.reason,
+            if not _budget_disabled:
+                res = await budget.enforce_and_reserve_story(
+                    story["id"], story_reserve_decimal
                 )
-                continue
+                if not res.allowed:
+                    await bus.emit(
+                        EventType.BUDGET_THRESHOLD_HIT,
+                        scope=res.scope,
+                        level="halt",
+                        spent_usd=res.current_usd,
+                        alarm_threshold=res.alarm_threshold,
+                        halt_threshold=res.halt_threshold,
+                        corrupted=False,
+                        story_id=story["id"],
+                        reason=res.reason,
+                    )
+                    continue
 
             wt = worktree_root / f"wt-{story['id']}"
-            wt.mkdir(exist_ok=True)
+            branch_name = f"feature/{story['id']}"
+            base_sha = await _ensure_git_worktree(
+                target_project=settings.target_project,
+                worktree=wt,
+                branch=branch_name,
+            )
+            # Initiative #2C — auto-split diversion. Opt-in via ``BMAD_AUTO_SPLIT=1``
+            # AND a registered decomposer (``set_decomposer``). When both gates are
+            # open and ``evaluate_split`` says ``split``, the parent story flows
+            # through decomposer → sub-story executor → squash instead of the
+            # legacy single-worker spawn. On success a synthetic
+            # ``WORKER_COMPLETED`` event is emitted so downstream subscribers
+            # (code-review → security-review → merge-to-integration) treat the
+            # squashed parent commit as if a single worker had produced it.
+            # On any failure the diversion falls through to the legacy spawn so
+            # the story is not lost.
+            auto_split_outcome: AutoSplitOutcome | None = None
+            if auto_split_enabled() and _DECOMPOSER is not None:
+                try:
+                    auto_split_outcome = await auto_split_and_execute(
+                        story=story,
+                        worktree=wt,
+                        branch=branch_name,
+                        base_sha=base_sha,
+                        decompose_fn=_DECOMPOSER,
+                        bus=bus,
+                        spawn_kwargs={
+                            "mock": False,
+                            "sandbox_network": "full",
+                            "embedded_skills_root": settings.skills_resolution_root,
+                            "allowed_worktree_root": worktree_root,
+                        },
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "auto_split_failed_falling_back",
+                        story_id=story["id"],
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    auto_split_outcome = None
+                    # Review finding P1-F — auto_split_and_execute may have
+                    # already committed K of N sub-stories to ``branch_name``
+                    # before raising. Without a hard reset to ``base_sha`` the
+                    # legacy spawn below would land its commits on top of a
+                    # partial sub-story history — frankencommit that the
+                    # merge-gate may rubber-stamp. Reset to the original DAG
+                    # batch base so the legacy worker sees a clean slate.
+                    _reset_worktree_to_base(wt, base_sha)
+                if auto_split_outcome is not None and auto_split_outcome.succeeded:
+                    squashed_sha = (
+                        auto_split_outcome.squash.squashed_sha
+                        if auto_split_outcome.squash
+                        else ""
+                    )
+                    await bus.emit(
+                        EventType.WORKER_COMPLETED,
+                        story_id=story["id"],
+                        worktree=str(wt),
+                        jsonl="",
+                        exit_code=0,
+                        status="success",
+                        mock=False,
+                        auto_split=True,
+                        sub_ids=list(auto_split_outcome.sub_ids),
+                        squashed_sha=squashed_sha,
+                    )
+                    spawned.append(story["id"])
+                    log.info(
+                        "auto_split_completed",
+                        story_id=story["id"],
+                        sub_ids=list(auto_split_outcome.sub_ids),
+                        squashed_sha=squashed_sha,
+                    )
+                    continue
+            # Initiative #1 Task 1.3+1.4 — when running >1 worker in parallel,
+            # opt in to per-worker HOME snapshot + cgroup scope so concurrent
+            # ``claude -p`` processes don't race on shared ``~/.claude*`` state
+            # and don't blow past the host's per-UID RLIMIT_NPROC.
+            parallel_isolation = max_parallel > 1
             handle = await runtime_spawn_worker(
                 worktree=str(wt),
                 story_id=story["id"],
-                branch=f"feature/{story['id']}",
+                branch=branch_name,
                 mock=False,
                 sandbox_network="full",
+                embedded_skills_root=settings.skills_resolution_root,
+                allowed_worktree_root=worktree_root,
+                base_sha=base_sha,
+                isolated_home=parallel_isolation,
+                cgroup_limits=DEFAULT_CGROUP_LIMITS if parallel_isolation else None,
             )
             handles.append(handle)
+            spawned_handles.append(handle)
             spawned.append(story["id"])
 
         if handles:
@@ -841,6 +1248,29 @@ async def _run_real_pilot(
         halted=daily_halt_reached,
     )
 
+    # Review finding P1-A — feed total spend back to a multi-run parent (if
+    # spawned via cli/main.py::_subprocess_runner) so the shared
+    # ``SharedSpendTracker`` aggregate halts subsequent waves at the configured
+    # cap. Single-project runs leave the env unset and skip this hop. Emit
+    # also lives in ``_run_real_pilot``'s finally via ``spend_carry`` so that
+    # a body-mid-pilot exception still flushes partial spend to the parent
+    # (P1-A follow-up).
+    spend_carry[0] = daily_spent_usd
+
+
+def _emit_spend_report(spent_usd: float) -> None:
+    """Write final cumulative spend to ``$BMAD_MULTI_SPEND_REPORT`` if set."""
+    target = os.environ.get("BMAD_MULTI_SPEND_REPORT")
+    if not target:
+        return
+    try:
+        Path(target).write_text(
+            json.dumps({"spent_usd": float(spent_usd)}),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning("spend_report_write_failed", path=target, error=str(exc))
+
 
 def _persist_project_memory_snapshot(
     *,
@@ -890,6 +1320,198 @@ def _persist_project_memory_snapshot(
     return save_project_memory(fresh, orchestrator_home=orchestrator_home)
 
 
+def _reset_worktree_to_base(worktree: Path, base_sha: str) -> None:
+    """Hard-reset ``worktree`` HEAD back to ``base_sha``.
+
+    Used by review finding P1-F's auto-split fallback path: if
+    ``auto_split_and_execute`` committed K of N sub-stories before raising,
+    the branch is left with partial history. Resetting before the legacy
+    spawn lands its commits ensures the merge-gate never sees a
+    frankencommit of half-decomposition + legacy worker output.
+
+    Best-effort: a failure here is logged (not raised) because the legacy
+    fallback should still attempt — a poisoned branch is better surfaced as
+    a review gate rejection than as a pilot abort.
+    """
+    if not base_sha:
+        log.warning(
+            "auto_split_fallback_no_base_sha",
+            worktree=str(worktree),
+        )
+        return
+    git_bin = shutil.which("git")
+    if git_bin is None:
+        log.warning(
+            "auto_split_fallback_reset_no_git",
+            worktree=str(worktree),
+        )
+        return
+    try:
+        result = subprocess.run(  # noqa: S603
+            [git_bin, "-C", str(worktree), "reset", "--hard", base_sha],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            log.warning(
+                "auto_split_fallback_reset_failed",
+                worktree=str(worktree),
+                base_sha=base_sha,
+                stderr=result.stderr[:400],
+            )
+        else:
+            log.info(
+                "auto_split_fallback_reset_ok",
+                worktree=str(worktree),
+                base_sha=base_sha,
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        log.warning(
+            "auto_split_fallback_reset_error",
+            worktree=str(worktree),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+
+async def _ensure_git_worktree(
+    *,
+    target_project: Path,
+    worktree: Path,
+    branch: str,
+) -> str:
+    """Create (or reuse) a git worktree at ``worktree`` based on ``branch``.
+
+    Returns the resolved HEAD SHA of the worktree branch (base reference
+    for post-worker silent-failure detection — Phase 0 Task 0.2). On
+    reuse, also runs the Phase 0 Task 0.4 freshness check (warns if the
+    worktree has untracked / modified files left over from a prior run).
+
+    First real-mode primitive — без него worker'ы спавнились в пустых
+    папках и не имели доступа ни к story file, ни к source code,
+    ни к BMad artifacts. Реализация:
+
+    * Если ``worktree/.git`` уже есть → ничего не делаем (reuse).
+    * Иначе: если ``branch`` существует в target → ``git worktree add wt branch``.
+    * Иначе: ``git worktree add -b branch wt HEAD`` (новая ветка от HEAD).
+
+    Ошибки логируются и поднимаются как RuntimeError — pilot должен
+    halt'нуться явно, а не молча запускать worker в пустой папке.
+    """
+    if (worktree / ".git").exists():
+        log.info(
+            "git_worktree_reused",
+            worktree=str(worktree),
+            branch=branch,
+        )
+        await _warn_if_worktree_dirty(worktree)
+        return await _resolve_worktree_head(worktree)
+
+    # If a plain dir exists from a previous failed spawn — leave it; git
+    # worktree add will fail on non-empty paths, which is the right loud
+    # signal. Operator clears the dir manually.
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check if branch already exists. ``git rev-parse`` exits 0 if yes.
+    rev_proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(target_project), "rev-parse", "--verify", branch,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await rev_proc.wait()
+    branch_exists = rev_proc.returncode == 0
+
+    if branch_exists:
+        args = ["git", "-C", str(target_project), "worktree", "add",
+                str(worktree), branch]
+    else:
+        args = ["git", "-C", str(target_project), "worktree", "add",
+                "-b", branch, str(worktree), "HEAD"]
+
+    add_proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await add_proc.communicate()
+    if add_proc.returncode != 0:
+        msg = (
+            f"git worktree add failed: rc={add_proc.returncode} "
+            f"stderr={stderr.decode(errors='replace').strip()!r}"
+        )
+        log.error("git_worktree_add_failed", error=msg, branch=branch,
+                  worktree=str(worktree))
+        raise RuntimeError(msg)
+    log.info(
+        "git_worktree_created",
+        worktree=str(worktree),
+        branch=branch,
+        new_branch=not branch_exists,
+    )
+    await _warn_if_worktree_dirty(worktree)
+    return await _resolve_worktree_head(worktree)
+
+
+async def _warn_if_worktree_dirty(worktree: Path) -> list[str]:
+    """Phase 0 Task 0.4 — emit warn log if worktree has untracked/modified files.
+
+    Pre-existing residue (e.g. leftover commits, stray files from a prior
+    aborted spawn) can collide with the new worker's output. Returns the
+    list of porcelain status lines for callers/tests; empty when clean.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(worktree), "status", "--porcelain",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return []
+    raw = stdout.decode(errors="replace")
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if lines:
+        log.warning(
+            "worktree_dirty_pre_spawn",
+            worktree=str(worktree),
+            entries=lines[:20],
+            count=len(lines),
+            note="pre-existing untracked/modified files may collide with story output",
+        )
+    return lines
+
+
+async def _resolve_worktree_head(worktree: Path) -> str:
+    """Return ``git -C <worktree> rev-parse HEAD`` or empty string on failure."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(worktree), "rev-parse", "HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return ""
+    return stdout.decode(errors="replace").strip()
+
+
+async def _count_new_commits(worktree: str, base_sha: str) -> int:
+    """Count commits on the worker's branch since ``base_sha`` (Phase 0 Task 0.2)."""
+    if not base_sha:
+        return 0
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", worktree, "rev-list", "--count", f"{base_sha}..HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return 0
+    try:
+        return int(stdout.decode(errors="replace").strip())
+    except ValueError:
+        return 0
+
+
 async def _tail_and_emit_completion(
     handle: WorkerHandle,
     bus: EventLoop,
@@ -911,6 +1533,13 @@ async def _tail_and_emit_completion(
     :meth:`BudgetGuard.record_story_cost`. Tests that drive this helper with
     pure mock-mode handles can omit both and get the legacy bridge-only path.
     """
+    # Phase 0 Task 0.3 — subscription mode: ANTHROPIC_API_KEY absent or
+    # BMAD_DISABLE_BUDGET=1 means per-token billing is unavailable. We still
+    # run the tracker so any usage data that does appear in JSONL events is
+    # captured, but on terminal events with zero tokens we emit
+    # ``cost_tracking_unavailable`` instead of the misleading
+    # ``worker_cost_final total_usd=0.00``.
+    subscription_mode = _is_subscription_mode()
     tracker: WorkerCostTracker | None = None
     if budget is not None and model:
         tracker = WorkerCostTracker(model=model)
@@ -925,22 +1554,61 @@ async def _tail_and_emit_completion(
         event_type = ev.get("event_type")
         if event_type == "worker_completed":
             if tracker is not None and budget is not None:
-                _emit_worker_cost_final(tracker, handle.story_id)
-                budget.record_story_cost(tracker.total_cost)
+                if subscription_mode and _tracker_has_no_usage(tracker):
+                    await _emit_cost_tracking_unavailable(
+                        bus, handle.story_id, reason="subscription_mode"
+                    )
+                else:
+                    _emit_worker_cost_final(tracker, handle.story_id)
+                    budget.record_story_cost(tracker.total_cost)
+            exit_code = ev.get("exit_code", 0)
+            if exit_code == 0 and handle.base_sha:
+                commits = await _count_new_commits(
+                    handle.worktree, handle.base_sha
+                )
+                if commits == 0:
+                    log.warning(
+                        "worker_silent_failure",
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        base_sha=handle.base_sha,
+                        note="exit_code=0 but zero new commits — treating as halt",
+                    )
+                    await bus.emit(
+                        EventType.WORKER_SILENT_FAILURE,
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        jsonl=str(handle.jsonl_path),
+                        exit_code=exit_code,
+                        base_sha=handle.base_sha,
+                    )
+                    await bus.emit(
+                        EventType.WORKER_HALT_FILE,
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        jsonl=str(handle.jsonl_path),
+                        reason="silent_failure_zero_commits",
+                    )
+                    return
             await bus.emit(
                 EventType.WORKER_COMPLETED,
                 story_id=handle.story_id,
                 worktree=handle.worktree,
                 jsonl=str(handle.jsonl_path),
-                exit_code=ev.get("exit_code", 0),
+                exit_code=exit_code,
                 status=ev.get("status", "success"),
                 mock=False,
             )
             return
         if event_type == "worker_halt_file":
             if tracker is not None and budget is not None:
-                _emit_worker_cost_final(tracker, handle.story_id)
-                budget.record_story_cost(tracker.total_cost)
+                if subscription_mode and _tracker_has_no_usage(tracker):
+                    await _emit_cost_tracking_unavailable(
+                        bus, handle.story_id, reason="subscription_mode"
+                    )
+                else:
+                    _emit_worker_cost_final(tracker, handle.story_id)
+                    budget.record_story_cost(tracker.total_cost)
             await bus.emit(
                 EventType.WORKER_HALT_FILE,
                 story_id=handle.story_id,
@@ -961,6 +1629,52 @@ def _emit_worker_cost_final(tracker: WorkerCostTracker, story_id: str) -> None:
         cache_read_tokens=tracker.cumulative.cache_read_input_tokens,
         cache_write_tokens=tracker.cumulative.cache_creation_input_tokens,
         output_tokens=tracker.cumulative.output_tokens,
+    )
+
+
+def _tracker_has_no_usage(tracker: WorkerCostTracker) -> bool:
+    """Return True when no usage block has landed yet (all token counts zero)."""
+    cumulative = tracker.cumulative
+    return (
+        cumulative.input_tokens == 0
+        and cumulative.output_tokens == 0
+        and cumulative.cache_read_input_tokens == 0
+        and cumulative.cache_creation_input_tokens == 0
+    )
+
+
+def _is_subscription_mode() -> bool:
+    """Phase 0 Task 0.3 — detect Claude subscription (no per-token billing).
+
+    Either ANTHROPIC_API_KEY is absent (subscription auth) or the explicit
+    BMAD_DISABLE_BUDGET=1 escape hatch is set. Returns ``False`` when an
+    API key is present and budget gates are enabled — the only mode where
+    ``worker_cost_final`` numbers are honest.
+    """
+    if os.environ.get("BMAD_DISABLE_BUDGET") == "1":
+        return True
+    return not os.environ.get("ANTHROPIC_API_KEY")
+
+
+async def _emit_cost_tracking_unavailable(
+    bus: EventLoop, story_id: str, *, reason: str
+) -> None:
+    """Phase 0 Task 0.3 — emit ``cost_tracking_unavailable`` on terminal event.
+
+    Replaces the misleading ``worker_cost_final total_usd=0.00`` log when
+    cost tracking is unavailable (subscription mode). Emits both a
+    structured log and a bus event so observers can distinguish "free run"
+    from "genuine zero spend".
+    """
+    log.info(
+        "cost_tracking_unavailable",
+        story_id=story_id,
+        reason=reason,
+    )
+    await bus.emit(
+        EventType.COST_TRACKING_UNAVAILABLE,
+        story_id=story_id,
+        reason=reason,
     )
 
 
@@ -1371,6 +2085,11 @@ async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
         body = load_skill_body(skill)
         log.debug("skill_body_loaded", skill=skill, body_chars=len(body))
 
+    # Subscription-mode supported by design: workers spawn via `claude -p`
+    # CLI which uses Claude subscription auth. ANTHROPIC_API_KEY is required
+    # ONLY for this intent-router (NL → action mapping via SDK). Without it,
+    # bot degrades to slash-commands. See memory: feedback_no_anthropic_api.
+    # TODO: restore SDK path when multi-LLM support (OpenAI / local) lands.
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     budget = _INTENT_ROUTER_BUDGET
     models = _INTENT_ROUTER_MODELS
@@ -1842,6 +2561,54 @@ async def _spawn_code_review_worker(
     return handle
 
 
+async def _spawn_security_review_worker(
+    *,
+    worktree: str,
+    story_id: str,
+    wave: str,
+) -> WorkerHandle:
+    """Spawn ``claude -p /bmad-security-review --auto`` in ``worktree``.
+
+    Same JSONL-namespace trick as :func:`_spawn_code_review_worker` — the
+    ``BMAD_CURRENT_WAVE`` env var is pivoted to a security-scoped namespace so
+    the hunter stream lands at
+    ``runs_dir / <wave>__security_<story_id> / <basename>.events.jsonl`` without
+    clobbering the dev worker's or the code-review's JSONL.
+    """
+    original_wave = os.environ.get("BMAD_CURRENT_WAVE")
+    os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__security_{story_id}"
+    try:
+        handle = await runtime_spawn_worker(
+            worktree=worktree,
+            story_id=story_id,
+            branch=f"feature/{story_id}",
+            skill_invocation=SECURITY_REVIEW_SKILL_INVOCATION,
+            sandbox_network="none",
+        )
+    finally:
+        if original_wave is None:
+            os.environ.pop("BMAD_CURRENT_WAVE", None)
+        else:
+            os.environ["BMAD_CURRENT_WAVE"] = original_wave
+    return handle
+
+
+async def _real_security_review_runner(
+    worktree: Path, story_id: str, wave: str
+) -> tuple[str, str]:
+    """Production runner — spawn the security-review worker, aggregate verdict."""
+    handle = await _spawn_security_review_worker(
+        worktree=str(worktree), story_id=story_id, wave=wave
+    )
+    verdict = SECURITY_VERDICT_ERROR
+    findings = ""
+    async for ev in tail_jsonl_events(handle.jsonl_path):
+        extracted = parse_security_verdict_from_event(ev)
+        if extracted is not None:
+            verdict, findings = extracted
+    return verdict, findings
+
+
 async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
     """On ``WORKER_COMPLETED(success)`` → spawn ``/bmad-code-review``, emit verdict.
 
@@ -1937,15 +2704,63 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         tc_reason = _gate_test_coverage(metrics, gates.test_coverage_threshold)
         if tc_reason is not None:
             gate_reasons.append(tc_reason)
-        if gate_reasons:
-            verdict = "reject"
-            prefix = "; ".join(gate_reasons)
-            summary = f"{prefix}\n\n(original: {summary})" if summary else prefix
-            log.info(
-                "code_review_gate_override",
-                story_id=story_id,
-                reasons=gate_reasons,
-            )
+
+    # ── Patch Q (diff size) + Patch W (scope by File List allow-list).
+    #    Even if metrics are missing (e.g. review emitted no structured block),
+    #    the size + scope checks run purely on git so they catch runaway scope
+    #    regardless of the review parser's coverage. The allow-list is built
+    #    from the story's `### File List` section ∪ infra paths; when the
+    #    target_project is unconfigured (tests), Patch W silently degrades to
+    #    pure Patch Q (P3 behaviour).
+    #    Permissive when the story declares NO explicit File List entries
+    #    (BMad v6+ stories populate File List as a post-condition). See
+    #    code-review finding 6.4.
+    if verdict == "approve":
+        try:
+            diff_policy = load_diff_size_policy()
+        except (PolicyNotFoundError, PolicyInvalidError) as e:
+            log.warning("diff_size_policy_load_failed", error=str(e))
+        else:
+            if diff_policy.enabled:
+                out_of_scope_paths: list[str] | None = None
+                diff_metrics = await measure_diff(
+                    Path(worktree), range_spec=diff_policy.range_spec
+                )
+                if cfg is not None and cfg.target_project is not None:
+                    explicit = has_explicit_file_list(cfg.target_project, story_id)
+                    if not explicit:
+                        log.info(
+                            "scope_check_skipped_no_file_list",
+                            story_id=story_id,
+                            reason="story declares no explicit ### File List",
+                        )
+                    else:
+                        allow_list = collect_allow_list(cfg.target_project, story_id)
+                        per_file = await measure_diff_per_file(
+                            Path(worktree), range_spec=diff_policy.range_spec
+                        )
+                        in_scope_metrics, out_paths = partition_per_file(
+                            per_file, allow_list
+                        )
+                        out_of_scope_paths = out_paths
+                        diff_metrics = in_scope_metrics
+                diff_reason = _diff_size_gate_verdict(
+                    diff_metrics,
+                    diff_policy,
+                    out_of_scope_paths=out_of_scope_paths,
+                )
+                if diff_reason is not None:
+                    gate_reasons.append(diff_reason)
+
+    if verdict == "approve" and gate_reasons:
+        verdict = "reject"
+        prefix = "; ".join(gate_reasons)
+        summary = f"{prefix}\n\n(original: {summary})" if summary else prefix
+        log.info(
+            "code_review_gate_override",
+            story_id=story_id,
+            reasons=gate_reasons,
+        )
 
     log.info(
         "code_review_dispatched",
@@ -2056,6 +2871,52 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
             actions=["approve_override", "abandon", "edit_in_human_loop"],
         )
         return
+
+    # Patch R — auto-stage any uncommitted residue in the worker's worktree
+    # before merge. Only fires when ``worktree`` is an actual git worktree
+    # (has its own ``.git`` entry — file for ``git worktree add`` worktrees,
+    # directory for ordinary clones). Plain marker directories inside an
+    # outer repo (some tests pass these) MUST NOT trigger a recovery commit:
+    # ``git -C plain-dir`` walks up the tree to the outer repo and would
+    # commit on whatever branch is currently checked out there, diverging
+    # the merge target. Best-effort: failures here do NOT block the merge.
+    if worktree and (Path(worktree) / ".git").exists():
+        # Patch W — scope recovery to the story's File List allow-list when
+        # the project root is configured. Out-of-scope dirty paths stay in
+        # the working tree (caller surfaces them via gate_reasons / human
+        # query downstream); only allow-listed paths get auto-staged.
+        allow_list = (
+            collect_allow_list(cfg.target_project, story_id)
+            if cfg.target_project is not None
+            else None
+        )
+        recovery = await recover_pre_merge(
+            Path(worktree), allow_list=allow_list
+        )
+        if recovery.recovered:
+            log.info(
+                "patch_r_pre_merge_recovery",
+                story_id=story_id,
+                worktree=worktree,
+                commit_sha=recovery.commit_sha,
+                staged=list(recovery.staged_paths),
+                out_of_scope=list(recovery.out_of_scope_paths),
+            )
+        elif recovery.error:
+            log.warning(
+                "patch_r_pre_merge_recovery_failed",
+                story_id=story_id,
+                worktree=worktree,
+                error=recovery.error,
+                out_of_scope=list(recovery.out_of_scope_paths),
+            )
+        elif recovery.out_of_scope_paths:
+            log.info(
+                "patch_w_all_dirty_out_of_scope",
+                story_id=story_id,
+                worktree=worktree,
+                out_of_scope=list(recovery.out_of_scope_paths),
+            )
 
     integration_branch = f"integration/{cfg.wave}"
     feature_branch = f"feature/{story_id}"

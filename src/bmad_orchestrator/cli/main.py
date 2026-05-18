@@ -22,9 +22,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import typer
@@ -37,12 +40,55 @@ from bmad_orchestrator.cli import models_yaml
 from bmad_orchestrator.cli.i18n import t
 from bmad_orchestrator.cli.tui import DashboardSnapshot, render_once, run_live
 from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.runtime.multi_run import (
+    MultiProjectPlan,
+    MultiRunError,
+    ProjectIsolationError,
+    ProjectRunResult,
+    ProjectSlot,
+    SharedSpendTracker,
+    run_multi,
+)
+from bmad_orchestrator.runtime.project_registry import (
+    ProjectRegistryError,
+    ProjectsRegistry,
+    load_registry,
+    register_project,
+    registry_path,
+    resume_hint,
+    save_registry,
+    scan_registry,
+)
+from bmad_orchestrator.runtime.project_registry import doctor as run_doctor
 
 app = typer.Typer(
-    help="bmad-orchestrator — autonomous BMad Phase 4 agent",
+    help="Virgil — autonomous BMad Phase 4 agent (package: bmad-orchestrator)",
     no_args_is_help=True,
 )
 console = Console()
+
+# Initiative #1 (Task 1.1) — preset parallelism slots for --parallel CLI flag.
+# Keep this list narrow: each preset bakes assumptions about memory/CPU caps
+# (see Initiative #1 Task 1.3 cgroup work). Adding a value here without a
+# matching sandbox preset = silent over-subscription on a busy host.
+PARALLEL_PRESETS: tuple[int, ...] = (1, 3, 5, 10)
+
+
+# H-B (S11 re-review): regex-validate CLI inputs that downstream code embeds
+# in shell args, file paths, branch names, or registry lookups. Mirrors the
+# registry's `_SLUG_RE` for project slugs; wave/story patterns accept dots so
+# operators can pass "1.5" or "Epic1.Story1" without escaping.
+_PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_WAVE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_STORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_cli_token(value: str, *, name: str, pattern: re.Pattern[str]) -> None:
+    """Raise typer.BadParameter if value violates the allowed pattern."""
+    if not pattern.match(value):
+        raise typer.BadParameter(
+            f"invalid --{name} {value!r}: must match {pattern.pattern}"
+        )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -105,6 +151,13 @@ def run(
     project: str = typer.Option(..., "--project", help="Target project name"),
     wave: str = typer.Option(..., "--wave", help="Wave identifier (e.g. 1a)"),
     max_parallel: int = typer.Option(3, "--max-parallel"),
+    parallel: int | None = typer.Option(
+        None, "--parallel",
+        help=(
+            "Preset N parallel workers (1, 3, 5, 10). Overrides --max-parallel "
+            "if set. See Initiative #1 Task 1.1."
+        ),
+    ),
     model: str | None = typer.Option(None, "--model", help="Set all roles to one model"),
     planner_model: str | None = typer.Option(None, "--planner-model"),
     reviewer_model: str | None = typer.Option(None, "--reviewer-model"),
@@ -118,8 +171,9 @@ def run(
         True, "--mock/--real",
         help=(
             "Mock-mode E2E pilot — no real spawns. Default ON (N3 FS6); "
-            "use --real for real-mode (requires ANTHROPIC_API_KEY + claude "
-            "binary)."
+            "use --real for real-mode. Real-mode runs on Claude subscription "
+            "(claude -p CLI); ANTHROPIC_API_KEY is only needed for the bot's "
+            "NL intent-router (slash-commands work without it)."
         ),
     ),
     max_stories: int = typer.Option(
@@ -140,6 +194,17 @@ def run(
     ),
 ) -> None:
     """Запустить оркестратор на указанной wave."""
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
+    for sid in story:
+        _validate_cli_token(sid, name="story", pattern=_STORY_RE)
+    if parallel is not None:
+        if parallel not in PARALLEL_PRESETS:
+            raise typer.BadParameter(
+                f"--parallel must be one of: {', '.join(str(p) for p in PARALLEL_PRESETS)}"
+            )
+        max_parallel = parallel
+
     models_cfg = _resolve_models(
         model=model,
         planner_model=planner_model,
@@ -152,6 +217,9 @@ def run(
 
     if daemon:
         # Spawn ourselves detached (§14.4 mode 2).
+        # --parallel already collapsed into max_parallel above; pass only the
+        # underlying integer so the daemon child reproduces the chosen slot
+        # count without re-validating the preset.
         args = [sys.executable, "-m", "bmad_orchestrator.cli", "run",
                 "--project", project, "--wave", wave,
                 "--max-parallel", str(max_parallel),
@@ -177,7 +245,8 @@ def run(
         return
 
     console.print(
-        f"[cyan]starting[/cyan] project={project} wave={wave} "
+        f"[bold cyan]Virgil[/bold cyan] [cyan]starting[/cyan] "
+        f"project={project} wave={wave} "
         f"max_parallel={max_parallel} mock={mock}",
     )
     console.print(
@@ -235,6 +304,10 @@ def status(
     iterations: int | None = typer.Option(None, "--iterations", hidden=True),
 ) -> None:
     """Снимок состояния или live TUI (§14.2)."""
+    if project is not None:
+        _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+    if wave is not None:
+        _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     if live or watch:
         run_live(
             lambda: _build_snapshot(project=project, wave=wave),
@@ -268,6 +341,8 @@ def stop(graceful: bool = typer.Option(True, "--graceful/--hard")) -> None:
 @app.command()
 def budget(wave: str | None = typer.Option(None, "--wave")) -> None:
     """Показать текущий бюджет."""
+    if wave is not None:
+        _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     settings = load_settings()
     table = Table(title=f"Budget ({wave or 'overall'})", show_header=True)
     table.add_column("scope")
@@ -287,6 +362,9 @@ def logs(
     tail: int = typer.Option(50, "--tail"),
 ) -> None:
     """Tail JSONL событий worker'а."""
+    # Worker id flows into ``rglob(f"*{worker}*.jsonl")`` — unvalidated glob
+    # metachars (``**``, ``?``, ``[abc]``) would trigger a full-tree walk.
+    _validate_cli_token(worker, name="worker", pattern=_STORY_RE)
     settings = load_settings()
     runs = settings.target_project / "_bmad-output" / "runs"
     candidates = sorted(runs.rglob(f"*{worker}*.jsonl"), reverse=True)
@@ -302,6 +380,7 @@ def logs(
 @app.command()
 def dag(wave: str = typer.Option(..., "--wave")) -> None:
     """Показать DAG в ASCII."""
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     from bmad_orchestrator.runtime.dag_planner import DagPlanner
 
     planner = DagPlanner.from_target()
@@ -330,6 +409,7 @@ def dag(wave: str = typer.Option(..., "--wave")) -> None:
 @app.command()
 def retro(wave: str = typer.Option(..., "--wave")) -> None:
     """Запустить retrospective вручную."""
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     console.print(f"[cyan]→[/cyan] retro wave={wave} (will use bmad-retrospective skill)")
 
 
@@ -359,6 +439,7 @@ def validate_policy(
 @app.command()
 def memory(wave: str = typer.Option(..., "--wave")) -> None:
     """Показать lessons из wave."""
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     settings = load_settings()
     mem = settings.orchestrator_home / ".claude" / "memory" / "per-wave" / f"{wave}-retrospective.md"
     if not mem.is_file():
@@ -416,6 +497,378 @@ def model_save() -> None:
     console.print(f"[green]saved[/green] {path}")
 
 
+# ── multi-project registry (Initiative #3 Task 3.1-3.2) ──────────────────────
+
+
+def _load_registry_for_cli() -> tuple[Path, ProjectsRegistry]:
+    settings = load_settings()
+    path = registry_path(orchestrator_home=settings.orchestrator_home)
+    try:
+        reg = load_registry(path)
+    except Exception as exc:
+        console.print(f"[red]registry load failed[/red] {path}: {exc}")
+        raise typer.Exit(code=2) from exc
+    return path, reg
+
+
+@app.command()
+def init(
+    project_path: Path = typer.Argument(  # noqa: B008 — typer pattern
+        ..., help="Absolute path to the BMad project to register"
+    ),
+    slug: str | None = typer.Option(
+        None, "--slug", help="Override auto-derived slug (default = basename)"
+    ),
+) -> None:
+    """Register a project in the multi-project registry (Init #3 Task 3.1)."""
+    path, reg = _load_registry_for_cli()
+    try:
+        new_reg, final_slug, entry = register_project(reg, project_path, slug=slug)
+    except ProjectRegistryError as exc:
+        console.print(f"[red]init failed[/red]: {exc}")
+        raise typer.Exit(code=2) from exc
+    save_registry(new_reg, path)
+    console.print(
+        f"[green]registered[/green] {final_slug} → {entry.path} "
+        f"(layout={entry.bmad_layout}) at {path}"
+    )
+
+
+@app.command()
+def scan() -> None:
+    """List all known projects with on-disk status (Init #3 Task 3.2)."""
+    _, reg = _load_registry_for_cli()
+    rows = scan_registry(reg)
+    if not rows:
+        console.print("[dim]registry empty — run `bmad-orchestrator init <path>` first[/dim]")
+        return
+    table = Table(title="Known projects", show_header=True)
+    table.add_column("slug", style="bold")
+    table.add_column("layout")
+    table.add_column("status")
+    table.add_column("path")
+    table.add_column("detail")
+    for row in rows:
+        colour = {"ok": "green", "stale": "yellow", "missing": "red"}[row.status]
+        table.add_row(
+            row.slug,
+            row.bmad_layout,
+            f"[{colour}]{row.status}[/{colour}]",
+            str(row.path),
+            row.detail or "",
+        )
+    console.print(table)
+
+
+@app.command()
+def doctor(
+    project: str = typer.Argument(..., help="Project slug (from `scan`)"),
+) -> None:
+    """Run health checks on one project (Init #3 Task 3.2)."""
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+    _, reg = _load_registry_for_cli()
+    report = run_doctor(reg, project)
+    table = Table(title=f"doctor {project}", show_header=True)
+    table.add_column("check", style="bold")
+    table.add_column("ok")
+    table.add_column("detail")
+    for check in report.checks:
+        table.add_row(
+            check.name,
+            "[green]ok[/green]" if check.ok else "[red]fail[/red]",
+            check.detail,
+        )
+    console.print(table)
+    if not report.healthy:
+        raise typer.Exit(code=1)
+
+
+@app.command(name="resume-project")
+def resume_project(
+    project: str = typer.Argument(..., help="Project slug to resume"),
+) -> None:
+    """Print a shell hint to resume work on a project (Init #3 Task 3.2).
+
+    Named ``resume-project`` because the top-level ``resume`` verb is already
+    bound to the orchestrator pause/resume daemon control.
+    """
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+    _, reg = _load_registry_for_cli()
+    console.print(resume_hint(reg, project))
+
+
+# ── multi-project run (Init #3 Task 3.3-3.4) ─────────────────────────────────
+
+
+# Review finding P1-C — bound child stderr in memory. Real wave can run for hours
+# and a chatty sub-agent can emit MBs of warnings; ``proc.communicate()`` keeps
+# every byte in RAM and we ship the tail to the result anyway. Cap = 64 KiB —
+# tail is what matters for error context.
+_SUBPROCESS_STDERR_CAP_BYTES = 64 * 1024
+
+
+# Review finding P1-D — env allow-list for child subprocess. Mirror of
+# ``runtime.sandbox._SANDBOX_DEFAULT_ENV_ALLOWLIST`` discipline: never inherit
+# orchestrator-internal env (``BMAD_DISABLE_BUDGET``, ``BMAD_AUTO_SPLIT``,
+# ``BMAD_PROJECTS_REGISTRY``, ``BMAD_REQUIRE_CGROUP``…) into a project worker
+# so a parent-shell flag cannot silently disable the very gates ``multi`` was
+# added to enforce. The only ``BMAD_*`` overrides allowed are the ones this
+# module *explicitly* sets per slot — see ``_subprocess_env``.
+_SUBPROCESS_ENV_ALLOWLIST: frozenset[str] = frozenset({
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TERM",
+    "SHELL",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "XDG_RUNTIME_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "TMPDIR",
+})
+
+
+def _subprocess_env(slot_path: Path, spend_report: Path) -> dict[str, str]:
+    """Build the env for a per-project subprocess from a strict allow-list.
+
+    Per review finding P1-D: orchestrator-internal env (``BMAD_*``,
+    ``ORCHESTRATOR_*``) is *not* propagated. The two slot-scoped variables
+    the child genuinely needs (``ORCHESTRATOR_TARGET_PROJECT`` and
+    ``BMAD_MULTI_SPEND_REPORT``) are appended explicitly.
+    """
+    env: dict[str, str] = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _SUBPROCESS_ENV_ALLOWLIST
+    }
+    env["ORCHESTRATOR_TARGET_PROJECT"] = str(slot_path)
+    env["BMAD_MULTI_SPEND_REPORT"] = str(spend_report)
+    return env
+
+
+async def _drain_capped(
+    stream: asyncio.StreamReader | None, cap_bytes: int
+) -> bytes:
+    """Drain ``stream`` to EOF, keeping only the first ``cap_bytes``.
+
+    Continues reading past the cap so the child's stderr PIPE never fills and
+    blocks ``proc.wait()``; the overflow is discarded. Returns the captured
+    head as bytes.
+    """
+    if stream is None:
+        return b""
+    buf = bytearray()
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            break
+        if len(buf) < cap_bytes:
+            buf.extend(chunk[: cap_bytes - len(buf)])
+    return bytes(buf)
+
+
+async def _subprocess_runner(
+    slot: ProjectSlot,
+    tracker: SharedSpendTracker,
+    plan: MultiProjectPlan,
+) -> ProjectRunResult:
+    """Real runner — spawns ``bmad-orchestrator run --project <slug>`` per slot.
+
+    Per-project isolation = subprocess env: ``ORCHESTRATOR_TARGET_PROJECT``
+    is set to the slot's path so every ``load_settings()`` inside the child
+    resolves to that project's tree. State.db rows, project memory files,
+    and sprint-status writes therefore never cross project boundaries.
+
+    The subprocess returncode is the completion signal. Final per-project
+    spend is read from a child-written ``spend.json`` (review finding P1-A:
+    parent <-> child handoff via filesystem since stdout is discarded), then
+    folded into the shared :class:`SharedSpendTracker` so the daily cap halts
+    subsequent waves once the aggregate is reached.
+    """
+    spend_report = Path(
+        tempfile.mkdtemp(prefix=f"bmad-multi-{slot.slug}-")
+    ) / "spend.json"
+    env = _subprocess_env(slot.path, spend_report)
+    args = [
+        sys.executable, "-m", "bmad_orchestrator.cli", "run",
+        "--project", slot.slug,
+        "--wave", plan.wave,
+        "--max-parallel", str(slot.parallel),
+        "--max-stories", str(plan.per_project_max_stories),
+        "--max-spend-usd",
+        str(plan.daily_max_spend_usd / max(len(plan.projects), 1)),
+    ]
+    args.append("--mock" if plan.mock else "--real")
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        # Review finding P1-C — orchestrator stdout is chatty (per-story logs,
+        # cost ticks). Discard at OS level so PIPE never fills and we don't
+        # buffer MBs of text we won't use.
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    # Review finding P1-B — hard timeout. A hung child (auth prompt, network
+    # deadlock, runaway sub-agent loop) must not park the entire multi-run
+    # forever. On expiry: SIGTERM → 30s grace → SIGKILL; surface as failed
+    # ProjectRunResult so siblings continue.
+    timed_out = False
+    stderr = b""
+
+    async def _wait_and_drain() -> bytes:
+        captured, _ = await asyncio.gather(
+            _drain_capped(proc.stderr, _SUBPROCESS_STDERR_CAP_BYTES),
+            proc.wait(),
+        )
+        return captured
+
+    try:
+        stderr = await asyncio.wait_for(
+            _wait_and_drain(),
+            timeout=plan.per_project_timeout_sec,
+        )
+    except TimeoutError:
+        timed_out = True
+        try:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=30)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+        except ProcessLookupError:
+            pass
+    spent_usd = _read_spend_report(spend_report)
+    if spent_usd > 0:
+        await tracker.add(spent_usd)
+    completed = (not timed_out) and proc.returncode == 0
+    if timed_out:
+        err = f"timeout after {plan.per_project_timeout_sec}s"
+    elif completed:
+        err = None
+    else:
+        err = (
+            f"exit {proc.returncode}: "
+            f"{stderr.decode('utf-8', errors='replace')[:400]}"
+        )
+    return ProjectRunResult(
+        slug=slot.slug,
+        completed=completed,
+        spent_usd=spent_usd,
+        error=err,
+    )
+
+
+def _read_spend_report(path: Path) -> float:
+    """Read ``spend.json`` written by a child orchestrator (P1-A handoff).
+
+    Returns the reported ``spent_usd`` on success, ``0.0`` on missing or
+    malformed file. Best-effort cleanup of the tempdir; we never raise from
+    a parsing error because the subprocess returncode is the authoritative
+    completion signal — failed cost telemetry should not mask a real exit.
+    """
+    try:
+        if not path.exists():
+            return 0.0
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return float(payload.get("spent_usd", 0.0))
+    except (OSError, ValueError, TypeError):
+        return 0.0
+    finally:
+        try:
+            if path.exists():
+                path.unlink()
+            if path.parent.exists() and path.parent.name.startswith(
+                "bmad-multi-"
+            ):
+                path.parent.rmdir()
+        except OSError:
+            pass
+
+
+@app.command()
+def multi(
+    projects: str = typer.Option(
+        ..., "--projects",
+        help="Comma-separated registry slugs (e.g. antares,odyssey)",
+    ),
+    wave: str = typer.Option(..., "--wave"),
+    parallel: int = typer.Option(
+        10, "--parallel",
+        help="Total worker slots across all projects (split evenly)",
+    ),
+    max_stories: int = typer.Option(
+        50, "--max-stories", help="Per-project hard cap on story spawns",
+    ),
+    daily_max_spend_usd: float = typer.Option(
+        50.0, "--daily-max-spend-usd",
+        help="Shared daily USD cap across all projects (single guard)",
+    ),
+    mock: bool = typer.Option(True, "--mock/--real"),
+) -> None:
+    """Запустить оркестратор одновременно над несколькими проектами (Init #3 Task 3.3-3.4)."""
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
+    slugs = tuple(s.strip() for s in projects.split(",") if s.strip())
+    if not slugs:
+        raise typer.BadParameter("--projects must list at least one slug")
+    for slug in slugs:
+        _validate_cli_token(slug, name="projects", pattern=_PROJECT_RE)
+
+    plan = MultiProjectPlan(
+        projects=slugs,
+        total_parallel=parallel,
+        wave=wave,
+        per_project_max_stories=max_stories,
+        daily_max_spend_usd=daily_max_spend_usd,
+        mock=mock,
+    )
+    _, reg = _load_registry_for_cli()
+
+    try:
+        outcome = asyncio.run(
+            run_multi(plan, registry=reg, runner_fn=_subprocess_runner)
+        )
+    except (MultiRunError, ProjectIsolationError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    verdict = "[green]OK[/green]" if outcome.succeeded else "[red]FAIL[/red]"
+    console.print(
+        f"[bold]Multi-project run {verdict}[/bold] — "
+        f"projects={len(outcome.per_project)} total_spent=${outcome.total_spent_usd:.2f}"
+    )
+    if outcome.aborted_reason:
+        console.print(f"[red]aborted: {outcome.aborted_reason}[/red]")
+    table = Table(show_header=True)
+    table.add_column("project")
+    table.add_column("done")
+    table.add_column("spent_usd", justify="right")
+    table.add_column("stories", justify="right")
+    table.add_column("error", overflow="fold")
+    for slug in plan.projects:
+        r = outcome.per_project.get(slug)
+        if r is None:
+            table.add_row(slug, "—", "—", "—", "not run")
+            continue
+        table.add_row(
+            slug,
+            "✓" if r.completed else "✗",
+            f"{r.spent_usd:.2f}",
+            str(r.stories_done),
+            r.error or "",
+        )
+    console.print(table)
+    if not outcome.succeeded:
+        raise typer.Exit(code=1)
+
+
 # ── skill upgrade pipeline (§4 E4) ───────────────────────────────────────────
 
 
@@ -428,7 +881,7 @@ def _skill_status_table(snapshot: dict[str, object]) -> Table:
     pending_raw = snapshot.get("pending_conflicts") or []
     patches: list[str] = [str(p) for p in patches_raw] if isinstance(patches_raw, list) else []
     pending: list[str] = [str(p) for p in pending_raw] if isinstance(pending_raw, list) else []
-    table = Table(title="bmad-orchestrator skills", show_header=True)
+    table = Table(title="Virgil — skills", show_header=True)
     table.add_column("field", style="bold")
     table.add_column("value")
     if isinstance(version_raw, dict):
@@ -560,6 +1013,8 @@ def policy_apply(
     live policy YAML. Every applied proposal emits a ``policy_proposal_applied``
     audit event with before/after values for rollback.
     """
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+
     from bmad_orchestrator.runtime.lesson_parser import (
         LessonProposal,
         LessonProposalInvalidError,
@@ -643,6 +1098,11 @@ def policy_rollback(
     so concurrent live-tuning writers see a complete file at all times.
     Emits a ``policy_proposal_rolled_back`` audit entry on success.
     """
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+    # ``proposal_id`` becomes the suffix of ``.yaml.bak-<ts>``; same charset
+    # constraints as a story id so a malformed timestamp can't path-traverse.
+    _validate_cli_token(proposal_id, name="proposal-id", pattern=_STORY_RE)
+
     from bmad_orchestrator.runtime.lesson_parser import (
         PolicyApplyError,
         rollback_policy,

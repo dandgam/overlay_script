@@ -23,8 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
+import tempfile
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,24 +44,39 @@ from bmad_orchestrator.runtime.embedded_skills import (
     apply_embedded_skills,
 )
 from bmad_orchestrator.runtime.sandbox import (
+    DEFAULT_CGROUP_LIMITS,
     NetworkPolicy,
     NoSandbox,
     Sandbox,
     detect_sandbox,
 )
 
-CLAUDE_BIN_DEFAULT = "claude"
-DEFAULT_SKILL_INVOCATION = "/bmad-auto-dev"
+log = logging.getLogger(__name__)
 
-# FS3 H15: Worker subprocesses run user stories that can take ~30 min each on
-# a hot path; an upper bound of 24h still catches genuinely-hung workers
-# (e.g. claude binary deadlocked on stdin) without killing legitimate runs.
-# Override via BMAD_WORKER_TIMEOUT_SEC env (positive int).
+CLAUDE_BIN_DEFAULT = "claude"
+# Patch Y 2026-05-18: bypass `/bmad-auto-dev` slash-command. LLM workers
+# repeatedly halt on perceived layout mismatches even with minimal SKILL.md.
+# Replacement prompt is a direct execution order — Claude treats it as a task
+# (run this bash, report exit code), not a skill to reason about.
+DEFAULT_SKILL_INVOCATION = (
+    "Execute exactly this bash command and nothing else: "
+    "bash .claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh --max 1. "
+    "Do not read other files. Do not analyse the project layout — the runner "
+    "auto-detects everything. Do not ask me any questions. When the command "
+    "exits, report only its exit code and the last 3 lines of stderr."
+)
+
+# Patch H (canonical port 2026-05-18): default 30 min, was 24h. Long-running
+# legitimate stories should set BMAD_WORKER_TIMEOUT_SEC explicitly; the default
+# now matches Odyssey's bmad-auto-dev-runner.sh upstream value (1800s) so
+# stuck workers are killed within one orchestrator round instead of stalling
+# the wave overnight. Reference: ~/.claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh
+# lines 91-127 (`# Patch H 2026-...`).
 def _worker_timeout_sec() -> int:
     raw = os.environ.get("BMAD_WORKER_TIMEOUT_SEC", "")
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
-    return 86_400
+    return 1800
 
 # FS1 B8: workers do NOT call LLMs (per spec §16.3 dev role isolation), so the
 # only env vars they need are the bare-minimum runtime ones. Everything else —
@@ -97,6 +115,186 @@ class WorkerHandle:
     fallback_reason: str | None = None
     real_requested: bool = False
     sandbox_kind: str = "none"
+    base_sha: str | None = None
+    isolated_home_path: str | None = None
+    cgroup_limits_applied: dict[str, str] | None = None
+
+
+# Initiative #1 Task 1.4 — per-worker HOME snapshot.
+#
+# Parallel workers (max_parallel > 1) cannot safely share the host's
+# ``~/.claude*`` files: the Claude CLI writes session state, lock files,
+# and credential rotation to these paths and concurrent writes corrupt the
+# JSON / SQLite stores. The fix is to give every worker its own copy:
+#
+#   /tmp/bmad-worker-<story>-<n>/.claude/
+#   /tmp/bmad-worker-<story>-<n>/.claude.json
+#   /tmp/bmad-worker-<story>-<n>/.local/share/claude/
+#
+# We then pass the temp root to ``Sandbox.wrap_command(worker_home_overlay=...)``
+# which bwrap-binds the snapshot OVER the host paths inside the namespace,
+# so the worker still sees ``$HOME/.claude`` resolve to the right disk
+# location — just one that's exclusively its own.
+#
+# Cleanup is best-effort in ``_wait_and_finalize`` (after exit). We avoid
+# atexit because the parent process may outlive many workers and accumulate
+# stale dirs otherwise.
+
+# Files to symlink/skip rather than copy (large session state with no
+# concurrency-sensitive writes; keeping host originals is faster + safer).
+_SYMLINK_CLAUDE_SUBPATHS: frozenset[tuple[str, ...]] = frozenset({
+    (".claude", "projects"),
+    (".local", "share", "claude"),
+})
+
+
+def _create_isolated_home(
+    *, worker_label: str, host_home: Path | None = None
+) -> Path:
+    """Snapshot ``~/.claude*`` into a private tmpdir for one worker.
+
+    Returns the overlay root (parent dir holding ``.claude/`` etc). The
+    overlay is suitable for passing as ``worker_home_overlay`` to
+    ``Sandbox.wrap_command``. Caller is responsible for cleanup via
+    ``_cleanup_isolated_home``.
+
+    Heuristic copies:
+      * ``~/.claude.json``         → file copy (small, contention-prone).
+      * ``~/.claude/`` (tree)      → file copy minus ``projects/`` (large
+                                     conversation history; not needed by
+                                     a fresh worker spawn).
+      * ``~/.local/share/claude/`` → directory created, NOT copied
+                                     (versions/installer cache; worker
+                                     can re-populate).
+
+    Missing source paths are silently skipped — the overlay still works
+    because the bwrap binds we add conditionally check for existence.
+    """
+    home = host_home if host_home is not None else Path(os.path.expanduser("~"))
+    overlay = Path(tempfile.mkdtemp(prefix=f"bmad-worker-{worker_label}-"))
+
+    # ~/.claude.json
+    src_json = home / ".claude.json"
+    if src_json.exists() and src_json.is_file():
+        try:
+            shutil.copy2(src_json, overlay / ".claude.json")
+        except OSError as exc:
+            log.warning("isolated_home copy .claude.json failed: %s", exc)
+
+    # ~/.claude/ (tree, minus heavy subdirs)
+    src_claude = home / ".claude"
+    if src_claude.exists() and src_claude.is_dir():
+        dest_claude = overlay / ".claude"
+        dest_claude.mkdir(parents=True, exist_ok=True)
+        # Walk top-level only; recurse selectively.
+        for entry in src_claude.iterdir():
+            rel = (".claude", entry.name)
+            dest = dest_claude / entry.name
+            try:
+                if rel in _SYMLINK_CLAUDE_SUBPATHS:
+                    # Create empty placeholder dir so claude doesn't EROFS;
+                    # don't copy GB of project history.
+                    dest.mkdir(exist_ok=True)
+                    continue
+                if entry.is_dir():
+                    shutil.copytree(entry, dest, symlinks=True, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(entry, dest)
+            except OSError as exc:
+                log.warning("isolated_home copy %s failed: %s", entry, exc)
+
+    # ~/.local/share/claude/ — create empty so bwrap bind has a target;
+    # claude will re-populate version state on first run.
+    dest_share = overlay / ".local" / "share" / "claude"
+    dest_share.mkdir(parents=True, exist_ok=True)
+
+    return overlay
+
+
+def _cleanup_isolated_home(overlay: Path | None) -> None:
+    """Best-effort rm-rf of a worker's HOME overlay. Never raises.
+
+    Safety: only rm-rf paths whose basename starts with the ``bmad-worker-``
+    prefix used by :func:`_create_isolated_home`. A bug that passed any
+    other path here (project worktree, user $HOME, etc.) must be a no-op so
+    we never destroy data that does not belong to this helper.
+    """
+    if overlay is None:
+        return
+    if not overlay.name.startswith("bmad-worker-"):
+        return
+    if not str(overlay).startswith(tempfile.gettempdir()):
+        return
+    try:
+        if overlay.exists():
+            shutil.rmtree(overlay, ignore_errors=True)
+    except OSError as exc:
+        log.warning("isolated_home cleanup failed for %s: %s", overlay, exc)
+
+
+def cleanup_stale_worker_homes(max_age_seconds: float = 86400.0) -> int:
+    """Remove ``/tmp/bmad-worker-*`` snapshots older than ``max_age_seconds``.
+
+    Review finding H-2: ``_create_isolated_home`` copies live OAuth tokens
+    (``~/.claude.json``, ``~/.claude/``) into ``/tmp/bmad-worker-*``. A
+    SIGKILL/OOM on the parent skips ``_cleanup_isolated_home`` and the
+    snapshot lingers on disk with live credentials until reboot. Call this
+    at pilot startup so each new run garbage-collects orphans from prior
+    crashes that share the current UID.
+
+    Safety:
+    * Only paths whose basename starts with ``bmad-worker-`` (the
+      ``_create_isolated_home`` prefix) are considered.
+    * Only paths inside ``tempfile.gettempdir()`` are touched (so a
+      symlinked ``/tmp`` does not redirect deletion elsewhere).
+    * Only entries owned by the current UID are removed (so a multi-user
+      host cannot have one user clean another user's snapshots).
+    * Mtime check uses ``max_age_seconds`` (default 24h) so an in-flight
+      sibling pilot whose worker dir mtime hasn't bumped in N hours is
+      never touched. The default sits well above
+      ``MultiProjectPlan.per_project_timeout_sec`` (4h) so even a
+      maximally-long real-mode wave whose worker dir mtime only reflects
+      creation time is safe from cleanup by a sibling pilot startup.
+
+    Returns the count of removed entries.
+    """
+    tmp_root = Path(tempfile.gettempdir())
+    if not tmp_root.is_dir():
+        return 0
+    now = time.time()
+    cutoff = now - max_age_seconds
+    uid = os.getuid()
+    removed = 0
+    for entry in tmp_root.glob("bmad-worker-*"):
+        if not entry.name.startswith("bmad-worker-"):
+            continue
+        try:
+            stat = entry.lstat()
+        except OSError:
+            continue
+        if stat.st_uid != uid:
+            continue
+        if stat.st_mtime > cutoff:
+            continue
+        try:
+            if entry.is_symlink() or entry.is_file():
+                entry.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+        except OSError as exc:
+            log.warning(
+                "stale_worker_home_cleanup_failed path=%s error=%s",
+                str(entry),
+                str(exc),
+            )
+    if removed:
+        log.info(
+            "stale_worker_homes_cleaned count=%d cutoff_age_seconds=%d",
+            removed,
+            max_age_seconds,
+        )
+    return removed
 
 
 def _resolve_claude_bin() -> str | None:
@@ -137,7 +335,12 @@ async def _stream_subprocess_stdout(
 
 
 async def _wait_and_finalize(
-    process: asyncio.subprocess.Process, jsonl_path: Path, worktree: str, story_id: str
+    process: asyncio.subprocess.Process,
+    jsonl_path: Path,
+    worktree: str,
+    story_id: str,
+    *,
+    isolated_home_overlay: Path | None = None,
 ) -> None:
     """Wait for subprocess exit; append final worker_completed event.
 
@@ -145,6 +348,9 @@ async def _wait_and_finalize(
     default 24h) so a deadlocked worker can't pin the background task forever.
     On timeout: SIGKILL + emit subprocess_timeout audit + emit
     worker_completed with status=failure.
+
+    Initiative #1 Task 1.4: if ``isolated_home_overlay`` was used, rm-rf the
+    snapshot tmpdir after process exit (best-effort; never raises).
     """
     timeout = _worker_timeout_sec()
     try:
@@ -173,6 +379,7 @@ async def _wait_and_finalize(
             "status": "success" if rc == 0 else "failure",
         },
     )
+    _cleanup_isolated_home(isolated_home_overlay)
 
 
 async def spawn_worker(
@@ -190,6 +397,9 @@ async def spawn_worker(
     sandbox_network: NetworkPolicy = "none",
     embedded_skills_root: Path | str | None = None,
     allowed_worktree_root: Path | str | None = None,
+    base_sha: str | None = None,
+    isolated_home: bool = False,
+    cgroup_limits: dict[str, str] | None = None,
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 
@@ -204,6 +414,16 @@ async def spawn_worker(
     ``.claude/skills/``. ``allowed_worktree_root`` (required when the previous
     parameter is set) gates the copy to worktrees strictly inside the configured
     root — typically ``<target>/.worktrees``.
+
+    Initiative #1 Task 1.3/1.4 (real-mode only):
+    * ``isolated_home=True`` — snapshot the host ``~/.claude*`` files into a
+      per-worker tmp dir and bwrap-bind the snapshot into the sandbox. Required
+      when running ``max_parallel > 1`` to avoid corrupting the shared Claude
+      CLI state. The overlay is cleaned up after the worker exits.
+    * ``cgroup_limits`` — per-worker systemd scope (``MemoryMax``, ``CPUQuota``,
+      ``TasksMax``…). Pass :data:`runtime.sandbox.DEFAULT_CGROUP_LIMITS` for the
+      project default (8 GiB / 200% CPU / 16384 tasks). Ignored in mock mode
+      and when ``use_sandbox=False``.
     """
     wt_path = Path(worktree)
     if not wt_path.exists():
@@ -298,6 +518,7 @@ async def spawn_worker(
             fallback_reason=fallback_reason,
             real_requested=real_requested,
             sandbox_kind=sandbox_kind,
+            base_sha=base_sha,
         )
 
     # Real-mode subprocess.
@@ -316,11 +537,31 @@ async def spawn_worker(
     # so the inner ``claude -p`` cannot reach prod files no matter what bash
     # tricks it attempts. ``_scan_bash`` remains as defence-in-depth.
     sandbox: Sandbox = detect_sandbox() if use_sandbox else NoSandbox()
+
+    # Initiative #1 Task 1.4 — per-worker HOME snapshot for parallel safety.
+    # Only meaningful with a real sandbox (NoSandbox ignores the overlay arg,
+    # and skipping the snapshot when no isolation exists avoids surprising
+    # the operator with tmp churn under degraded mode).
+    overlay_path: Path | None = None
+    if isolated_home and isinstance(sandbox, NoSandbox) is False:
+        worker_label = f"{story_id.replace('/', '_')[:48]}-{os.getpid()}"
+        try:
+            overlay_path = _create_isolated_home(worker_label=worker_label)
+        except OSError as exc:
+            log.warning(
+                "isolated_home snapshot failed for %s (%s); proceeding "
+                "with shared host HOME — concurrent workers may race",
+                story_id, exc,
+            )
+            overlay_path = None
+
     wrapped_args = sandbox.wrap_command(
         args,
         worktree=Path(worktree),
         network=sandbox_network,
         env=merged_env,
+        worker_home_overlay=overlay_path,
+        cgroup_limits=cgroup_limits,
     )
 
     process = await asyncio.create_subprocess_exec(
@@ -346,6 +587,9 @@ async def spawn_worker(
             "mock": False,
             "sandbox_used": sandbox.kind != "none",
             "sandbox_kind": sandbox.kind,
+            "isolated_home": overlay_path is not None,
+            "isolated_home_path": str(overlay_path) if overlay_path else None,
+            "cgroup_limits": cgroup_limits if cgroup_limits else None,
         },
     )
 
@@ -358,7 +602,10 @@ async def spawn_worker(
         background_tasks.add(stdout_task)
         stdout_task.add_done_callback(background_tasks.discard)
     wait_task = asyncio.create_task(
-        _wait_and_finalize(process, jsonl_path, worktree, story_id),
+        _wait_and_finalize(
+            process, jsonl_path, worktree, story_id,
+            isolated_home_overlay=overlay_path,
+        ),
         name=f"worker_wait_{pid}",
     )
     background_tasks.add(wait_task)
@@ -373,6 +620,9 @@ async def spawn_worker(
         process=process,
         mock=False,
         sandbox_kind=sandbox.kind,
+        base_sha=base_sha,
+        isolated_home_path=str(overlay_path) if overlay_path else None,
+        cgroup_limits_applied=dict(cgroup_limits) if cgroup_limits else None,
     )
 
 
@@ -412,6 +662,7 @@ __all__ = [
     "ALLOWED_WORKER_ENV",
     "CLAUDE_BIN_DEFAULT",
     "DEFAULT_BUDGET_CAP_USD",
+    "DEFAULT_CGROUP_LIMITS",
     "DEFAULT_MODEL",
     "DEFAULT_SKILL_INVOCATION",
     "WorkerHandle",

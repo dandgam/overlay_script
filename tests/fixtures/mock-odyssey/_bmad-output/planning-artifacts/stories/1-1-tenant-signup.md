@@ -3,7 +3,7 @@
 - **epic:** 1
 - **status:** ready-for-dev
 - **risk:** low
-- **estimated_tokens:** 40000
+- **estimated_tokens:** 1000
 - **estimated_minutes:** 20
 - **touches_files:**
   - src/tenant/signup.py

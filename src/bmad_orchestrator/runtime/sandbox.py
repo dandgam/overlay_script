@@ -77,6 +77,48 @@ _ENV_AS = "BMAD_SANDBOX_MAX_AS_BYTES"
 _ENV_FSIZE = "BMAD_SANDBOX_MAX_FSIZE_BYTES"
 _ENV_NOFILE = "BMAD_SANDBOX_MAX_NOFILE"
 
+# Initiative #1 Task 1.3 — per-worker cgroup limits via ``systemd-run --user
+# --scope``. prlimit's RLIMIT_NPROC is per-UID (see DEFAULT_MAX_NPROC note),
+# so on a host that runs N parallel workers the per-UID total trivially
+# exceeds the per-process cap and `clone()` fails. Cgroup-scoped limits
+# (MemoryMax/CPUQuota/TasksMax) apply per scope unit instead, giving every
+# worker its own enforced budget independent of host concurrency.
+#
+# These are layered ON TOP of prlimit (defence-in-depth). When systemd-run
+# is unavailable the sandbox proceeds with prlimit only; pass
+# ``BMAD_REQUIRE_CGROUP=1`` to make the cgroup layer mandatory in prod.
+DEFAULT_CGROUP_MEMORY_MAX = "8G"
+DEFAULT_CGROUP_CPU_QUOTA = "200%"
+DEFAULT_CGROUP_TASKS_MAX = "16384"
+DEFAULT_CGROUP_LIMITS: dict[str, str] = {
+    "MemoryMax": DEFAULT_CGROUP_MEMORY_MAX,
+    "CPUQuota": DEFAULT_CGROUP_CPU_QUOTA,
+    "TasksMax": DEFAULT_CGROUP_TASKS_MAX,
+}
+
+
+def _systemd_run_available() -> tuple[bool, str | None]:
+    """Return ``(available, path)`` for ``systemd-run --user --scope``.
+
+    Requires both the binary on PATH *and* a usable user systemd
+    (``$XDG_RUNTIME_DIR`` set + directory exists). On a host that booted
+    without user-session systemd (`systemctl --user` would fail) the
+    ``systemd-run --user`` invocation hangs trying to reach the user manager,
+    so we refuse to prepend it rather than silently breaking spawn.
+    """
+    path = shutil.which("systemd-run")
+    if not path:
+        return False, None
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if not runtime_dir or not Path(runtime_dir).exists():
+        return False, path
+    return True, path
+
+
+def _cgroup_required() -> bool:
+    """``BMAD_REQUIRE_CGROUP=1`` (or true/yes) → fail-loud when cgroup unavailable."""
+    return os.environ.get("BMAD_REQUIRE_CGROUP", "").strip().lower() in {"1", "true", "yes"}
+
 
 def _env_positive_int(name: str, default: int, minimum: int | None = None) -> int:
     """Read ``name`` as positive int from env, fall back to ``default``.
@@ -118,6 +160,8 @@ class Sandbox(Protocol):
         readonly_paths: list[Path] | None = None,
         network: NetworkPolicy = "none",
         env: dict[str, str] | None = None,
+        worker_home_overlay: Path | None = None,
+        cgroup_limits: dict[str, str] | None = None,
     ) -> list[str]:
         """Return ``cmd`` wrapped with backend isolation flags.
 
@@ -134,6 +178,15 @@ class Sandbox(Protocol):
             env: env vars to inject. Caller is responsible for already
                 running them through their allow-list; sandbox only
                 forwards.
+            worker_home_overlay: Initiative #1 Task 1.4 — per-worker HOME
+                snapshot dir; when set the host's ``~/.claude*`` paths are
+                replaced with same-named entries under this overlay.
+                ``NoSandbox`` ignores this.
+            cgroup_limits: Initiative #1 Task 1.3 — when set + systemd-run
+                available, the spawn is wrapped in a per-worker
+                ``systemd-run --user --scope`` with the given ``-p Key=Value``
+                properties (e.g. ``{"MemoryMax": "8G", "CPUQuota": "200%"}``).
+                ``NoSandbox`` ignores this.
 
         Returns:
             New argv list. ``NoSandbox`` returns ``cmd`` unchanged.
@@ -190,12 +243,45 @@ class BwrapSandbox:
         readonly_paths: list[Path] | None = None,
         network: NetworkPolicy = "none",
         env: dict[str, str] | None = None,
+        worker_home_overlay: Path | None = None,
+        cgroup_limits: dict[str, str] | None = None,
     ) -> list[str]:
+        """Wrap ``cmd`` with bwrap isolation + optional cgroup + HOME overlay.
+
+        Initiative #1 Task 1.3/1.4 additions:
+
+        * ``worker_home_overlay`` — when supplied, the host's ``~/.claude``,
+          ``~/.claude.json``, ``~/.local/share/claude`` binds are replaced
+          with the same-named paths under this directory. Caller is
+          responsible for snapshotting/creating the overlay (see
+          :func:`runtime.worker_spawn._create_isolated_home`). Parallel
+          workers each get their own overlay so they no longer race on the
+          host's shared Claude state files.
+
+        * ``cgroup_limits`` — when supplied and ``systemd-run --user --scope``
+          is available, prepend a transient scope unit with the given
+          ``-p Key=Value`` properties (typical: ``MemoryMax``, ``CPUQuota``,
+          ``TasksMax``). The scope wraps prlimit+bwrap so the inner process
+          tree is bound by per-cgroup quotas. If systemd-run is unavailable
+          and ``BMAD_REQUIRE_CGROUP=1`` is set, raises; otherwise logs a
+          warning and continues with prlimit only.
+        """
         if not cmd:
             raise ValueError("cmd must be non-empty")
         wt_abs = Path(worktree).resolve(strict=False)
         if not wt_abs.is_absolute():
             raise ValueError(f"worktree must be absolute: {worktree!r}")
+        overlay_abs: Path | None = None
+        if worker_home_overlay is not None:
+            if not Path(worker_home_overlay).is_absolute():
+                raise ValueError(
+                    f"worker_home_overlay must be absolute: {worker_home_overlay!r}"
+                )
+            overlay_abs = Path(worker_home_overlay).resolve(strict=False)
+            if not overlay_abs.exists():
+                raise FileNotFoundError(
+                    f"worker_home_overlay does not exist: {overlay_abs}"
+                )
 
         wrapped: list[str] = [
             self.bwrap_path,
@@ -206,11 +292,9 @@ class BwrapSandbox:
             "--dev", "/dev",
             "--tmpfs", "/tmp",  # noqa: S108 — bwrap mount point inside the sandbox namespace, not a host path
             "--tmpfs", "/sys",  # FS9 H1 — hide kernel info (LSMs, dmi, network)
-            # FS9 R5 P0-2 — H1 was asymmetric: /sys hidden but /proc still
-            # exposed the same kernel fingerprint (version, cmdline, modules,
-            # kallsyms, cpuinfo, meminfo). Block those individual /proc files
-            # via /dev/null bind. Bash, ps, /proc/self/* still work.
-            "--ro-bind", "/dev/null", "/proc/version",
+            # FS9 R5 P0-2 — block individual /proc kernel fingerprint files.
+            # ``/proc/version`` is needed by the Claude CLI (bun runtime reads
+            # it on startup) so it stays exposed; the rest get redacted.
             "--ro-bind", "/dev/null", "/proc/cmdline",
             "--ro-bind", "/dev/null", "/proc/modules",
             "--ro-bind", "/dev/null", "/proc/kallsyms",
@@ -218,11 +302,150 @@ class BwrapSandbox:
             "--ro-bind", "/dev/null", "/proc/meminfo",
             "--bind", str(wt_abs), str(wt_abs),
             "--chdir", str(wt_abs),
+            # Review finding H-1 — explicit blackouts on sensitive host paths.
+            # ``--ro-bind / /`` exposes every readable file to the worker; a
+            # poisoned story description ("read /home/server/crm/.env for
+            # context") could exfil prod secrets, /etc/shadow, other users'
+            # homes, or this user's auth tokens. Blackout = bind ``/dev/null``
+            # over the path so reads return zero bytes regardless of how the
+            # worker resolves the path. Order matters — these come AFTER the
+            # blanket ``--ro-bind / /`` and BEFORE the writable workspace bind
+            # so they override the open mount but never shadow legitimate work.
+        ]
+        # H-1 sensitive-path blackouts. Directories get an empty ``--tmpfs``
+        # mount (writable but invisible to host); files get ``--ro-bind
+        # /dev/null`` (zero-byte read). Tolerates missing host paths so the
+        # rule list is identical across environments — test hosts without
+        # ``/home/server/crm`` simply skip that entry.
+        #
+        # H-A security follow-up (Phase 4B re-review): expand to cover every
+        # credential store and orchestrator-internal directory readable via
+        # the ``--ro-bind / /`` mount. A poisoned story description that
+        # tells the worker to ``cat ~/.ssh/id_rsa`` or
+        # ``cat ~/.aws/credentials`` would otherwise exfiltrate to the
+        # Anthropic API on the next reasoning turn (stdout JSONL flows back
+        # to the parent and into the next prompt). Blackouts are applied
+        # before the claude_subpaths binds below, so ``~/.claude/`` /
+        # ``~/.claude.json`` / ``~/.local/share/claude/`` (worker-required)
+        # remain accessible while everything else under $HOME is invisible.
+        _host_home = os.path.expanduser("~")
+        # Orchestrator's own state dir (this very repo's ``.claude/``) holds
+        # the ``main-merge-token.json`` single-gate that authorises a merge
+        # to ``main``. Without an explicit blackout the worker can ``cat``
+        # the token and forge a merge. Resolve via __file__ rather than the
+        # configured ``settings.orchestrator_home`` to avoid importing
+        # ``config`` (circular risk) and to cover dev installs that override
+        # ``orchestrator_home`` while still running from this source tree.
+        _orchestrator_state = (
+            Path(__file__).resolve().parents[3] / ".claude"
+        )
+        _SANDBOX_BLACKOUT_PATHS = (
+            # System / other-user secrets (S10 H-1 baseline).
+            "/home/server/crm",
+            "/etc/shadow",
+            "/etc/gshadow",
+            "/etc/sudoers",
+            "/etc/sudoers.d",
+            "/etc/ssh",
+            "/root",
+            # SSH keys, known_hosts, agent socket directory.
+            f"{_host_home}/.ssh",
+            # Cloud / registry credential stores.
+            f"{_host_home}/.aws",
+            f"{_host_home}/.gnupg",
+            f"{_host_home}/.netrc",
+            f"{_host_home}/.docker",
+            f"{_host_home}/.kube",
+            # Git credential helpers (the actual token stores; we
+            # deliberately leave ``~/.gitconfig`` and ``~/.config/git``
+            # READABLE so worker commits still resolve user.email/name —
+            # see Phase 4B re-review HIGH "blackout shadows git identity").
+            f"{_host_home}/.git-credentials",
+            f"{_host_home}/.config/git/credentials",
+            # CLI tool auth stores (github / gitlab / gcloud / azure).
+            f"{_host_home}/.config/gh",
+            f"{_host_home}/.config/gcloud",
+            f"{_host_home}/.config/azure",
+            # Package / language ecosystem credential stores.
+            f"{_host_home}/.npmrc",
+            f"{_host_home}/.pypirc",
+            f"{_host_home}/.cargo/credentials.toml",
+            # Secret managers / infra credential stores.
+            f"{_host_home}/.vault-token",
+            f"{_host_home}/.config/op",
+            f"{_host_home}/.config/sops",
+            f"{_host_home}/.config/pulumi",
+            f"{_host_home}/.terraform.d/credentials.tfrc.json",
+            f"{_host_home}/.config/helm/registry/config.json",
+            f"{_host_home}/.password-store",
+            # Desktop secret stores (libsecret / gnome-keyring) — git
+            # credential.helper=libsecret reads from ~/.local/share/keyrings.
+            f"{_host_home}/.local/share/keyrings",
+            f"/run/user/{os.getuid()}/keyring",
+            f"/run/user/{os.getuid()}/gnupg",
+            # Orchestrator's own state (state.db, tokens, memory, runs).
+            str(_orchestrator_state),
+            f"{_host_home}/.bmad-orchestrator",
+            f"{_host_home}/.config/bmad-orchestrator",
+        )
+        for blackout in _SANDBOX_BLACKOUT_PATHS:
+            blackout_path = Path(blackout)
+            if not blackout_path.exists():
+                continue
+            if blackout_path.is_dir():
+                wrapped += ["--tmpfs", blackout]
+            elif blackout_path.is_file():
+                wrapped += ["--ro-bind", "/dev/null", blackout]
+            else:
+                # Sockets / devices / FIFOs / broken symlinks: bwrap cannot
+                # mount ``/dev/null`` over a non-regular file, and broken
+                # symlinks degrade silently. Log so operators notice when a
+                # blackout entry stops landing (e.g. a credential store
+                # moved/deleted between deploys). NOTE: unix sockets like
+                # ``/var/run/docker.sock`` are NOT blacked out by this loop —
+                # if the orchestrator UID is in the ``docker`` group, the
+                # worker can still ``connect()`` to the daemon and pivot to
+                # host root. Mitigate at host level (drop docker group) or
+                # via user namespace; tracked in backlog.
+                log.warning(
+                    "sandbox blackout %s skipped — path is not a regular "
+                    "file or directory (socket/device/broken symlink)",
+                    blackout,
+                )
+        wrapped += [
             "--unshare-pid",
             "--unshare-uts",
             "--unshare-ipc",
             "--unshare-cgroup-try",
         ]
+
+        # Claude CLI state: the binary writes config to ~/.claude.json,
+        # plugin manifest to ~/.claude/, and version state to
+        # ~/.local/share/claude/. Without writable mounts the worker
+        # `claude -p` exits with EROFS / EACCES on startup.
+        #
+        # Initiative #1 Task 1.4: when ``worker_home_overlay`` is supplied,
+        # bind from the overlay copy at <overlay>/.claude (etc) over the
+        # host paths instead. The bwrap mount makes the worker see its
+        # private snapshot at the same destination path the claude binary
+        # resolves via $HOME — so no env change required.
+        home = Path(os.path.expanduser("~"))
+        claude_subpaths = (
+            (".claude",),
+            (".claude.json",),
+            (".local", "share", "claude"),
+        )
+        for parts in claude_subpaths:
+            host_path = home.joinpath(*parts)
+            if overlay_abs is not None:
+                src = overlay_abs.joinpath(*parts)
+                # Only bind when overlay has the path; missing entries fall
+                # through to no bind (the worker will create them in the
+                # overlay's writable tmpfs at /tmp via $HOME-resolution).
+                if src.exists():
+                    wrapped += ["--bind", str(src), str(host_path)]
+            elif host_path.exists():
+                wrapped += ["--bind", str(host_path), str(host_path)]
 
         if network == "none":
             wrapped += ["--unshare-net"]
@@ -266,7 +489,65 @@ class BwrapSandbox:
             f"--nofile={_env_positive_int(_ENV_NOFILE, DEFAULT_MAX_NOFILE, _MIN_NOFILE)}",
             "--",
         ]
-        return rlimit_wrapper + wrapped
+        full = rlimit_wrapper + wrapped
+
+        if cgroup_limits:
+            cgroup_prefix = _build_cgroup_prefix(cgroup_limits, worktree=wt_abs)
+            if cgroup_prefix:
+                full = cgroup_prefix + full
+        return full
+
+
+def _scope_unit_name(worktree: Path) -> str:
+    """Build a deterministic-but-unique systemd scope unit name per spawn.
+
+    Format: ``bmad-worker-<wt_basename>-<pid>-<monotonic_ms>.scope``. systemd
+    requires names ≤256 chars and within ``[A-Za-z0-9:_.\\-]``; we sanitise
+    the worktree basename to satisfy that and keep the human-readable hint.
+    """
+    import re
+    import time
+    base = re.sub(r"[^A-Za-z0-9_.-]", "_", worktree.name)[:64] or "wt"
+    return f"bmad-worker-{base}-{os.getpid()}-{int(time.monotonic_ns() // 1_000_000)}"
+
+
+def _build_cgroup_prefix(
+    limits: dict[str, str], *, worktree: Path
+) -> list[str] | None:
+    """Return ``systemd-run --user --scope -p ... --`` argv prefix or ``None``.
+
+    Returns ``None`` (silent skip) when ``systemd-run`` is unavailable AND
+    ``BMAD_REQUIRE_CGROUP`` is unset. Raises ``RuntimeError`` when required
+    but unavailable.
+    """
+    available, path = _systemd_run_available()
+    if not available:
+        if _cgroup_required():
+            raise RuntimeError(
+                "BMAD_REQUIRE_CGROUP=1 set but systemd-run --user is "
+                "unavailable on this host (need systemd user manager + "
+                "$XDG_RUNTIME_DIR). Install systemd or unset the env var."
+            )
+        log.warning(
+            "cgroup_limits requested but systemd-run --user unavailable; "
+            "proceeding with prlimit only (set BMAD_REQUIRE_CGROUP=1 to "
+            "make this fatal in prod)"
+        )
+        return None
+    assert path is not None
+    prefix: list[str] = [
+        path,
+        "--user",
+        "--scope",
+        "--quiet",
+        f"--unit={_scope_unit_name(worktree)}.scope",
+    ]
+    for key, value in limits.items():
+        # systemd-run -p KEY=VALUE — values are passed verbatim to systemd
+        # property parsing; we keep this minimal (no shell expansion).
+        prefix += ["-p", f"{key}={value}"]
+    prefix += ["--"]
+    return prefix
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +569,8 @@ class NoSandbox:
         readonly_paths: list[Path] | None = None,
         network: NetworkPolicy = "none",
         env: dict[str, str] | None = None,
+        worker_home_overlay: Path | None = None,
+        cgroup_limits: dict[str, str] | None = None,
     ) -> list[str]:
         if not cmd:
             raise ValueError("cmd must be non-empty")
@@ -396,6 +679,10 @@ def detect_sandbox() -> Sandbox:
 
 
 __all__ = [
+    "DEFAULT_CGROUP_CPU_QUOTA",
+    "DEFAULT_CGROUP_LIMITS",
+    "DEFAULT_CGROUP_MEMORY_MAX",
+    "DEFAULT_CGROUP_TASKS_MAX",
     "BwrapSandbox",
     "NetworkPolicy",
     "NoSandbox",

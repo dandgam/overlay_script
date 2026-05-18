@@ -75,8 +75,41 @@ STATE_DIR="_bmad/auto-dev-state"
 HALT_FILE="$STATE_DIR/halt-reason.txt"
 BATCH_FILE="$STATE_DIR/current-batch.json"
 CHECKPOINT_DIR="$STATE_DIR/checkpoint-log"
-SPRINT_STATUS="_bmad/implementation-artifacts/sprint-status.yaml"
-EPICS_FILE="_bmad/planning-artifacts/epics.md"
+
+# Patch Y 2026-05-18: BMad layout auto-detect (Antares pilot lesson).
+# Stock BMM v6 install: _bmad/output/planning/ (epics, stories, sprint-status).
+# Odyssey hybrid: _bmad/planning-artifacts/ + _bmad/implementation-artifacts/ + _bmad/stories/.
+# Env vars override > BMM v6 stock > Odyssey hybrid > fail.
+if [[ -n "${BMAD_EPICS_FILE:-}" ]]; then
+  EPICS_FILE="$BMAD_EPICS_FILE"
+  SPRINT_STATUS="${BMAD_SPRINT_STATUS:?BMAD_SPRINT_STATUS required when BMAD_EPICS_FILE set}"
+  STORIES_DIR="${BMAD_STORIES_DIR:?BMAD_STORIES_DIR required when BMAD_EPICS_FILE set}"
+  PLANNING_DIR="${BMAD_PLANNING_DIR:-$(dirname "$EPICS_FILE")}"
+  IMPL_DIR="${BMAD_IMPL_DIR:-$PLANNING_DIR}"
+elif [[ -d "_bmad/output/planning" ]]; then
+  PLANNING_DIR="_bmad/output/planning"
+  STORIES_DIR="_bmad/output/planning/stories"
+  EPICS_FILE="_bmad/output/planning/epics.md"
+  SPRINT_STATUS="_bmad/output/planning/stories/sprint-status.yaml"
+  IMPL_DIR="_bmad/output/implementation"
+elif [[ -d "_bmad/planning-artifacts" ]]; then
+  PLANNING_DIR="_bmad/planning-artifacts"
+  STORIES_DIR="_bmad/stories"
+  EPICS_FILE="_bmad/planning-artifacts/epics.md"
+  SPRINT_STATUS="_bmad/implementation-artifacts/sprint-status.yaml"
+  IMPL_DIR="_bmad/implementation-artifacts"
+else
+  printf '[runner] FAIL: no BMad layout detected (need _bmad/output/planning OR _bmad/planning-artifacts)\n' >&2
+  exit 1
+fi
+
+# Export resolved paths so Python helpers (dependency_analyzer.py, batch_gate.py,
+# gauntlet_injector.py) inherit them instead of falling back to Odyssey defaults.
+export BMAD_EPICS_FILE="$EPICS_FILE"
+export BMAD_SPRINT_STATUS="$SPRINT_STATUS"
+export BMAD_STORIES_DIR="$STORIES_DIR"
+export BMAD_PLANNING_DIR="$PLANNING_DIR"
+export BMAD_IMPL_DIR="$IMPL_DIR"
 
 DEP_ANALYZER="$SCRIPT_DIR/dependency_analyzer.py"
 GAUNTLET="$SCRIPT_DIR/gauntlet_injector.py"
@@ -253,7 +286,7 @@ log "Stage 0 — pre-flight (project=$PROJECT_DIR, dry-run=$DRY_RUN, max=$MAX_IT
 [[ -f "$GAUNTLET" ]]          || { warn "missing $GAUNTLET"; exit 1; }
 [[ -f "$BATCH_GATE" ]]        || { warn "missing $BATCH_GATE"; exit 1; }
 
-mkdir -p "$STATE_DIR" "$CHECKPOINT_DIR" "_bmad/stories"
+mkdir -p "$STATE_DIR" "$CHECKPOINT_DIR" "$STORIES_DIR"
 
 if [[ "$RESUME" -eq 1 && -f "$HALT_FILE" ]]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -319,19 +352,29 @@ while (( iter < MAX_ITER )); do
   [[ -n "$story_id" ]] || { warn "dependency_analyzer returned no story_id"; exit 4; }
 
   # Stage 2 — branch creation --------------------------------------------
-  feature_branch="feature/story-${story_id}"
-  log "Stage 2 — branch: $feature_branch (from $INTEG_BRANCH)"
-  if [[ "$DRY_RUN" -eq 0 ]]; then
-    if git show-ref --verify --quiet "refs/heads/$feature_branch"; then
-      # F2: branch exists — suffix retry-N
-      n=1
-      while git show-ref --verify --quiet "refs/heads/${feature_branch}-retry-${n}"; do
-        n=$((n+1))
-      done
-      feature_branch="${feature_branch}-retry-${n}"
-      log "Stage 2 — branch existed; using $feature_branch"
+  # Patch Y 2026-05-18: orchestrator-mode bypass. When invoked from
+  # bmad-orchestrator, the worktree is ALREADY on a `feature/<id>` branch
+  # created by the orchestrator (and main repo `.git/refs/` is sandbox-
+  # read-only). Detect and reuse instead of `git checkout -b`.
+  current_branch="$(git rev-parse --abbrev-ref HEAD)"
+  if [[ "$current_branch" == feature/* ]]; then
+    feature_branch="$current_branch"
+    log "Stage 2 — already on feature branch: $feature_branch (orchestrator-mode bypass)"
+  else
+    feature_branch="feature/story-${story_id}"
+    log "Stage 2 — branch: $feature_branch (from $INTEG_BRANCH)"
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+      if git show-ref --verify --quiet "refs/heads/$feature_branch"; then
+        # F2: branch exists — suffix retry-N
+        n=1
+        while git show-ref --verify --quiet "refs/heads/${feature_branch}-retry-${n}"; do
+          n=$((n+1))
+        done
+        feature_branch="${feature_branch}-retry-${n}"
+        log "Stage 2 — branch existed; using $feature_branch"
+      fi
+      git checkout -b "$feature_branch"
     fi
-    git checkout -b "$feature_branch"
   fi
 
   # Stage 3 — Gauntlet enrichment ----------------------------------------
@@ -416,23 +459,23 @@ PJ
     # Story 1.14 lesson.
     if ! claude_with_api_retry "$stage4_log" claude -p "Execute bmad-create-story for story $story_id. \
 Use enriched prompts at $STATE_DIR/gauntlet/${story_id}/prompts.json. \
-Output story file to _bmad/stories/${story_id}.md. \
+Output story file to ${STORIES_DIR}/${story_id}.md. \
 Working dir: $PROJECT_DIR. \
 CRITICAL: This is an autonomous pipeline — NEVER prompt for human approval. If create-story workflow asks 'accept/reject/modify' for Gauntlet G-findings: ACCEPT ALL by default and write the story file. Bake all convergent findings into ACs. Decisions left to caller are documented as deferred risks (R-list) in story file."; then
       printf 'stage=4 (create-story) story=%s branch=%s reason=claude-nonzero-after-retry ts=%s\n' \
         "$story_id" "$feature_branch" "$(date -Is)" > "$HALT_FILE"
       fail "Stage 4 — create-story exited non-zero после 2 attempts; halt state -> $HALT_FILE"
     fi
-    [[ -f "_bmad/stories/${story_id}.md" ]] || {
+    [[ -f "${STORIES_DIR}/${story_id}.md" ]] || {
       printf 'stage=4 story=%s reason=missing-story-file ts=%s\n' \
         "$story_id" "$(date -Is)" > "$HALT_FILE"
-      fail "Stage 4 — story file _bmad/stories/${story_id}.md not produced"
+      fail "Stage 4 — story file ${STORIES_DIR}/${story_id}.md not produced"
     }
 
     log "Stage 5 — dev-story (claude --model sonnet -p) [Patch G: auto-retry]"
     stage5_log="$STATE_DIR/reviews/${story_id}-stage5.log"
     if ! claude_with_api_retry "$stage5_log" claude --model sonnet -p "Execute bmad-dev-story $story_id. \
-Read _bmad/stories/${story_id}.md. Implement code. Commit on branch $feature_branch. \
+Read ${STORIES_DIR}/${story_id}.md. Implement code. Commit on branch $feature_branch. \
 CRITICAL: Before declaring done, run \`cargo check --workspace\` (or equivalent for non-Rust stories) and ensure 0 errors. \
 If you create a new crate under crates/ or apps/, MUST include: Cargo.toml + src/lib.rs (libs) or src/main.rs (bins) + module mod.rs files. \
 Working dir: $PROJECT_DIR."; then
@@ -554,7 +597,7 @@ STRUCTURED PROCEDURE — follow EXACTLY:
 CRITICAL CONSTRAINTS (violating ANY = safety guard halt):
 - NEVER delete files (only modify/add)
 - NEVER remove or skip existing tests
-- NEVER modify the story spec (_bmad/stories/${story_id}.md) or gauntlet prompts (_bmad/auto-dev-state/gauntlet/)
+- NEVER modify the story spec (${STORIES_DIR}/${story_id}.md) or gauntlet prompts (_bmad/auto-dev-state/gauntlet/)
 - NEVER modify Acceptance Criteria text
 - TOTAL diff < 300 lines. If review has 20+ Critical+High findings exceeding 300 lines, STOP after first 5 fixes, commit those, and report: 'Auto-fix paused at 300-line budget — Critical+High remaining: <list>. Manual intervention required.'
 
@@ -659,16 +702,16 @@ Working dir: $PROJECT_DIR." 2>&1 | tee "$autofix_log"; then
       # Whitelist of paths review/dev stages legitimately touch.
       # `git add` silently ignores paths that don't exist — safe to enumerate.
       git add -- \
-        "_bmad/stories/${story_id}.md" \
-        "_bmad/implementation-artifacts/sprint-status.yaml" \
-        "_bmad/implementation-artifacts/deferred-work.md" \
+        "${STORIES_DIR}/${story_id}.md" \
+        "${SPRINT_STATUS}" \
+        "${IMPL_DIR}/deferred-work.md" \
         2>/dev/null || true
       # Glob patterns for files whose exact name is story-derived
       for glob in \
-        "_bmad/implementation-artifacts/extraction-log-*.md" \
-        "_bmad/implementation-artifacts/module-*-choice.md" \
-        "_bmad/implementation-artifacts/wave-*.md" \
-        "_bmad/implementation-artifacts/epic-*.md" \
+        "${IMPL_DIR}/extraction-log-*.md" \
+        "${IMPL_DIR}/module-*-choice.md" \
+        "${IMPL_DIR}/wave-*.md" \
+        "${IMPL_DIR}/epic-*.md" \
         "_bmad/retrospectives/*.md" \
         ; do
         # shellcheck disable=SC2086
@@ -746,8 +789,8 @@ Working dir: $PROJECT_DIR." 2>&1 | tee "$autofix_log"; then
           # Use claude_with_api_retry so we get Patch G (API retry) + Patch H (timeout) free.
           if claude_with_api_retry "$retro_log" claude -p "Generate Wave $wave_from retrospective for BMad-auto-dev pipeline. \
 Sources to read: \
-  - _bmad/implementation-artifacts/sprint-status.yaml (find all stories with done status in Wave $wave_from per epics.md frontmatter) \
-  - _bmad/implementation-artifacts/wave-${wave_from}-hours.md if exists \
+  - ${SPRINT_STATUS} (find all stories with done status in Wave $wave_from per epics.md frontmatter) \
+  - ${IMPL_DIR}/wave-${wave_from}-hours.md if exists \
   - $CHECKPOINT_DIR/batch-*.md (latest batch summary) \
   - $STATE_DIR/reviews/*.log (review verdicts per story) \
   - $SKILL_DIR/learnings.md (cumulative skill lessons) \

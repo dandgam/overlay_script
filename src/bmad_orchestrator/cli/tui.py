@@ -81,7 +81,7 @@ def _state_chip(state: str) -> Text:
 
 def _header_panel(snap: DashboardSnapshot) -> Panel:
     pieces: list[Text] = [
-        Text("bmad-orchestrator", style="bold cyan"),
+        Text("Virgil", style="bold cyan"),
         _state_chip(snap.status),
     ]
     if snap.project and snap.wave:
