@@ -362,6 +362,9 @@ def logs(
     tail: int = typer.Option(50, "--tail"),
 ) -> None:
     """Tail JSONL событий worker'а."""
+    # Worker id flows into ``rglob(f"*{worker}*.jsonl")`` — unvalidated glob
+    # metachars (``**``, ``?``, ``[abc]``) would trigger a full-tree walk.
+    _validate_cli_token(worker, name="worker", pattern=_STORY_RE)
     settings = load_settings()
     runs = settings.target_project / "_bmad-output" / "runs"
     candidates = sorted(runs.rglob(f"*{worker}*.jsonl"), reverse=True)
@@ -562,6 +565,7 @@ def doctor(
     project: str = typer.Argument(..., help="Project slug (from `scan`)"),
 ) -> None:
     """Run health checks on one project (Init #3 Task 3.2)."""
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
     _, reg = _load_registry_for_cli()
     report = run_doctor(reg, project)
     table = Table(title=f"doctor {project}", show_header=True)
@@ -588,6 +592,7 @@ def resume_project(
     Named ``resume-project`` because the top-level ``resume`` verb is already
     bound to the orchestrator pause/resume daemon control.
     """
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
     _, reg = _load_registry_for_cli()
     console.print(resume_hint(reg, project))
 
@@ -1008,6 +1013,8 @@ def policy_apply(
     live policy YAML. Every applied proposal emits a ``policy_proposal_applied``
     audit event with before/after values for rollback.
     """
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+
     from bmad_orchestrator.runtime.lesson_parser import (
         LessonProposal,
         LessonProposalInvalidError,
@@ -1091,6 +1098,11 @@ def policy_rollback(
     so concurrent live-tuning writers see a complete file at all times.
     Emits a ``policy_proposal_rolled_back`` audit entry on success.
     """
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+    # ``proposal_id`` becomes the suffix of ``.yaml.bak-<ts>``; same charset
+    # constraints as a story id so a malformed timestamp can't path-traverse.
+    _validate_cli_token(proposal_id, name="proposal-id", pattern=_STORY_RE)
+
     from bmad_orchestrator.runtime.lesson_parser import (
         PolicyApplyError,
         rollback_policy,
