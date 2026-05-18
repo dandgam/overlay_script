@@ -81,10 +81,6 @@ from bmad_orchestrator.runtime.commit_recovery import recover_pre_merge
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.deletion_safety import deletion_safety_subscriber
-from bmad_orchestrator.runtime.elicitation_routing import (
-    load_engine as _load_elicitation_engine,
-    make_elicitation_subscriber,
-)
 from bmad_orchestrator.runtime.diff_size_gate import (
     gate_verdict as _diff_size_gate_verdict,
 )
@@ -93,6 +89,12 @@ from bmad_orchestrator.runtime.diff_size_gate import (
     measure_diff,
     measure_diff_per_file,
     partition_per_file,
+)
+from bmad_orchestrator.runtime.elicitation_routing import (
+    load_engine as _load_elicitation_engine,
+)
+from bmad_orchestrator.runtime.elicitation_routing import (
+    make_elicitation_subscriber,
 )
 from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
 from bmad_orchestrator.runtime.file_list_parser import (
@@ -1662,6 +1664,7 @@ async def _tail_and_emit_completion(
                 exit_code=exit_code,
                 status=ev.get("status", "success"),
                 mock=False,
+                review_iteration=int(ev.get("review_iteration", 1) or 1),
             )
             return
         if event_type == "worker_halt_file":

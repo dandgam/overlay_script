@@ -334,6 +334,35 @@ async def _stream_subprocess_stdout(
             _emit(jsonl_path, parsed)
 
 
+def _read_review_iteration(worktree: str, story_id: str) -> int:
+    """Read bmad-auto-dev retry count from the worker state file.
+
+    The shell runner persists per-story retry counts in
+    ``<worktree>/_bmad/auto-dev-state/current-batch.json`` under
+    ``retries[<story_id>]``. ``review_iteration`` equals ``retry_count + 1``:
+    the initial Stage 6 review is iteration 1, the first auto-fix re-review is
+    iteration 2, and so on. Missing/malformed state → safe default of 1.
+    """
+    state_path = Path(worktree) / "_bmad" / "auto-dev-state" / "current-batch.json"
+    if not state_path.is_file():
+        return 1
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 1
+    if not isinstance(data, dict):
+        return 1
+    retries = data.get("retries")
+    if not isinstance(retries, dict):
+        return 1
+    raw = retries.get(story_id, 0)
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, count + 1)
+
+
 async def _wait_and_finalize(
     process: asyncio.subprocess.Process,
     jsonl_path: Path,
@@ -351,6 +380,11 @@ async def _wait_and_finalize(
 
     Initiative #1 Task 1.4: if ``isolated_home_overlay`` was used, rm-rf the
     snapshot tmpdir after process exit (best-effort; never raises).
+
+    P5 Evaluator-Optimizer: ``review_iteration`` is read from the shell
+    runner's state file (current-batch.json → retries[story_id] + 1) and
+    surfaced into the worker_completed event so the orchestrator's
+    ``_gate_iteration_cap`` can trip on runaway review→fix loops.
     """
     timeout = _worker_timeout_sec()
     try:
@@ -377,6 +411,7 @@ async def _wait_and_finalize(
             "story_id": story_id,
             "exit_code": rc,
             "status": "success" if rc == 0 else "failure",
+            "review_iteration": _read_review_iteration(worktree, story_id),
         },
     )
     _cleanup_isolated_home(isolated_home_overlay)
@@ -514,6 +549,7 @@ async def spawn_worker(
                 "status": "success",
                 "mock": True,
                 "fallback_reason": fallback_reason,
+                "review_iteration": _read_review_iteration(worktree, story_id),
             },
         )
         return WorkerHandle(

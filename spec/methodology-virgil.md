@@ -119,7 +119,7 @@
 - ✅ **Auto-elicitation policy engine** (2026-05-18) — P2 Routing двухтировая (Tier 0 hard-override + Tier 1 rule match + Tier 2 LLM-judge stub + window cap). Модуль `bmad_orchestrator.elicitation` (4 файла, ~580 строк) + `runtime/elicitation_routing.py` subscriber + Settings.elicitation_policy_path. **34 unit-тестов**, mypy/ruff clean. Tests: 1509 PASS
 - ⬜ **R3 security minors** (0.3 сессии) — canonicalize+allowed-root для `--lessons-dir` / `--skills-root` / `--orchestrator-home`
 - ⬜ **4 security gates** из lesson `code_review_pipeline_gaps`
-- ⬜ **Wire worker → review_iteration** (0.5 сессии) — bmad-auto-dev runner.sh должен эмитить `review_iteration` в WORKER_COMPLETED payload (orchestrator принимает поле, worker его пока не пишет)
+- ✅ **Wire worker → review_iteration** (2026-05-18) — `_read_review_iteration` helper в `worker_spawn.py` читает `<worktree>/_bmad/auto-dev-state/current-batch.json:retries[story_id]`, surface через `_wait_and_finalize` + mock path + bridge в `run.py`. P5 loop integration закрыт end-to-end (worker → JSONL → bus → `_gate_iteration_cap`). 11 unit-тестов
 
 ### Фаза 4 — Deploy (после закрытия Phase 3)
 
@@ -166,5 +166,5 @@
 ---
 
 **Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v6 — Auto-elicitation engine ✅. P2 Routing двухтировая (Tier 0 hard-override → Tier 1 rule match → Tier 2 LLM-judge stub) + window cap. Tests: 1509 PASS (+34). Next: Step B (real BMad stories) или Wire worker → review_iteration emit или R3 security minors.
+**Status:** v7 — P5 loop integration closed end-to-end (review_iteration surfaced from worker state → JSONL → bus → `_gate_iteration_cap`). Tests: 1520 PASS (+11). Next: R3 security minors (canonicalize paths) или 4 security gates из code_review_pipeline_gaps lesson.
 **Owner:** user + Claude orchestrator
