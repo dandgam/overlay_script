@@ -65,3 +65,8 @@ trash/
 # Per-project memory snapshots (populated at runtime by _persist_project_memory_snapshot).
 # Tests that forget to override ORCHESTRATOR_ORCHESTRATOR_HOME also leak here.
 _config/projects/
+
+# Eval runtime artifacts (worktrees + result dumps)
+evals/.worktrees-eval/
+evals/results-*.json
+evals/baseline/

@@ -1,0 +1,5 @@
+projects:
+  antares:
+    bmad_layout: bmm-v6
+    path: /home/server/Antares
+    sandbox_overrides: {}

@@ -67,6 +67,115 @@ app = typer.Typer(
 )
 console = Console()
 
+# Phase 3 eval subcommand group — `bmad-orchestrator eval run`.
+eval_app = typer.Typer(
+    help="Phase 3 eval suite — run benchmark cases + report metrics",
+    no_args_is_help=True,
+)
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("run")
+def eval_run(
+    case: str | None = typer.Option(
+        None,
+        "--case",
+        help="Run only this case id (e.g. TC-001). Default: all.",
+    ),
+    mode: str = typer.Option(
+        "mock",
+        "--mode",
+        help="'mock' (default, free) — no real claude binary. 'real' burns tokens.",
+    ),
+    evals_root: str = typer.Option(
+        "evals",
+        "--evals-root",
+        help="Directory containing cases.yaml + cases/.",
+    ),
+    fail_under: float = typer.Option(
+        0.85,
+        "--fail-under",
+        help="Exit non-zero if pass_rate falls below this threshold (default 0.85).",
+    ),
+) -> None:
+    """Run the eval suite, print a table, save JSON report, exit-code = gate."""
+    import time as _time
+
+    from bmad_orchestrator.eval.runner import run_eval_suite_sync, save_report
+
+    evals_root_path = Path(evals_root)
+    if not evals_root_path.is_dir():
+        console.print(f"[red]evals_root not found: {evals_root_path}[/red]")
+        raise typer.Exit(2)
+
+    worktree_root = evals_root_path / ".worktrees-eval"
+    worktree_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        results, aggregate = run_eval_suite_sync(
+            evals_root=evals_root_path,
+            worktree_root=worktree_root,
+            case_filter=case,
+            mode=mode,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        console.print(f"[red]eval failed: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    table = Table(title=f"Eval suite — {len(results)} cases ({mode} mode)")
+    table.add_column("id", style="bold")
+    table.add_column("level")
+    table.add_column("passed")
+    table.add_column("verdict")
+    table.add_column("iter", justify="right")
+    table.add_column("cost $", justify="right")
+    table.add_column("latency ms", justify="right")
+    for r in results:
+        mark = "[green]✓[/green]" if r.passed else "[red]✗[/red]"
+        table.add_row(
+            r.case_id,
+            r.level,
+            mark,
+            r.final_verdict,
+            str(r.review_iteration),
+            f"{r.cost_usd:.4f}",
+            str(r.latency_ms),
+        )
+    console.print(table)
+
+    summary = Table(title="Aggregate metrics")
+    summary.add_column("metric")
+    summary.add_column("value", justify="right")
+    summary.add_row("pass_rate", f"{aggregate.pass_rate:.2%}")
+    summary.add_row("escalation_rate", f"{aggregate.escalation_rate:.2%}")
+    summary.add_row("review_iteration_p95", f"{aggregate.review_iteration_p95:.1f}")
+    summary.add_row("cost_per_story_median", f"${aggregate.cost_per_story_median:.4f}")
+    summary.add_row("cost_p95", f"${aggregate.cost_p95:.4f}")
+    summary.add_row("latency_p95_ms", f"{aggregate.latency_p95_ms:.0f}")
+    console.print(summary)
+
+    # Persist JSON report.
+    ts = _time.strftime("%Y%m%d-%H%M%S")
+    report_path = evals_root_path / f"results-{ts}.json"
+    save_report(results, aggregate, report_path)
+    console.print(f"[dim]report: {report_path}[/dim]")
+
+    for r in results:
+        if r.failure_reasons:
+            console.print(
+                f"[yellow]{r.case_id}[/yellow]: " + "; ".join(r.failure_reasons)
+            )
+
+    if aggregate.pass_rate < fail_under:
+        console.print(
+            f"[red]pass_rate {aggregate.pass_rate:.2%} < {fail_under:.2%} — "
+            f"Phase 3 gate FAILED[/red]"
+        )
+        raise typer.Exit(1)
+    console.print(
+        f"[green]pass_rate {aggregate.pass_rate:.2%} ≥ {fail_under:.2%} — gate OK[/green]"
+    )
+
 # Initiative #1 (Task 1.1) — preset parallelism slots for --parallel CLI flag.
 # Keep this list narrow: each preset bakes assumptions about memory/CPU caps
 # (see Initiative #1 Task 1.3 cgroup work). Adding a value here without a

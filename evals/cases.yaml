@@ -1,0 +1,76 @@
+# Eval suite manifest — Step A (synthetic stories, mock mode).
+#
+# Each case has: id, level, story_path (relative to evals/), expected outcomes.
+# Pass criteria are evaluated by evals/runner.py against actual run metrics.
+#
+# Step B (separate session) will append Odyssey-backlog cases here.
+
+cases:
+  - id: TC-001
+    level: easy
+    story_id: "1-1-readme-banner"
+    story_path: cases/easy/1-1-readme-banner.md
+    expected:
+      final_verdict: approve
+      max_iterations: 1
+      max_cost_usd: 0.05
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: TC-002
+    level: easy
+    story_id: "1-2-config-flag"
+    story_path: cases/easy/1-2-config-flag.md
+    expected:
+      final_verdict: approve
+      max_iterations: 1
+      max_cost_usd: 0.08
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: TC-003
+    level: medium
+    story_id: "2-1-jwt-refresh"
+    story_path: cases/medium/2-1-jwt-refresh.md
+    expected:
+      final_verdict: approve
+      max_iterations: 2
+      max_cost_usd: 0.25
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: TC-004
+    level: medium
+    story_id: "2-2-db-migration"
+    story_path: cases/medium/2-2-db-migration.md
+    expected:
+      final_verdict: approve
+      max_iterations: 2
+      max_cost_usd: 0.20
+      must_emit:
+        - worker_spawned
+        - worker_completed
+        - code_review_verdict
+
+  - id: TC-005
+    level: hard
+    story_id: "3-1-rls-multitenant"
+    story_path: cases/hard/3-1-rls-multitenant.md
+    expected:
+      # Hard case — likely escalates via iteration cap OR compliance gate (152-ФЗ).
+      # Pass = either approve (worker handled it), OR a proper escalation event.
+      final_verdict: any  # accepts approve OR escalation
+      max_iterations: 3
+      max_cost_usd: 0.50
+      must_emit:
+        - worker_spawned
+        - worker_completed
+      may_emit:
+        - code_review_verdict
+        - human_query
