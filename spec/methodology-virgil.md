@@ -140,6 +140,14 @@
    - **50 unit-тестов** в 6 файлах. Tests: 1588 PASS. mypy/ruff clean
    - Settings.supervisor_policy_path через `--supervisor-policy` (CLI флаг отложен до прод-pilot'а)
 10. **Production pilot на реальном target BMad-проекте** — выбор проекта остаётся на момент запуска (project-agnostic)
+11. ✅ **Interactive TUI menu — Session 2 (M2 forms + execute + polish)** (2026-05-18)
+   - `cli/menu/form_screen.py` — FormScreen с typed widgets per ParamSpec: Select (Literal), Checkbox (bool), Input(integer) (int), Input (str/Path). Live CLI preview, inline validation, pre-filled defaults, required markers (`*`). Wires to ConfirmScreen (destructive) or ExecuteScreen (normal)
+   - `cli/menu/confirm_screen.py` — ConfirmScreen для destructive commands: typed-name confirmation (как `terraform destroy`), exact match guard, preview CLI command
+   - `cli/menu/execute_screen.py` — ExecuteScreen: in-process call через `asyncio.to_thread`, stdout/stderr capture via `contextlib.redirect_stdout/stderr`, 100ms flush interval, cancel button (`ctrl+c`), toast ✅/❌, «Any key to return»
+   - `cli/menu/browse_screen.py` — search mode (`/`): Input widget показывается at top, live case-insensitive substring filter, `escape` для выхода из search. Leaf commands теперь открывают FormScreen (not toast)
+   - `filter_items()` — pure testable search helper
+   - `_build_cli_preview()`, `_cast_value()`, `_build_kwargs()` — pure testable helpers для form/execute
+   - **49 новых тестов** в 4 файлах (test_menu_form, test_menu_confirm, test_menu_execute, test_menu_search). Tests: **1762 PASS** (+105 vs v12 baseline 1657). mypy/ruff clean
 
 ### Фаза 5 — Monitor & Improve
 
@@ -182,6 +190,6 @@
 
 ---
 
-**Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v12 — Self-learning consolidation loop ✅ closed (Phase 5 #11). P5 Evaluator-Optimizer pattern: extract lessons → risk classify → auto-apply low-risk → regression guard N=2 waves → auto-rollback. 4 trigger events wired (WAVE_BOUNDARY + EPIC_BOUNDARY + PHASE4_COMPLETE + MONTHLY_REVIEW_SCHEDULED). StubExtractor + pluggable ExtractorProtocol. Monthly cron scheduler (embedded asyncio task + CLI `cron-emit`). Audit inline in `control.events.jsonl`. Tests: 1657 PASS (+69). Phase 4 remaining: only #10 (production pilot). Phase 5 item #11 closed.
+**Last updated:** 2026-05-18 (v13 — Interactive TUI menu Session 2)
+**Status:** v13 — Interactive TUI menu ✅ closed (Phase 4 #11). FormScreen (typed widgets per param type), ConfirmScreen (typed-name guard for destructive), ExecuteScreen (in-process + stdout capture + cancel), search filter `/` in BrowseScreen. 49 new tests. Tests: **1762 PASS** (+105 vs v12 baseline 1657). mypy/ruff clean. Phase 4 remaining: only #10 (production pilot).
 **Owner:** user + Claude orchestrator
