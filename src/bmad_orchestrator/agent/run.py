@@ -706,6 +706,16 @@ async def _run_real_pilot(
     # entry surfaces the missing-bwrap failure BEFORE any DAG / spawn work.
     _ = detect_sandbox()
 
+    # Initiative #2C — wire the production auto-split decomposer. Only when no
+    # decomposer was pre-injected (tests inject stubs via ``set_decomposer`` and
+    # must keep them). The auto-split path itself stays gated by
+    # ``auto_split_enabled()`` (``BMAD_AUTO_SPLIT=1``) + ``evaluate_split``, so
+    # installing the decomposer unconditionally here is inert until opted in.
+    if get_decomposer() is None:
+        from bmad_orchestrator.runtime.decomposer import claude_decomposer
+
+        set_decomposer(claude_decomposer)
+
     spawned_handles: list[WorkerHandle] = []
     # Mutable carry — body updates as spend accrues so the finally block can
     # still emit a partial spend report when the body raises mid-pilot.
