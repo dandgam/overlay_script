@@ -59,6 +59,14 @@ class EventType(StrEnum):
     # and ``cancelled_by`` (supervisor | user | timeout) so the audit trail and
     # downstream subscribers can attribute kills.
     WORKER_CANCELLED = "worker_cancelled"
+    # Initiative pilot_findings_closure S5 (#5 R2): emitted by
+    # :func:`runtime.worker_spawn.spawn_worker` when the pre-spawn MCP
+    # readiness probe (``runtime/mcp_readiness.poll_mcp_ready``) reports
+    # one or more required MCP tools as unauthenticated within 30s. Payload
+    # carries ``story_id``, ``missing`` (list[str]), ``elapsed_ms`` and
+    # ``last_error`` so the orchestrator can halt the story instead of
+    # spawning a worker that would die later on ``tool not found``.
+    MCP_NOT_READY = "mcp_not_ready"
     SUB_STORY_STARTED = "sub_story_started"
     SUB_STORY_COMPLETED = "sub_story_completed"
     SUB_STORY_SQUASH_DONE = "sub_story_squash_done"

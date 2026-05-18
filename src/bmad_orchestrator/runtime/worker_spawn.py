@@ -49,6 +49,16 @@ from bmad_orchestrator.runtime.embedded_skills import (
     ApplyResult,
     apply_embedded_skills,
 )
+from bmad_orchestrator.runtime.mcp_readiness import (
+    DEFAULT_INTERVAL_MS as MCP_READINESS_DEFAULT_INTERVAL_MS,
+)
+from bmad_orchestrator.runtime.mcp_readiness import (
+    DEFAULT_TIMEOUT_S as MCP_READINESS_DEFAULT_TIMEOUT_S,
+)
+from bmad_orchestrator.runtime.mcp_readiness import (
+    ReadinessResult,
+    poll_mcp_ready,
+)
 from bmad_orchestrator.runtime.sandbox import (
     DEFAULT_CGROUP_LIMITS,
     NetworkPolicy,
@@ -125,6 +135,32 @@ def _build_worker_env(extra: dict[str, str] | None) -> dict[str, str]:
 # tasks before they finalize the JSONL stream. Callers obtain handles back from
 # `spawn_worker`; this set just prevents asyncio orphaning.
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
+
+class MCPNotReadyError(RuntimeError):
+    """Pre-spawn MCP readiness probe found unauthenticated required tools.
+
+    Initiative pilot_findings_closure S5 (#5 R2). The orchestrator should catch
+    this and convert it into a halt-before-spawn for the affected story.
+    """
+
+    def __init__(
+        self,
+        *,
+        story_id: str,
+        missing: list[str],
+        elapsed_ms: int,
+        last_error: str | None,
+    ) -> None:
+        self.story_id = story_id
+        self.missing = list(missing)
+        self.elapsed_ms = elapsed_ms
+        self.last_error = last_error
+        joined = ", ".join(self.missing)
+        super().__init__(
+            f"mcp_not_ready story={story_id} missing=[{joined}] "
+            f"elapsed_ms={elapsed_ms} last_error={last_error!r}"
+        )
 
 
 @dataclass(slots=True)
@@ -532,6 +568,9 @@ async def spawn_worker(
     base_sha: str | None = None,
     isolated_home: bool = False,
     cgroup_limits: dict[str, str] | None = None,
+    required_mcp_tools: list[str] | None = None,
+    mcp_readiness_timeout_s: int = MCP_READINESS_DEFAULT_TIMEOUT_S,
+    mcp_readiness_interval_ms: int = MCP_READINESS_DEFAULT_INTERVAL_MS,
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 
@@ -560,6 +599,40 @@ async def spawn_worker(
     wt_path = Path(worktree)
     if not wt_path.exists():
         raise FileNotFoundError(f"worktree path missing: {worktree}")
+
+    # Initiative pilot_findings_closure S5 (#5 R2): MCP readiness gate.
+    # When ``required_mcp_tools`` is non-empty, poll ``claude mcp list --json``
+    # for up to ``mcp_readiness_timeout_s`` and refuse to spawn if any tool is
+    # not authenticated. Emit MCP_NOT_READY to the worker JSONL audit log so
+    # downstream subscribers can correlate the halt to a specific story.
+    if required_mcp_tools:
+        readiness: ReadinessResult = await poll_mcp_ready(
+            required_mcp_tools,
+            timeout_s=mcp_readiness_timeout_s,
+            interval_ms=mcp_readiness_interval_ms,
+        )
+        if not readiness.ok:
+            mcp_jsonl_path = worker_jsonl_path(worktree)
+            mcp_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            _emit(
+                mcp_jsonl_path,
+                {
+                    "event_type": "mcp_not_ready",
+                    "worktree": worktree,
+                    "story_id": story_id,
+                    "missing": list(readiness.missing),
+                    "required": list(required_mcp_tools),
+                    "elapsed_ms": readiness.elapsed_ms,
+                    "polls": readiness.polls,
+                    "last_error": readiness.last_error,
+                },
+            )
+            raise MCPNotReadyError(
+                story_id=story_id,
+                missing=list(readiness.missing),
+                elapsed_ms=readiness.elapsed_ms,
+                last_error=readiness.last_error,
+            )
 
     skills_result: ApplyResult | None = None
     if embedded_skills_root is not None:
@@ -856,6 +929,7 @@ __all__ = [
     "DEFAULT_CGROUP_LIMITS",
     "DEFAULT_MODEL",
     "DEFAULT_SKILL_INVOCATION",
+    "MCPNotReadyError",
     "WorkerHandle",
     "spawn_worker",
     "tail_jsonl_events",
