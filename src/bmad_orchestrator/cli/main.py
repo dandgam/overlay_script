@@ -37,6 +37,15 @@ from bmad_orchestrator.cli import models_yaml
 from bmad_orchestrator.cli.i18n import t
 from bmad_orchestrator.cli.tui import DashboardSnapshot, render_once, run_live
 from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.runtime.multi_run import (
+    MultiProjectPlan,
+    MultiRunError,
+    ProjectIsolationError,
+    ProjectRunResult,
+    ProjectSlot,
+    SharedSpendTracker,
+    run_multi,
+)
 from bmad_orchestrator.runtime.project_registry import (
     ProjectRegistryError,
     ProjectsRegistry,
@@ -548,6 +557,127 @@ def resume_project(
     """
     _, reg = _load_registry_for_cli()
     console.print(resume_hint(reg, project))
+
+
+# ── multi-project run (Init #3 Task 3.3-3.4) ─────────────────────────────────
+
+
+async def _subprocess_runner(
+    slot: ProjectSlot,
+    tracker: SharedSpendTracker,
+    plan: MultiProjectPlan,
+) -> ProjectRunResult:
+    """Real runner — spawns ``bmad-orchestrator run --project <slug>`` per slot.
+
+    Per-project isolation = subprocess env: ``ORCHESTRATOR_TARGET_PROJECT``
+    is set to the slot's path so every ``load_settings()`` inside the child
+    resolves to that project's tree. State.db rows, project memory files,
+    and sprint-status writes therefore never cross project boundaries.
+
+    The subprocess returncode is the completion signal; aggregate spend is
+    fed back into the shared tracker so the daily cap halts the second
+    project once the first has consumed the shared budget.
+    """
+    env = dict(os.environ)
+    env["ORCHESTRATOR_TARGET_PROJECT"] = str(slot.path)
+    args = [
+        sys.executable, "-m", "bmad_orchestrator.cli", "run",
+        "--project", slot.slug,
+        "--wave", plan.wave,
+        "--max-parallel", str(slot.parallel),
+        "--max-stories", str(plan.per_project_max_stories),
+        "--max-spend-usd",
+        str(plan.daily_max_spend_usd / max(len(plan.projects), 1)),
+    ]
+    args.append("--mock" if plan.mock else "--real")
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    completed = proc.returncode == 0
+    err = None if completed else (
+        f"exit {proc.returncode}: "
+        f"{stderr.decode('utf-8', errors='replace')[:400]}"
+    )
+    return ProjectRunResult(
+        slug=slot.slug, completed=completed, error=err
+    )
+
+
+@app.command()
+def multi(
+    projects: str = typer.Option(
+        ..., "--projects",
+        help="Comma-separated registry slugs (e.g. antares,odyssey)",
+    ),
+    wave: str = typer.Option(..., "--wave"),
+    parallel: int = typer.Option(
+        10, "--parallel",
+        help="Total worker slots across all projects (split evenly)",
+    ),
+    max_stories: int = typer.Option(
+        50, "--max-stories", help="Per-project hard cap on story spawns",
+    ),
+    daily_max_spend_usd: float = typer.Option(
+        50.0, "--daily-max-spend-usd",
+        help="Shared daily USD cap across all projects (single guard)",
+    ),
+    mock: bool = typer.Option(True, "--mock/--real"),
+) -> None:
+    """Запустить оркестратор одновременно над несколькими проектами (Init #3 Task 3.3-3.4)."""
+    slugs = tuple(s.strip() for s in projects.split(",") if s.strip())
+    if not slugs:
+        raise typer.BadParameter("--projects must list at least one slug")
+
+    plan = MultiProjectPlan(
+        projects=slugs,
+        total_parallel=parallel,
+        wave=wave,
+        per_project_max_stories=max_stories,
+        daily_max_spend_usd=daily_max_spend_usd,
+        mock=mock,
+    )
+    _, reg = _load_registry_for_cli()
+
+    try:
+        outcome = asyncio.run(
+            run_multi(plan, registry=reg, runner_fn=_subprocess_runner)
+        )
+    except (MultiRunError, ProjectIsolationError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    verdict = "[green]OK[/green]" if outcome.succeeded else "[red]FAIL[/red]"
+    console.print(
+        f"[bold]Multi-project run {verdict}[/bold] — "
+        f"projects={len(outcome.per_project)} total_spent=${outcome.total_spent_usd:.2f}"
+    )
+    if outcome.aborted_reason:
+        console.print(f"[red]aborted: {outcome.aborted_reason}[/red]")
+    table = Table(show_header=True)
+    table.add_column("project")
+    table.add_column("done")
+    table.add_column("spent_usd", justify="right")
+    table.add_column("stories", justify="right")
+    table.add_column("error", overflow="fold")
+    for slug in plan.projects:
+        r = outcome.per_project.get(slug)
+        if r is None:
+            table.add_row(slug, "—", "—", "—", "not run")
+            continue
+        table.add_row(
+            slug,
+            "✓" if r.completed else "✗",
+            f"{r.spent_usd:.2f}",
+            str(r.stories_done),
+            r.error or "",
+        )
+    console.print(table)
+    if not outcome.succeeded:
+        raise typer.Exit(code=1)
 
 
 # ── skill upgrade pipeline (§4 E4) ───────────────────────────────────────────
