@@ -3,7 +3,7 @@
 См. spec/spec_embed_phase45_with_selflearning.md §4 E2.
 
 Покрытие:
-* EMBEDDED_SKILL_NAMES = 14 canonical phase 4+5 skills.
+* EMBEDDED_SKILL_NAMES = 16 canonical phase 4+5 skills.
 * Customize loader: empty-stub defaults, schema fields, extra=forbid, errors.
 * PolicyConfig loader: production YAML defaults, bounds, missing-file errors.
 """
@@ -49,10 +49,13 @@ def _write_policy_trio(
 # ─────────────────── 1. Constants ───────────────────
 
 
-def test_embedded_skill_names_count_is_14() -> None:
-    assert len(EMBEDDED_SKILL_NAMES) == 14
+def test_embedded_skill_names_count_is_16() -> None:
+    assert len(EMBEDDED_SKILL_NAMES) == 16
     assert "bmad-auto-dev" in EMBEDDED_SKILL_NAMES
     assert "bmad-retrospective" in EMBEDDED_SKILL_NAMES
+    # BMad Phase 4 canonical workflows — gap closed 2026-05-19
+    assert "bmad-sprint-planning" in EMBEDDED_SKILL_NAMES
+    assert "bmad-investigate" in EMBEDDED_SKILL_NAMES
 
 
 # ─────────────────── 2-9. Customize ───────────────────
@@ -131,10 +134,10 @@ def test_customize_invalid_toml_syntax_raises(tmp_path: Path) -> None:
         load_customize("foo", root=tmp_path)
 
 
-def test_load_all_customize_returns_14_canonical_skills() -> None:
+def test_load_all_customize_returns_16_canonical_skills() -> None:
     all_c = load_all_customize()
     assert set(all_c.keys()) == set(EMBEDDED_SKILL_NAMES)
-    assert len(all_c) == 14
+    assert len(all_c) == 16
     for name, c in all_c.items():
         assert isinstance(c, Customize), f"{name} did not parse"
         assert c.enabled is True

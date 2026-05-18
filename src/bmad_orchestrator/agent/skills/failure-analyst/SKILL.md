@@ -38,3 +38,29 @@ description: Diagnose worker exit ≠ 0 — test fail / merge conflict / API err
 - `spawn_fixer` (если recoverable)
 - `escalate_to_human` (если no auto-fix path)
 - `update_sprint_status` (mark FAILED)
+- `spawn_investigate_worktree` (forensic deep-dive — см. ниже когда)
+
+## Когда звать `bmad-investigate` (forensic gate)
+
+После того как classification вернулся, прежде чем escalate — проверь
+heuristic `should_investigate(retry_count, error_category)`:
+
+- `retry_count >= 3` (recurring failure, спавн уже не помогает)
+- `error_category in {"unclassified", "unknown", "other"}` (не удалось
+  bucket'ить — нужен deep-dive)
+
+Если match — emit event `FORENSIC_INVESTIGATION_NEEDED` с payload:
+
+```python
+{
+  "subject": story_id,                  # или error_class / incident_id
+  "reason": summary_for_human,          # что failure-analyst увидел
+  "retry_count": retry_count,
+  "error_category": category,
+  "real": False,                        # True для прод; mock для dev/eval
+}
+```
+
+Subscriber `runtime/phase4_subscribers.py::investigate_subscriber` зовёт
+`bmad-investigate` skill в отдельном worktree. Manual override: `force=True`
+в payload (CLI `bmad-orchestrator investigate ...`) обходит heuristic.

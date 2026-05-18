@@ -33,10 +33,12 @@ EMBEDDED_SKILL_NAMES: frozenset[str] = frozenset(
         "bmad-create-story",
         "bmad-customize",
         "bmad-dev-story",
+        "bmad-investigate",
         "bmad-quick-dev",
         "bmad-retrospective",
         "bmad-review-adversarial-general",
         "bmad-review-edge-case-hunter",
+        "bmad-sprint-planning",
         "bmad-sprint-status",
     }
 )

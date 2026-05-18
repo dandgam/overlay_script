@@ -1427,8 +1427,8 @@ def sl_cron_emit(
     """
     from datetime import UTC, datetime
 
-    from bmad_orchestrator.runtime.monthly_scheduler import _should_emit
     from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
+    from bmad_orchestrator.runtime.monthly_scheduler import _should_emit
 
     now = datetime.now(UTC)
     if not force and not _should_emit(now, None):
@@ -1445,6 +1445,125 @@ def sl_cron_emit(
 
     asyncio.run(_emit())
     console.print("[green]MONTHLY_REVIEW_SCHEDULED emitted[/green]")
+
+
+# ── BMad Phase 4 canonical workflows — manual triggers (gap-closure 2026-05-19) ──
+
+
+@app.command("sprint-planning")
+def sprint_planning_cli(
+    real: bool = typer.Option(
+        False, "--real/--mock", help="--real spawns claude -p; --mock writes seed yaml from epics.md."
+    ),
+) -> None:
+    """Init sprint-status.yaml via bmad-sprint-planning skill.
+
+    Mock mode (default): parses target's epics.md and writes a seed
+    sprint-status.yaml. Real mode forks `claude -p /bmad-sprint-planning`
+    inside the target worktree (requires `claude` binary).
+    """
+    import asyncio as _asyncio
+
+    from bmad_orchestrator.agent.tools.sprint_planning import (
+        SprintStatusMissingError,
+        ensure_sprint_status_initialized,
+        spawn_sprint_planning_worktree,
+    )
+
+    if not real:
+        try:
+            result = ensure_sprint_status_initialized()
+        except SprintStatusMissingError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+        console.print(
+            f"[green]sprint-planning {result['action']}[/green] "
+            f"path={result['path']}"
+        )
+        return
+
+    async def _go() -> None:
+        reply = await spawn_sprint_planning_worktree.handler({"real": True})
+        console.print(reply.get("content", [{}])[0].get("text", "<no reply>"))
+
+    _asyncio.run(_go())
+
+
+@app.command("correct-course")
+def correct_course_cli(
+    story_id: str = typer.Option(..., "--story", help="Affected story ID (e.g. 1.1)."),
+    reason: str = typer.Option(..., "--reason", help="Rationale (PM scope drop, AC change, ...)."),
+    real: bool = typer.Option(False, "--real/--mock"),
+) -> None:
+    """Trigger bmad-correct-course for a mid-sprint scope change.
+
+    Emits SPRINT_SCOPE_CHANGE_DETECTED on the bus; the subscriber spawns the
+    skill. Use --real to fork `claude -p /bmad-correct-course`.
+    """
+    import asyncio as _asyncio
+
+    from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
+
+    async def _go() -> None:
+        bus = EventLoop()
+        from functools import partial
+
+        from bmad_orchestrator.runtime.phase4_subscribers import (
+            correct_course_subscriber,
+        )
+
+        bus.on(partial(correct_course_subscriber, bus=bus))
+        await bus.emit(
+            EventType.SPRINT_SCOPE_CHANGE_DETECTED,
+            source="cli",
+            story_id=story_id,
+            reason=reason,
+            real=real,
+        )
+        # Process the single emitted event.
+        await bus.dispatch_one(timeout=1.0)
+
+    _asyncio.run(_go())
+    console.print(f"[green]correct-course triggered[/green] story={story_id}")
+
+
+@app.command("investigate")
+def investigate_cli(
+    subject: str = typer.Option(..., "--subject", help="Story ID / error class / incident."),
+    reason: str = typer.Option(..., "--reason"),
+    force: bool = typer.Option(
+        True, "--force/--heuristic",
+        help="Manual trigger bypasses retry-count heuristic (default --force).",
+    ),
+    real: bool = typer.Option(False, "--real/--mock"),
+) -> None:
+    """Trigger bmad-investigate forensic deep-dive.
+
+    Emits FORENSIC_INVESTIGATION_NEEDED on the bus; the subscriber spawns the
+    skill. Manual CLI defaults to --force (bypass heuristic gate); use
+    --heuristic to require the threshold match.
+    """
+    import asyncio as _asyncio
+    from functools import partial
+
+    from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
+    from bmad_orchestrator.runtime.phase4_subscribers import investigate_subscriber
+
+    async def _go() -> None:
+        bus = EventLoop()
+        bus.on(partial(investigate_subscriber, bus=bus))
+        await bus.emit(
+            EventType.FORENSIC_INVESTIGATION_NEEDED,
+            source="cli",
+            subject=subject,
+            reason=reason,
+            force=force,
+            real=real,
+        )
+        await bus.dispatch_one(timeout=1.0)
+
+    _asyncio.run(_go())
+    console.print(f"[green]investigate triggered[/green] subject={subject}")
 
 
 def main() -> None:

@@ -28,6 +28,21 @@ from bmad_orchestrator.runtime.bmad_format import (
 )
 
 
+def _ensure_sprint_status_via_skill() -> None:
+    """Auto-trigger bmad-sprint-planning skill if sprint-status.yaml missing.
+
+    No-op when file exists. Raises SprintStatusMissingError if missing AND
+    Settings.auto_init_sprint_status is False (loud failure beats silent
+    empty wave).
+    """
+    # Lazy import — avoid circular (agent.tools imports runtime indirectly).
+    from bmad_orchestrator.agent.tools.sprint_planning import (
+        ensure_sprint_status_initialized,
+    )
+
+    ensure_sprint_status_initialized()
+
+
 def build_graph(stories: list[dict[str, Any]]) -> nx.DiGraph:
     """Build DAG over stories. Nodes — story dicts, edges — `depends_on`."""
     g: nx.DiGraph = nx.DiGraph()
@@ -173,6 +188,7 @@ class DagPlanner:
 
     @classmethod
     def from_target(cls) -> DagPlanner:
+        _ensure_sprint_status_via_skill()
         sprint = parse_sprint_status_bmad(read_sprint_status_yaml())
         raw = _enrich_with_epic_and_title(list_stories(), sprint)
         wave_stories = filter_wave(raw, sprint)
@@ -180,6 +196,7 @@ class DagPlanner:
         return cls(stories=wave_stories, sprint_status=sprint, graph=graph)
 
     def reload(self) -> None:
+        _ensure_sprint_status_via_skill()
         self.sprint_status = parse_sprint_status_bmad(read_sprint_status_yaml())
         raw = _enrich_with_epic_and_title(list_stories(), self.sprint_status)
         self.stories = filter_wave(raw, self.sprint_status)

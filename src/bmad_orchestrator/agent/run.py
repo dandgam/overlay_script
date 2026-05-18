@@ -993,6 +993,16 @@ async def _run_real_pilot_body(
     sl_consolidator = Consolidator(config=sl_config)
     bus.on(cast(EventCallback, partial(make_self_learning_subscriber(sl_consolidator), bus=bus)))
 
+    # BMad Phase 4 canonical-workflow subscribers (gap-closure 2026-05-19).
+    # SPRINT_SCOPE_CHANGE_DETECTED → bmad-correct-course.
+    # FORENSIC_INVESTIGATION_NEEDED → bmad-investigate (with retry-count heuristic).
+    from bmad_orchestrator.runtime.phase4_subscribers import (
+        correct_course_subscriber,
+        investigate_subscriber,
+    )
+    bus.on(cast(EventCallback, partial(correct_course_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(investigate_subscriber, bus=bus)))
+
     planner = DagPlanner.from_target()
     spawned: list[str] = []
     rounds = 0

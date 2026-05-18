@@ -371,8 +371,9 @@ async def test_all_seven_canonical_subscribers_wired_in_correct_order(
 
     funcs = [getattr(s, "func", s) for s in bus._subs]
     # 7 canonical + elicitation_subscriber (Phase 3) + supervisor_subscriber (Phase 4)
-    # + self_learning_subscriber (Phase 5).
-    assert len(funcs) == 10, f"Expected 10 subscribers, got {len(funcs)}: {funcs!r}"
+    # + self_learning_subscriber (Phase 5) + correct_course + investigate
+    # (BMad Phase 4 gap-closure 2026-05-19).
+    assert len(funcs) == 12, f"Expected 12 subscribers, got {len(funcs)}: {funcs!r}"
     expected_in_order = [
         stage5_completeness_subscriber,
         build_check_subscriber,
@@ -407,8 +408,10 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     A future addition MUST update this assertion in the same commit so the
     inventory drift is reviewed.
     """
-    assert len(ALL_EVENT_TYPES) == 23, (
-        f"Expected 23 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # 2026-05-19 BMad Phase 4 gap-closure adds SPRINT_SCOPE_CHANGE_DETECTED
+    # and FORENSIC_INVESTIGATION_NEEDED → 23 + 2 = 25.
+    assert len(ALL_EVENT_TYPES) == 25, (
+        f"Expected 25 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 

@@ -170,9 +170,10 @@ async def test_p0_1_real_pilot_wires_three_subscribers(
         await bus.stop()
 
     # 7 canonical + elicitation_subscriber (Phase 3) + supervisor_subscriber (Phase 4)
-    # + self_learning_subscriber (Phase 5).
-    assert len(bus._subs) == 10, (
-        f"Expected 10 subscribers wired after _run_real_pilot, "
+    # + self_learning_subscriber (Phase 5) + correct_course + investigate
+    # (BMad Phase 4 gap-closure 2026-05-19).
+    assert len(bus._subs) == 12, (
+        f"Expected 12 subscribers wired after _run_real_pilot, "
         f"got {len(bus._subs)}"
     )
 

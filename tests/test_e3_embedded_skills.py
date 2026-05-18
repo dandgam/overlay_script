@@ -75,7 +75,7 @@ def test_apply_embedded_skills_copies_14_canonical_skills(tmp_path: Path) -> Non
     )
     assert isinstance(result, ApplyResult)
     assert sorted(result.skills_applied) == sorted(EMBEDDED_SKILL_NAMES)
-    assert len(result.skills_applied) == 14
+    assert len(result.skills_applied) == 16
     assert result.skills_skipped_disabled == []
     # Target dir laid out at <worktree>/.claude/skills/<name>/SKILL.md
     for name in EMBEDDED_SKILL_NAMES:
@@ -297,7 +297,7 @@ def test_apply_embedded_skills_production_skills_dir_smoke(tmp_path: Path) -> No
         skills_resolution_root=PRODUCTION_SKILLS_ROOT,
         allowed_worktree_root=tmp_path / "target" / ".worktrees",
     )
-    assert len(result.skills_applied) == 14
+    assert len(result.skills_applied) == 16
     assert result.files_written > 14  # each skill has multiple files
     for name in EMBEDDED_SKILL_NAMES:
         assert (wt / ".claude" / "skills" / name / "SKILL.md").is_file()

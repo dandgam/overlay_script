@@ -1,7 +1,7 @@
 """S2 acceptance tests — Tools layer (spec §17).
 
 Coverage:
-- All 35 tools registered (5 state + 3 DAG + 4 spawn + 4 control + 3 merge
+- All 38 tools registered (5 state + 3 DAG + 4 spawn + 4 control + 3 merge
   + 3 memory + 3 retro + 5 operational + 2 splitter + 2 escalate + 1 audit).
 - Each tool is invokable with a valid mock argument set and returns a structured
   MCP content payload (not an error) unless explicitly testing error path.
@@ -58,7 +58,9 @@ def test_all_tools_registered() -> None:
     from bmad_orchestrator.agent.tools import ALL_TOOLS, tool_names
 
     names = tool_names()
-    assert len(ALL_TOOLS) == 35, f"expected 35 tools, got {len(ALL_TOOLS)}"
+    # 2026-05-19 BMad Phase 4 gap-closure adds sprint-planning, correct-course,
+    # investigate → 35 + 3 = 38.
+    assert len(ALL_TOOLS) == 38, f"expected 38 tools, got {len(ALL_TOOLS)}"
     # Spec §17 names must be present:
     required = {
         "read_sprint_status",
@@ -92,6 +94,9 @@ def test_all_tools_registered() -> None:
         "split_story",
         "escalate_to_human",
         "update_sprint_status",
+        "spawn_sprint_planning_worktree",
+        "spawn_correct_course_worktree",
+        "spawn_investigate_worktree",
     }
     missing = required - set(names)
     assert not missing, f"missing tools: {missing!r}"

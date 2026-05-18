@@ -157,6 +157,11 @@ class Settings(BaseSettings):
     # config/self-learning.yaml at subscriber load time.
     self_learning_policy_path: Path | None = None
 
+    # BMad Phase 4 canonical workflows — auto-trigger flags
+    # If sprint-status.yaml отсутствует на старте wave — попытаться запустить
+    # `bmad-sprint-planning` skill для генерации. False → fail loudly.
+    auto_init_sprint_status: bool = True
+
     locale: str = "ru"
 
 

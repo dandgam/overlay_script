@@ -243,7 +243,7 @@ async def test_e9_full_pipeline_synthetic_project_to_policy_proposal_chain(
         skills_resolution_root=skills_root,
         allowed_worktree_root=wt_root,
     )
-    assert len(apply_result.skills_applied) == 14
+    assert len(apply_result.skills_applied) == 16
     assert (wt / ".claude" / "skills" / "bmad-code-review" / "SKILL.md").is_file()
 
     handle = await spawn_worker(

@@ -16,14 +16,17 @@ from typing import Any
 from bmad_orchestrator.agent.tools import (
     audit,
     control,
+    correct_course,
     dag,
     escalate,
+    investigate,
     memory,
     merge,
     operational,
     retro,
     spawn,
     splitter,
+    sprint_planning,
     state,
 )
 
@@ -39,6 +42,9 @@ ALL_TOOLS: list[Any] = [
     *splitter.TOOLS,
     *escalate.TOOLS,
     *audit.TOOLS,
+    *sprint_planning.TOOLS,
+    *correct_course.TOOLS,
+    *investigate.TOOLS,
 ]
 
 
@@ -56,14 +62,17 @@ __all__ = [
     "ALL_TOOLS",
     "audit",
     "control",
+    "correct_course",
     "dag",
     "escalate",
+    "investigate",
     "memory",
     "merge",
     "operational",
     "retro",
     "spawn",
     "splitter",
+    "sprint_planning",
     "state",
     "tool_descriptions",
     "tool_names",

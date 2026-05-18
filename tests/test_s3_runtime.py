@@ -88,10 +88,13 @@ def test_event_loop_has_all_spec_types() -> None:
         "code_review_verdict",
         "compliance_sweep_needed",
         "security_review_passed",
+        # 2026-05-19 BMad Phase 4 gap-closure event types.
+        "sprint_scope_change_detected",
+        "forensic_investigation_needed",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 23
+    assert len(ALL_EVENT_TYPES) == 25
 
 
 @pytest.mark.asyncio

@@ -58,6 +58,9 @@ class EventType(StrEnum):
     CODE_REVIEW_VERDICT = "code_review_verdict"
     SECURITY_REVIEW_PASSED = "security_review_passed"
     COMPLIANCE_SWEEP_NEEDED = "compliance_sweep_needed"
+    # BMad Phase 4 canonical workflow triggers (gap-closure 2026-05-19).
+    SPRINT_SCOPE_CHANGE_DETECTED = "sprint_scope_change_detected"
+    FORENSIC_INVESTIGATION_NEEDED = "forensic_investigation_needed"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
