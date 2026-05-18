@@ -140,6 +140,20 @@
    - **50 unit-тестов** в 6 файлах. Tests: 1588 PASS. mypy/ruff clean
    - Settings.supervisor_policy_path через `--supervisor-policy` (CLI флаг отложен до прод-pilot'а)
 10. **Production pilot на реальном target BMad-проекте** — выбор проекта остаётся на момент запуска (project-agnostic)
+10a. ✅ **Phase 4 hardening Session 1 — #3 Banned-phrase linter** (2026-05-19, commit `85ee1ae`)
+   - spec_phase4_hardening §1.3 — Tier 1 pre-pilot hardening
+   - `_gate_banned_phrases` + `_load_banned_phrases` в `agent/run.py` (5-й gate в `code_review_subscriber`)
+   - `skills/policy/banned-phrases.yaml` — overridable через `Settings.banned_phrases_path`
+   - Blocks `verdict=approve` если summary содержит red-flag фразы («should work», «Done!», «Great!», «looks good to me», etc.)
+   - **10 tests** (8 spec + 2 extra). Tests delta: +10
+10b. ✅ **Phase 4 hardening Session 1 — #4 Permission deny-list** (2026-05-19, commit `8a6a78c`)
+   - spec_phase4_hardening §1.4 — Tier 1 pre-pilot hardening
+   - `FsDenyList` + `BashDenyList` + `compile_deny_lists` + `match_fs_deny` + `match_bash_deny` в `runtime/sandbox.py`
+   - `_scan_fs_access` + расширен `_scan_bash` в `agent/safety/hooks.py`
+   - PreToolUse hook блокирует Read/Glob/Grep/Edit/Write/Bash при совпадении с deny-list
+   - `skills/policy/sandbox-deny-list.yaml` — overridable через `BMAD_DENY_LIST_PATH`
+   - Работает даже при NoSandbox fallback (bwrap недоступен)
+   - **14 tests** (spec exact). Tests delta: +14
 11. ✅ **Interactive TUI menu — Session 2 (M2 forms + execute + polish)** (2026-05-18)
    - `cli/menu/form_screen.py` — FormScreen с typed widgets per ParamSpec: Select (Literal), Checkbox (bool), Input(integer) (int), Input (str/Path). Live CLI preview, inline validation, pre-filled defaults, required markers (`*`). Wires to ConfirmScreen (destructive) or ExecuteScreen (normal)
    - `cli/menu/confirm_screen.py` — ConfirmScreen для destructive commands: typed-name confirmation (как `terraform destroy`), exact match guard, preview CLI command
@@ -190,6 +204,6 @@
 
 ---
 
-**Last updated:** 2026-05-18 (v13 — Interactive TUI menu Session 2)
-**Status:** v13 — Interactive TUI menu ✅ closed (Phase 4 #11). FormScreen (typed widgets per param type), ConfirmScreen (typed-name guard for destructive), ExecuteScreen (in-process + stdout capture + cancel), search filter `/` in BrowseScreen. 49 new tests. Tests: **1762 PASS** (+105 vs v12 baseline 1657). mypy/ruff clean. Phase 4 remaining: only #10 (production pilot).
+**Last updated:** 2026-05-19 (v13.1 — Phase 4 hardening Session 1 (#3 + #4))
+**Status:** v13.1 — Phase 4 hardening Session 1 ✅ closed (#3 banned-phrase linter `85ee1ae` + #4 permission deny-list `8a6a78c`). Tier 1 pre-pilot hardening complete (2 of 4 items). Tests: **1812 PASS** (+24 vs v13 baseline 1788). mypy/ruff clean. Phase 4 remaining: #10 (production pilot) — Tier 1 (#1 SessionStart + #2 memory persistence) deferred to Session 2.
 **Owner:** user + Claude orchestrator
