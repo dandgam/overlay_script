@@ -261,6 +261,26 @@ class TestP1EIsolationGate:
         with pytest.raises(ProjectIsolationError):
             register_project(reg, sub)
 
+    def test_symlink_into_forbidden_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review finding H-7 — symlink whose target resolves into a forbidden
+        host mount must be rejected. ``validate_project_path`` uses
+        ``Path.resolve()`` which follows symlinks, so the gate must trip even
+        when the attacker hands over a benign-looking path that points inside
+        the blacklist."""
+        forbidden_dir = tmp_path / "crm-mirror"
+        forbidden_dir.mkdir()
+        symlink = tmp_path / "innocent-looking"
+        symlink.symlink_to(forbidden_dir, target_is_directory=True)
+        from bmad_orchestrator.runtime import project_registry as pr_mod
+
+        monkeypatch.setattr(
+            pr_mod, "FORBIDDEN_PROJECT_PATHS", (forbidden_dir,)
+        )
+        with pytest.raises(ProjectIsolationError, match="forbidden host mount"):
+            validate_project_path(symlink)
+
 
 # ── P1-B: per-child timeout ─────────────────────────────────────────────────
 
