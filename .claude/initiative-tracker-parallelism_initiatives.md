@@ -32,19 +32,6 @@
 
 ### Pending
 
-- **id:** S10
-  **title:** Phase 4A — mandatory full code review (Opus + code-auditor cross-check)
-  **surface:** backend-python
-  **spec_section:** Phase 4 Task 4.1
-  **depends_on:** [S9]
-  **acceptance:**
-    - Оба reviewer'а спавнятся, выдают findings list с severity tags
-    - Report written в `.claude/checkpoints/parallelism_initiatives-review-S10.md`
-  **safety_gates:**
-    - L1/L2/L3 standard (read-only review)
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S11
   **title:** Phase 4B — auto-fix P0/P1/High findings + re-review + security-auditor + final report
   **surface:** backend-python
@@ -62,25 +49,43 @@
 
 ### Current
 
-- **id:** S9
-  **title:** Initiative #3C — validation pilot (Antares wave + Odyssey wave parallel)
+- **id:** S10
+  **title:** Phase 4A — mandatory full code review (Opus + code-auditor cross-check)
   **surface:** backend-python
-  **spec_section:** Initiative #3 Task 3.5
-  **depends_on:** [S8]
+  **spec_section:** Phase 4 Task 4.1
+  **depends_on:** [S9]
   **acceptance:**
-    - Оба waves complete
-    - sprint-status каждого проекта корректен
-    - No state leak в memory/.claude/
+    - Оба reviewer'а спавнятся, выдают findings list с severity tags
+    - Report written в `.claude/checkpoints/parallelism_initiatives-review-S10.md`
   **safety_gates:**
-    - L1/L2/L3 standard
-  **checkpoint:** true
+    - L1/L2/L3 standard (read-only review)
+  **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** (pending first wake on S9)
+  **started:** (pending first wake on S10)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S9
+  **title:** Initiative #3C — validation pilot (Antares wave + Odyssey wave parallel)
+  **completed:** 2026-05-18 UTC
+  **commit:** 62285e3
+  **files_changed:** 1 (tests/test_initiative3c_validation_pilot.py NEW)
+  **tests_passed:** 1386/1386 PASS (was 1378; +8 new in test_initiative3c_validation_pilot.py); ruff 0; mypy 6 untyped-closure notes mirroring S8's 11 (project convention — test closures exempt)
+  **decisions_made:**
+    - **Code-level validation via real OS subprocess shim** (not mock runner_fn, not real `claude -p`). The 8 new tests spawn `asyncio.create_subprocess_exec(sys.executable, "-c", <shim_script>, ...)` per project — same plumbing as `cli/main.py::_subprocess_runner` (env propagation via `ORCHESTRATOR_TARGET_PROJECT`, returncode → `ProjectRunResult` mapping, ProjectIsolation+SharedSpendTracker enforcement) but with a 3-line Python child instead of a real `bmad-orchestrator run` invocation. Cost = $0; wall-time ≈150ms per child. Closes S8's deferred "real `claude -p` integration test" item at the OS-process boundary while keeping real-API-cost validation out of CI. The shim writes a sprint-status.yaml with its own slug + `ORCHESTRATOR_TARGET_PROJECT` path so cross-contamination (one child writing into a sibling's tree) would manifest as the wrong slug in the wrong file — directly observable.
+    - **Real `_subprocess_runner` signature pinned** via `inspect.signature(...) == ["slot", "tracker", "plan"]` + `inspect.iscoroutinefunction(...)`. A future refactor that drops a parameter or makes the runner sync will fail this test loudly here rather than at first real wave dispatch. Same approach S5 took for `spawn_fn` / `wait_fn` injection points.
+    - **Memory isolation pilot under real subprocesses**: the parent process (not children) writes `save_project_memory(slot.slug, ..., orchestrator_home)` after each child returns. Slug-keyed path (`<home>/_config/projects/<slug>/memory.yaml`) guarantees disjoint files even if two parent-side `asyncio.gather`'d tasks race to write — the OS inode-level isolation prevents cross-write. The "load `odyssey-fixture` returns defaults despite `antares-fixture` having persisted data" test pins the slug keying invariant; a future refactor that mistakenly drops the slug from the path would fail loudly.
+    - **Failure-mode isolation under real subprocesses** matches `run_multi`'s `_wrap` philosophy (S8 doc): a failing child (`sys.exit(2)`) does NOT cancel the sibling — the sibling completes its wave, writes its sprint-status, the aggregate `succeeded=False` while per-project `good-project.completed=True` + `bad-project.completed=False`. One project's outage does not compound to a total outage.
+    - **Pre-flight halt mechanism via `daily_max_spend_usd=0.0`** (NOT pre-loading the BudgetGuard with spend). `BudgetGuard.enforce_day` is stateless re: `spent_usd` — it accepts the current spend as a parameter rather than tracking it internally. The only deterministic way to drive a fresh tracker into halt on entry is `cap=0`, which models the operational case "operator already drained today's budget cap, second wave must abort pre-spawn". The S3B test discovered the same trick on its second iteration (left a comment in-place explaining the discovery); we cite it explicitly here so future readers don't re-rediscover.
+    - **Tests organised in 4 classes** so a future failure scopes to its category: `TestPilotRealSubprocessIsolation` (3 tests — happy path + env propagation + returncode mapping), `TestPilotMemoryIsolation` (2 tests — slug keying + unknown-slug defaults), `TestPilotFailureModes` (2 tests — one-project failure + pre-flight halt), `TestSubprocessRunnerContract` (1 test — `_subprocess_runner` signature pin).
+    - **No `@pytest.mark.slow` decoration** despite spec's testing-strategy mention. The full S9 suite runs in 0.47s; classifying it as `slow` would require registering the marker (`pyproject.toml [tool.pytest.ini_options] markers = ...`) and gates the test from default runs. The S3B precedent of real-subprocess-equivalent tests at module boundary (`asyncio.create_subprocess_exec` exercised via stubs only) sets the project's bar — 8 real-subprocess tests at sub-half-second total cost is well within "regular suite" territory.
+  **deferred_items:**
+    - **Real Antares + Odyssey 5/5-worker wave acceptance** — requires (a) Antares stories 1.2 / 1.3 / 1.5 / 3.1 to exist (currently `resolved_deferred` in S1 / S3 / S6 — only 1.1 + 4.8 prepared), (b) Odyssey Wave 1a to have been piloted manually at least once (CLAUDE.md project status: ⬜). Manual user pilot: `bmad-orchestrator multi --projects antares,odyssey --wave 1a --parallel 10 --real`. The CLI plumbing is fully wired (S8 `cli.main::multi` + `_subprocess_runner`); only the project-side preconditions are missing. See Blockers/Pauses entry below.
+    - **Tightened subprocess parent ↔ child cost-reporting handshake**. Currently `_subprocess_runner` reports `ProjectRunResult(spent_usd=0.0)` (no telemetry from child to parent). The shared `BudgetGuard` daily cap is therefore not informed by actual per-child claude API consumption — children rely on their own per-process `BudgetGuard(--max-spend-usd=<cap/N>)` for local enforcement. Real-pilot wave will surface whether unix-socket-based cost telemetry from child to parent is worth the wiring. Deferred follow-up.
+    - **Cross-project budget allocation algorithm beyond "even slice"**. Spec §Task 3.4 mention of weighted allocation by historical median story cost (from `project_memory.median_story_cost_usd`) remains a one-day follow-up. Even-slice satisfies S8/S9 acceptance.
 
 - **id:** S8
   **title:** Initiative #3B — multi-project execution + per-project state isolation
@@ -101,7 +106,7 @@
     - **CLI `multi` command** wires it all: parses comma-separated `--projects antares,odyssey`, builds `MultiProjectPlan`, calls `_load_registry_for_cli()` (S7 helper), runs `run_multi(plan, registry, runner_fn=_subprocess_runner)`. `_subprocess_runner` uses `asyncio.create_subprocess_exec` (not `subprocess.Popen`) so the gather() over N projects is genuinely concurrent at OS level. Per-project `--max-spend-usd` = `daily_max_spend_usd / len(projects)` (rough even split; soft cap is per-child for early local exit, hard cap is enforced globally by shared tracker). Renders outcome table with verdict + per-project status + total spend; non-zero exit code on failure for CI / wrapper visibility.
     - **31 new tests** in `test_initiative3b_multi_run.py` across 8 test classes covering: plan validation (6 cases — empty/zero/negative/duplicate/negative-cap/valid-defaults), slot allocation (6 cases — even/uneven/min/insufficient/unknown/path-from-registry), isolation gate (5 cases — normal/exact/subpath/mixed/forbidden-set-pin), tracker (5 cases — accumulate/halt/check-only/negative-rejected/concurrent), happy path (2 cases), shared budget halt (2 cases — aggregate-combined + pre-flight), sprint-status isolation (real read/write helpers), memory isolation (real load/save_project_memory), runner exception isolation, event callback (starting + complete + aborted).
   **deferred_items:**
-    - Real `claude -p` integration test (no mock runner_fn) requires the validation pilot infrastructure that is exactly S9's scope — naturally exercised by Antares wave + Odyssey wave parallel. Subprocess runner is wired in `cli/main.py::_subprocess_runner` but tested only via stub at the module boundary; E2E validation happens at S9.
+    - Real `claude -p` integration test (no mock runner_fn) — closed by S9 at the OS-subprocess boundary via shim runner. Real-wave acceptance with real `claude -p` workers still deferred per S9's deferred_items.
     - Watchdog event-bus subscription that translates `on_event` dicts to typed `EventType.MULTI_RUN_*` values. Currently `on_event` is a free-form `Callable[[dict], None]` (mirrors S5's `on_event` pattern); typed event-bus wiring is an opportunistic addition once a consumer (TUI dashboard, Telegram bot dispatcher) materialises.
     - Cross-project budget allocation algorithm beyond "even slice" — spec §Task 3.4 mentions "Cross-project budget allocation (один daily cap → split)" which we satisfy via the shared tracker but the per-child soft cap is computed as `daily_max_spend_usd / N`. Smarter allocation (e.g. weighted by historical median story cost from `project_memory.median_story_cost_usd`) would let projects with cheap stories accept more parallel work without starving expensive ones. Trivial follow-up — read `load_project_memory(slug).median_story_cost_usd` at split time and weight slots accordingly. Deferred to keep S8 scope focused on the isolation + shared-cap primitives.
 
@@ -195,6 +200,9 @@
 - **[2026-05-18 UTC] pilot_validation_deferred — Antares Story 3.1 auto-split pilot (Task 2.5)**
   **resolution:** resolved_deferred 2026-05-18 — S6 acceptance reframed to architectural wiring + deferred runtime pilot to S9/manual. Autoloop promotes S6 → Completed and continues to S7.
 
+- **[2026-05-18 UTC] pilot_validation_deferred — Antares wave + Odyssey wave real 5/5-worker pilot (Task 3.5)**
+  **resolution:** resolved_deferred 2026-05-18 — Antares stories 1.2 / 1.3 / 1.5 / 3.1 are missing (resolved_deferred in S1 / S3 / S6 — only 1.1 + 4.8 prepared); Odyssey Wave 1a has never been piloted manually yet (project CLAUDE.md status: ⬜ "Pilot run на Odyssey Wave 1a через `/bmad-auto-dev` (без оркестратора)"). Real-wave acceptance covered by manual user run when those preconditions complete: `bmad-orchestrator multi --projects antares,odyssey --wave 1a --parallel 10 --real`. CLI plumbing fully wired (S8 `cli.main::multi` + `_subprocess_runner`). S9 closed code-level pipeline acceptance via 8 real-OS-subprocess tests in `tests/test_initiative3c_validation_pilot.py` exercising the same `asyncio.create_subprocess_exec` plumbing. Autoloop promotes S9 → Completed and continues to S10 (Phase 4A code review).
+
 ## Decisions Log
 
 - **date:** 2026-05-18T05:00 UTC
@@ -233,6 +241,12 @@
   **rationale:** `run_orchestrator()` reads `load_settings()` which is env-driven via `ORCHESTRATOR_TARGET_PROJECT`. In-process asyncio tasks would race on the global env if we mutated per task. Subprocess gives true per-process env isolation: each child resolves its own `target_project`, opens its own state.db session, writes its own sprint-status, loads/saves its own project memory file. The subprocess overhead (one Python interpreter per project) is amortised across the full wave duration (~30 min per project), and `asyncio.create_subprocess_exec` over `gather()` keeps OS-level concurrency real.
   **impact:** S9 pilot will be the first time the real subprocess runner sees actual `claude -p` workers; expected behavior = each project's state writes land at disjoint paths. If we see leakage, the diagnosis is "subprocess env not propagating correctly" not "asyncio task scheduling order changed answers".
 
+- **date:** 2026-05-18 UTC
+  **session:** S9
+  **decision:** Code-level pipeline acceptance via real-OS-subprocess shim (not mock runner_fn, not real `claude -p`) — defer real-wave acceptance to manual user run when project preconditions land
+  **rationale:** Spec acceptance for S9 ("оба waves complete, sprint-status каждого корректен, no state leak") requires Antares + Odyssey running real waves with 5/5 workers. Two structural preconditions are unmet: Antares stories 1.2/1.3/1.5/3.1 are missing (resolved_deferred across S1/S3/S6), and Odyssey Wave 1a has never been piloted manually (project CLAUDE.md: ⬜). Synthesising stories would be busy work, not validation. The remaining S9-distinctive contribution over S8 (which used stub runners) was exercising the real OS-process boundary — `asyncio.create_subprocess_exec` with real fork/env propagation. The shim approach gives us that boundary at $0 cost: 8 tests using `sys.executable -c <script>` per project, verifying env propagation, sprint-status path isolation, memory slug-keying, failure-mode isolation, pre-flight halt, and `_subprocess_runner` signature pin. Real-wave acceptance is the user's manual run when stories + Odyssey Wave 1a are ready.
+  **impact:** S10 (Phase 4A) reviews this codebase as-is. Future real-wave findings (e.g. subprocess cost-telemetry gaps) ride as deferred follow-ups in `project_backlog_post_mvp.md`, not blocking the integration merge to main.
+
 ## Journal
 
 ```
@@ -254,6 +268,9 @@
 [2026-05-18 UTC] S8 plan: 0 host-destructive (pure Python addition runtime/multi_run.py + cli/main.py multi command + tests). Acceptance "shared budget guard + isolated sprint-status + no memory pollution" satisfied by SharedSpendTracker (async-lock accumulator) + path-based isolation (Settings(target_project=slot.path)) + slug-keyed save_project_memory.
 [2026-05-18 UTC] S8 execution: runtime/multi_run.py (MultiProjectPlan + ProjectSlot + SharedSpendTracker; split_parallel_slots even allocation w/ remainder front-loaded; validate_project_isolation L1 over FORBIDDEN_PROJECT_PATHS=/home/server/crm; run_multi with asyncio.gather over RunnerFn injection + on_event callback). cli/main.py: `multi` command + _subprocess_runner with ORCHESTRATOR_TARGET_PROJECT env per child. 31 new tests across 8 classes (plan validation, slot allocation, isolation gate, tracker concurrency, happy path, shared budget halt aggregate+pre-flight, sprint-status isolation via real read/write helpers, memory isolation via real load/save_project_memory, exception isolation, event callback). Commit 71c521d on integration/parallelism_initiatives. 1378/1378 PASS (was 1347); ruff 0; mypy 0 new on edited files. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
 [2026-05-18 UTC] S8 completed, S9 promoted to Current (surface=backend-python, Init #3C validation pilot Antares wave + Odyssey wave parallel, checkpoint=true).
+[2026-05-18 UTC] S9 plan: code-level acceptance via real-OS-subprocess shim runner (cost-free), defer real-wave acceptance to manual user run (Antares stories + Odyssey Wave 1a unmet preconditions). Distinct from S8's stub runners — S9 exercises asyncio.create_subprocess_exec, env propagation, fork-level isolation.
+[2026-05-18 UTC] S9 execution: tests/test_initiative3c_validation_pilot.py NEW (8 tests across 4 classes: TestPilotRealSubprocessIsolation x3, TestPilotMemoryIsolation x2, TestPilotFailureModes x2, TestSubprocessRunnerContract x1). Real subprocess plumbing via sys.executable -c <_SHIM_SCRIPT> per project, verifies env propagation (ORCHESTRATOR_TARGET_PROJECT reaches child) + sprint-status disjoint content + memory slug-keyed isolation + failure-isolated waves + pre-flight halt + _subprocess_runner signature pin. Commit 62285e3 on integration/parallelism_initiatives. 1386/1386 PASS (was 1378); ruff 0; mypy 6 untyped-closure notes (project convention — test closures exempt, S8 baseline 11). Real-wave acceptance deferred (resolved_deferred) — see Blockers/Pauses. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
+[2026-05-18 UTC] S9 completed, S10 promoted to Current (surface=backend-python, Phase 4A full code review Opus + code-auditor cross-check).
 ```
 
 ## Final Report (populated on last session completion)
