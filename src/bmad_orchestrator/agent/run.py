@@ -107,6 +107,9 @@ from bmad_orchestrator.runtime.project_memory import (
     load_project_memory,
     save_project_memory,
 )
+from bmad_orchestrator.runtime.project_registry import (
+    validate_project_path as _validate_project_path,
+)
 from bmad_orchestrator.runtime.sandbox import DEFAULT_CGROUP_LIMITS, detect_sandbox
 from bmad_orchestrator.runtime.security_review import (
     SECURITY_REVIEW_SKILL_INVOCATION,
@@ -656,6 +659,13 @@ async def _run_real_pilot(
     The per-story spend reserve here is a placeholder (story_alarm_usd / 6 ≈
     $5/story) — W3 wires real cost parsing from worker JSONL ``usage`` blocks.
     """
+    # Review finding P1-E — L1 forbidden-path gate at single-project entry.
+    # ``register_project`` enforces this at registry insertion, but a stale
+    # registry from a prior version (or test fixture) can still hold a
+    # poisoned entry; refuse here before any subprocess spawns.
+    settings = load_settings()
+    _validate_project_path(settings.target_project)
+
     # Phase 0 Task 0.1 — pre-cleanup of stale orchestrator processes from
     # prior failed runs. Excludes self + PPID to avoid suicide. See
     # spec_parallelism_initiatives §Phase 0 / Task 0.1.

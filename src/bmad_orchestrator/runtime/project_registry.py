@@ -40,6 +40,47 @@ class ProjectRegistryError(ValueError):
     """Raised on malformed yaml, bad slug, or path validation failure."""
 
 
+class ProjectIsolationError(ProjectRegistryError):
+    """Raised when a project path overlaps a forbidden host mount (prod CRM).
+
+    L1 input-boundary gate per spec §Safety gates §1.3 — prod CRM root must
+    never appear inside the registry because every downstream code path
+    (single-project run, multi-run, worker sandbox bind list) trusts that
+    registered paths are safe to mount read-write.
+    """
+
+
+# Paths that must NEVER appear as a project root anywhere in the system.
+# Spec §Safety gates §1.3: prod CRM mount must not land in a worker bind
+# list because the sandbox topology binds ``slot.path`` read-write into the
+# worker tree. Enforced at registry insertion (defence at lowest layer) and
+# at every spawn boundary (defence-in-depth).
+FORBIDDEN_PROJECT_PATHS: tuple[Path, ...] = (
+    Path("/home/server/crm"),
+)
+
+
+def validate_project_path(project_path: Path) -> None:
+    """Refuse if ``project_path`` overlaps a forbidden host mount.
+
+    Resolves symlinks so an indirect symlink to /home/server/crm cannot
+    smuggle the prod mount into the registry. Raises
+    :class:`ProjectIsolationError` on overlap.
+    """
+    resolved = project_path.expanduser().resolve()
+    for forbidden in FORBIDDEN_PROJECT_PATHS:
+        forbidden_resolved = forbidden.expanduser().resolve()
+        try:
+            resolved.relative_to(forbidden_resolved)
+        except ValueError:
+            continue
+        raise ProjectIsolationError(
+            f"project path {resolved} is inside forbidden host mount "
+            f"{forbidden_resolved}; prod CRM must never appear in a worker "
+            f"bind list (spec §Safety gates §1.3)"
+        )
+
+
 class ProjectEntry(BaseModel):
     """One project in the registry."""
 
@@ -189,6 +230,11 @@ def register_project(
         raise ProjectRegistryError(
             f"project path does not exist or is not a directory: {project_path}"
         )
+    # Review finding P1-E — refuse forbidden host mounts at registry insertion
+    # (lowest layer). Without this gate ``bmad-orchestrator init
+    # /home/server/crm`` would succeed and later single-project ``run`` would
+    # bypass the multi-run-only check.
+    validate_project_path(project_path)
     final_slug = slug or slug_from_path(project_path)
     if not _SLUG_RE.match(final_slug):
         raise ProjectRegistryError(

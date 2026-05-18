@@ -31,7 +31,10 @@ from bmad_orchestrator.runtime.multi_run import (
 )
 from bmad_orchestrator.runtime.project_registry import (
     ProjectEntry,
+    ProjectIsolationError,
     ProjectsRegistry,
+    register_project,
+    validate_project_path,
 )
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -206,6 +209,56 @@ class TestP1DEnvAllowlist:
         assert not any(
             key.startswith("ORCHESTRATOR_") for key in _SUBPROCESS_ENV_ALLOWLIST
         )
+
+
+# ── P1-E: isolation at registry + single-project entry ─────────────────────
+
+
+class TestP1EIsolationGate:
+    """``validate_project_path`` enforced at ``register_project`` + spawn boundary."""
+
+    def test_validate_rejects_forbidden_path(self) -> None:
+        with pytest.raises(ProjectIsolationError, match="forbidden host mount"):
+            validate_project_path(Path("/home/server/crm"))
+
+    def test_validate_rejects_subpath(self) -> None:
+        with pytest.raises(ProjectIsolationError):
+            validate_project_path(Path("/home/server/crm/agent"))
+
+    def test_validate_allows_safe_path(self, tmp_path: Path) -> None:
+        safe = tmp_path / "safe-project"
+        safe.mkdir()
+        validate_project_path(safe)
+
+    def test_register_project_rejects_forbidden(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        forbidden_dir = tmp_path / "crm-mirror"
+        forbidden_dir.mkdir()
+        from bmad_orchestrator.runtime import project_registry as pr_mod
+
+        monkeypatch.setattr(
+            pr_mod, "FORBIDDEN_PROJECT_PATHS", (forbidden_dir,)
+        )
+        reg = ProjectsRegistry(projects={})
+        with pytest.raises(ProjectIsolationError):
+            register_project(reg, forbidden_dir)
+
+    def test_register_project_rejects_subpath_of_forbidden(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        forbidden_dir = tmp_path / "crm-mirror"
+        forbidden_dir.mkdir()
+        sub = forbidden_dir / "child"
+        sub.mkdir()
+        from bmad_orchestrator.runtime import project_registry as pr_mod
+
+        monkeypatch.setattr(
+            pr_mod, "FORBIDDEN_PROJECT_PATHS", (forbidden_dir,)
+        )
+        reg = ProjectsRegistry(projects={})
+        with pytest.raises(ProjectIsolationError):
+            register_project(reg, sub)
 
 
 # ── P1-B: per-child timeout ─────────────────────────────────────────────────

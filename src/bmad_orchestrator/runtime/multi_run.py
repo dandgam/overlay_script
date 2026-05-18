@@ -38,27 +38,18 @@ import structlog
 
 from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard, BudgetResult
 from bmad_orchestrator.config import BudgetConfig
-from bmad_orchestrator.runtime.project_registry import ProjectsRegistry
+from bmad_orchestrator.runtime.project_registry import (
+    FORBIDDEN_PROJECT_PATHS,
+    ProjectIsolationError,
+    ProjectsRegistry,
+    validate_project_path,
+)
 
 log = structlog.get_logger(__name__)
 
 
-# Paths that must NEVER appear as a project root in a multi-run plan.
-# Spec §Safety gates §1.3: prod CRM mount must not land in a worker bind list
-# because the sandbox topology binds ``slot.path`` read-write into the worker
-# tree. Treating these as input-boundary validation keeps the guard cheap and
-# loud — registration of a forbidden path raises before any subprocess spawns.
-FORBIDDEN_PROJECT_PATHS: tuple[Path, ...] = (
-    Path("/home/server/crm"),
-)
-
-
 class MultiRunError(Exception):
     """Base for multi-project run errors."""
-
-
-class ProjectIsolationError(MultiRunError):
-    """Raised when a project path overlaps a forbidden host mount (e.g. prod CRM)."""
 
 
 # ── data contracts ──────────────────────────────────────────────────────────
@@ -219,24 +210,19 @@ def split_parallel_slots(
 def validate_project_isolation(slots: tuple[ProjectSlot, ...]) -> None:
     """Refuse if any project path overlaps a forbidden host mount.
 
-    Catches both an exact match (``/home/server/crm``) and any subpath
-    (``/home/server/crm/agent``). Prod CRM must never be the root of a
-    worker's bind list — the sandbox binds ``slot.path`` read-write and a
-    worker would be free to mutate live production files.
+    Defence-in-depth at the spawn boundary. Delegates per-path checking to
+    :func:`runtime.project_registry.validate_project_path` so the rule is
+    defined once. ``register_project`` enforces the same gate at insertion
+    time — this call protects against a stale registry written by a prior
+    version that lacked the check.
     """
     for slot in slots:
-        resolved = slot.path.expanduser().resolve()
-        for forbidden in FORBIDDEN_PROJECT_PATHS:
-            forbidden_resolved = forbidden.expanduser().resolve()
-            try:
-                resolved.relative_to(forbidden_resolved)
-            except ValueError:
-                continue
+        try:
+            validate_project_path(slot.path)
+        except ProjectIsolationError as exc:
             raise ProjectIsolationError(
-                f"project {slot.slug!r} path {resolved} is inside forbidden "
-                f"host mount {forbidden_resolved}; prod CRM must never appear "
-                f"in a worker bind list (spec §Safety gates §1.3)"
-            )
+                f"project {slot.slug!r}: {exc}"
+            ) from exc
 
 
 # ── orchestration ───────────────────────────────────────────────────────────
