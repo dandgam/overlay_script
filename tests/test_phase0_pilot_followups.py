@@ -129,8 +129,12 @@ def test_phase0_kill_stale_kills_unrelated_pid() -> None:
     def fake_kill(pid: int, sig: int) -> None:
         sent.append((pid, sig))
 
+    # H-3 fix: _cmdline_matches_project guards the SIGKILL by reading
+    # /proc/<pid>/cmdline. A synthetic pid has no proc entry, so we mock
+    # the helper to assert the kill loop fires when cmdline match succeeds.
     with mock.patch("bmad_orchestrator.agent.run.subprocess.run", return_value=fake_proc), \
-            mock.patch("bmad_orchestrator.agent.run.os.kill", side_effect=fake_kill):
+            mock.patch("bmad_orchestrator.agent.run.os.kill", side_effect=fake_kill), \
+            mock.patch("bmad_orchestrator.agent.run._cmdline_matches_project", return_value=True):
         result = _kill_stale_orchestrators(project="antares")
 
     assert result == 1

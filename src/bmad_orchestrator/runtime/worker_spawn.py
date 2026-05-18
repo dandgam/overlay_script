@@ -280,15 +280,15 @@ def cleanup_stale_worker_homes(max_age_seconds: float = 3600.0) -> int:
             removed += 1
         except OSError as exc:
             log.warning(
-                "stale_worker_home_cleanup_failed",
-                path=str(entry),
-                error=str(exc),
+                "stale_worker_home_cleanup_failed path=%s error=%s",
+                str(entry),
+                str(exc),
             )
     if removed:
         log.info(
-            "stale_worker_homes_cleaned",
-            count=removed,
-            cutoff_age_seconds=max_age_seconds,
+            "stale_worker_homes_cleaned count=%d cutoff_age_seconds=%d",
+            removed,
+            max_age_seconds,
         )
     return removed
 
