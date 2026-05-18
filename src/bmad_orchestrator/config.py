@@ -168,6 +168,11 @@ class Settings(BaseSettings):
     # override that EXTENDS (not replaces) the default phrase list.
     banned_phrases_path: Path | None = None
 
+    # Phase 4 hardening #6 — Stop-hook cost + learning consolidation.
+    # When True, cost_tracker emits per-tool-call debug events (noisy in production).
+    # When False (default), only STORY_COMPLETED triggers aggregation via stop_hook_subscriber.
+    cost_tracker_debug_mode: bool = False
+
     locale: str = "ru"
 
 

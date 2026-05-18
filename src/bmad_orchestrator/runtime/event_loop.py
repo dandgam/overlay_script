@@ -33,7 +33,7 @@ BACKSTOP_INTERVAL_SECONDS_DEFAULT = 300
 
 
 class EventType(StrEnum):
-    """Spec §4 — все 13 типов + FS4 HUMAN_QUERY. Phase 4 hardening adds up to 27 total."""
+    """Spec §4 — все 13 типов + FS4 HUMAN_QUERY. Phase 4 hardening adds up to 29 total."""
 
     WORKER_COMPLETED = "worker_completed"
     WORKER_HALT_FILE = "worker_halt_file"
@@ -66,6 +66,15 @@ class EventType(StrEnum):
     # Phase 4 hardening #5 — Two-stage merge gate split.
     # Payload: {stage: "spec"|"quality", verdict: str, findings_count: int}
     MERGE_GATE_STAGE_COMPLETED = "merge_gate_stage_completed"
+    # Phase 4 hardening #6 — Stop-hook cost + learning consolidation.
+    # STORY_COMPLETED: emitted when a story finishes (all stages including merge gate).
+    # Payload: {story_id, status, extract_lessons: bool, tokens: {input, cached, output},
+    #           cost_usd, retry_count, turn_latencies_ms: [float, ...]}
+    STORY_COMPLETED = "story_completed"
+    # STORY_METRICS_AGGREGATED: emitted by stop_hook_subscriber after aggregating per-story metrics.
+    # Payload: {story_id, total_input_tokens, total_cached_tokens, total_output_tokens,
+    #           total_cost_usd, retry_count, p95_turn_latency_ms, lessons_extracted: bool}
+    STORY_METRICS_AGGREGATED = "story_metrics_aggregated"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)

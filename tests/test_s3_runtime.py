@@ -95,10 +95,13 @@ def test_event_loop_has_all_spec_types() -> None:
         "worker_state_persisted",
         # 2026-05-19 Phase 4 hardening #5 — Two-stage merge gate split.
         "merge_gate_stage_completed",
+        # 2026-05-19 Phase 4 hardening #6 — Stop-hook cost + learning consolidation.
+        "story_completed",
+        "story_metrics_aggregated",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 27
+    assert len(ALL_EVENT_TYPES) == 29
 
 
 @pytest.mark.asyncio
