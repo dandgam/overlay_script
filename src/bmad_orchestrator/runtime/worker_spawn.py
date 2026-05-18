@@ -33,6 +33,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bmad_orchestrator.agent.safety.session_start import (
+    _resolve_skill_slug,
+    build_session_start_block,
+    inject_into_worker_env,
+)
 from bmad_orchestrator.agent.tools._common import (
     append_jsonl,
     now_iso,
@@ -577,6 +582,14 @@ async def spawn_worker(
     merged_env.setdefault("ORCHESTRATOR_WORKER_BRANCH", branch)
     merged_env.setdefault("ORCHESTRATOR_WORKER_MODEL", model)
     merged_env.setdefault("ORCHESTRATOR_WORKER_BUDGET_USD", str(budget_cap_usd))
+
+    # Phase 4 hardening #1 — SessionStart hook: inject worker policy + skill
+    # snippet + workflow phase marker before subprocess.Popen so the worker
+    # session starts with full context regardless of CLAUDE.md drift.
+    _spawn_payload = {"skill_slug": None, "skill_invocation": skill_invocation}
+    _skill_slug = _resolve_skill_slug(_spawn_payload)
+    _bootstrap_block = build_session_start_block(_skill_slug, story_id)
+    merged_env = inject_into_worker_env(merged_env, _bootstrap_block)
 
     # FS7 — wrap the worker command in an OS-level sandbox (default: bwrap)
     # so the inner ``claude -p`` cannot reach prod files no matter what bash
