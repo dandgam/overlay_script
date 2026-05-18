@@ -711,23 +711,53 @@ async def _run_real_pilot(
         _kill_orphan_workers(spawned_handles)
 
 
+def _cmdline_matches_project(pid: int, project: str) -> bool:
+    """Return True iff ``/proc/<pid>/cmdline`` has ``--project <project>`` exactly.
+
+    Review finding H-3: ``pgrep -f "bmad-orchestrator run --project odyssey"``
+    also matches ``odyssey-staging`` / ``odyssey-prod`` siblings (substring
+    match). Multi-project registries (Init #3) make this a destructive misfire
+    waiting to happen — staging cleanup SIGKILLs production.
+
+    Resolves by reading the target proc's own argv (NUL-separated) and
+    asserting one token equals ``--project`` followed by an exact-match next
+    token equal to ``project``. Returns False on any read error (proc gone,
+    permission denied) — better to miss a kill than kill the wrong sibling.
+    """
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    try:
+        raw = cmdline_path.read_bytes()
+    except OSError:
+        return False
+    args = [a.decode("utf-8", errors="replace") for a in raw.split(b"\x00") if a]
+    for i, arg in enumerate(args):
+        if arg == "--project" and i + 1 < len(args) and args[i + 1] == project:
+            return True
+        if arg.startswith("--project=") and arg.removeprefix("--project=") == project:
+            return True
+    return False
+
+
 def _kill_stale_orchestrators(project: str) -> int:
     """Kill orchestrator processes for the same project, excluding self/PPID.
 
-    Spec: ``pkill -9 -f "bmad-orchestrator run --project {project}"`` matched
-    the live pilot too — fix is pgrep + PID filter. Returns number killed.
+    Two-stage matching to avoid the substring hazard from review finding H-3:
+    pgrep produces a candidate set with a loose ``bmad-orchestrator run``
+    pattern (cheap pre-filter), then each pid's ``/proc/<pid>/cmdline`` is
+    parsed and we kill only those whose argv has ``--project`` followed
+    *exactly* by ``project`` (no ``odyssey`` matching ``odyssey-staging``).
+    Returns number killed.
     """
-    pattern = f"bmad-orchestrator run --project {project}"
     exclude_pids = {os.getpid(), os.getppid()}
     pgrep_bin = shutil.which("pgrep")
     if pgrep_bin is None:
         return 0
     try:
-        # ``pattern`` is a search expression, not an executed command — pgrep
-        # matches it against existing /proc/<pid>/cmdline entries. Hardcoded
-        # absolute binary + no shell.
+        # Loose pre-filter — exact-match decision lives in
+        # ``_cmdline_matches_project`` so substring overlap can never reach
+        # the SIGKILL below.
         proc = subprocess.run(  # noqa: S603
-            [pgrep_bin, "-f", pattern],
+            [pgrep_bin, "-f", "bmad-orchestrator run"],
             capture_output=True,
             text=True,
             check=False,
@@ -742,6 +772,8 @@ def _kill_stale_orchestrators(project: str) -> int:
             continue
         pid = int(line)
         if pid in exclude_pids:
+            continue
+        if not _cmdline_matches_project(pid, project):
             continue
         try:
             os.kill(pid, signal.SIGKILL)

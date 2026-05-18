@@ -319,6 +319,79 @@ class TestP1BTimeout:
         assert "timeout" in (outcome.per_project["slow"].error or "")
 
 
+# ── H-3: exact-match --project argument in stale-killer ────────────────────
+
+
+class TestH3CmdlineMatchProject:
+    """``_cmdline_matches_project`` is exact (not substring)."""
+
+    def test_self_with_exact_project_arg_matches(self) -> None:
+        """Self process is fake-tested: we synthesise via /proc/<pid>/cmdline."""
+        from bmad_orchestrator.agent.run import _cmdline_matches_project
+
+        # Use this test process pid; cmdline contains pytest args, no --project.
+        assert _cmdline_matches_project(os.getpid(), "doesnotexist") is False
+
+    def test_missing_pid_returns_false(self) -> None:
+        from bmad_orchestrator.agent.run import _cmdline_matches_project
+
+        # PID 999999 is essentially guaranteed not to exist.
+        assert _cmdline_matches_project(999_999, "anything") is False
+
+    def test_exact_match_via_subprocess(self) -> None:
+        """Spawn a sleep child with exact ``--project odyssey`` arg; assert match."""
+        import time as _time
+
+        from bmad_orchestrator.agent.run import _cmdline_matches_project
+
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(5)",
+                "--project",
+                "odyssey",
+            ],
+        )
+        try:
+            # Wait for /proc/<pid>/cmdline to populate.
+            for _ in range(50):
+                if Path(f"/proc/{proc.pid}/cmdline").read_bytes():
+                    break
+                _time.sleep(0.05)
+            assert _cmdline_matches_project(proc.pid, "odyssey") is True
+            assert _cmdline_matches_project(proc.pid, "odyssey-staging") is False
+            assert _cmdline_matches_project(proc.pid, "odyssey-prod") is False
+            assert _cmdline_matches_project(proc.pid, "odys") is False
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_equals_form_match(self) -> None:
+        import time as _time
+
+        from bmad_orchestrator.agent.run import _cmdline_matches_project
+
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(5)",
+                "--project=odyssey",
+            ],
+        )
+        try:
+            for _ in range(50):
+                if Path(f"/proc/{proc.pid}/cmdline").read_bytes():
+                    break
+                _time.sleep(0.05)
+            assert _cmdline_matches_project(proc.pid, "odyssey") is True
+            assert _cmdline_matches_project(proc.pid, "odyssey-staging") is False
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
 # ── H-2: stale worker home cleanup ─────────────────────────────────────────
 
 
