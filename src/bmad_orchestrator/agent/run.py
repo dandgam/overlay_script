@@ -139,6 +139,7 @@ from bmad_orchestrator.runtime.supervisor_subscriber import (
 from bmad_orchestrator.runtime.supervisor_subscriber import (
     make_supervisor_subscriber,
 )
+from bmad_orchestrator.runtime.verdict_fallback import parse_runner_review_log
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
     tail_jsonl_events,
@@ -3104,6 +3105,27 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         worktree=worktree, story_id=story_id, wave=wave, bus=bus
     )
 
+    # ── S2 (spec_pilot_findings_closure §1 #2) — runner-log fallback.
+    # When the merge-gate spec worker fails to surface a parseable verdict
+    # event (JSONL stream had no `verdict: ...` token), fall back to reading
+    # the bmad-auto-dev runner's own Stage 6 review log from the worktree.
+    # The runner records PASS / NEEDS-FIX / BLOCKED there — re-use that signal
+    # instead of escalating every event-stream miss to a human.
+    verdict_source = "merge_gate_spec"
+    if spec_verdict == "error":
+        fallback = parse_runner_review_log(worktree, story_id)
+        if fallback is not None:
+            fb_verdict, fb_summary = fallback
+            log.info(
+                "code_review_runner_log_fallback",
+                story_id=story_id,
+                worktree=worktree,
+                fallback_verdict=fb_verdict,
+            )
+            spec_verdict = fb_verdict
+            spec_summary = fb_summary
+            verdict_source = "runner_log_fallback"
+
     if spec_verdict != "approve":
         # Spec stage failed — skip quality stage entirely (saves cost).
         log.info(
@@ -3119,6 +3141,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
             worktree=worktree,
             review_iteration=review_iteration,
             gate_stage="spec",
+            source=verdict_source,
         )
         if spec_metrics is not None and cfg is not None and cfg.budget is not None:
             gates_for_tuning = _load_review_gates(cfg)
@@ -3296,6 +3319,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         "worktree": worktree,
         "review_jsonl": handle_jsonl_str,
         "review_iteration": review_iteration,
+        "source": verdict_source,
     }
     if gate_reasons:
         emit_payload["gate_reasons"] = gate_reasons
