@@ -348,8 +348,6 @@ class BwrapSandbox:
             "/etc/sudoers.d",
             "/etc/ssh",
             "/root",
-            # Docker socket — privesc to host (``docker run --privileged …``).
-            "/var/run/docker.sock",
             # SSH keys, known_hosts, agent socket directory.
             f"{_host_home}/.ssh",
             # Cloud / registry credential stores.
@@ -380,6 +378,11 @@ class BwrapSandbox:
             f"{_host_home}/.terraform.d/credentials.tfrc.json",
             f"{_host_home}/.config/helm/registry/config.json",
             f"{_host_home}/.password-store",
+            # Desktop secret stores (libsecret / gnome-keyring) — git
+            # credential.helper=libsecret reads from ~/.local/share/keyrings.
+            f"{_host_home}/.local/share/keyrings",
+            f"/run/user/{os.getuid()}/keyring",
+            f"/run/user/{os.getuid()}/gnupg",
             # Orchestrator's own state (state.db, tokens, memory, runs).
             str(_orchestrator_state),
             f"{_host_home}/.bmad-orchestrator",
@@ -393,11 +396,22 @@ class BwrapSandbox:
                 wrapped += ["--tmpfs", blackout]
             elif blackout_path.is_file():
                 wrapped += ["--ro-bind", "/dev/null", blackout]
-            # Sockets / devices / FIFOs (e.g. ``/var/run/docker.sock``): bwrap
-            # cannot create a regular-file mount point at a unix-socket path
-            # when the parent dir is itself a tmpfs symlink. Skip — the
-            # ``--ro-bind / /`` mount makes the socket read-only, which is
-            # enough to block ``docker run`` (needs write to the socket).
+            else:
+                # Sockets / devices / FIFOs / broken symlinks: bwrap cannot
+                # mount ``/dev/null`` over a non-regular file, and broken
+                # symlinks degrade silently. Log so operators notice when a
+                # blackout entry stops landing (e.g. a credential store
+                # moved/deleted between deploys). NOTE: unix sockets like
+                # ``/var/run/docker.sock`` are NOT blacked out by this loop —
+                # if the orchestrator UID is in the ``docker`` group, the
+                # worker can still ``connect()`` to the daemon and pivot to
+                # host root. Mitigate at host level (drop docker group) or
+                # via user namespace; tracked in backlog.
+                log.warning(
+                    "sandbox blackout %s skipped — path is not a regular "
+                    "file or directory (socket/device/broken symlink)",
+                    blackout,
+                )
         wrapped += [
             "--unshare-pid",
             "--unshare-uts",
