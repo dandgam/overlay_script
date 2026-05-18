@@ -39,20 +39,6 @@
 
 ### Pending
 
-- **id:** S3
-  **title:** #3 autofix routing policy + #8 subprocess timeout adaptive
-  **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #3 + §2 #8
-  **depends_on:** [S2]
-  **acceptance:**
-    - Routing policy YAML loaded; security-critical tag → opus; iter ≥2 → opus
-    - Auto-split triggered on WORKER_HALT_FILE with loc_cap_exceeded
-    - Default subprocess timeout 3600s; ENV `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` honoured; adaptive by AC count
-    - +9 + +7 = +16 tests
-  **safety_gates: []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S4
   **title:** #4 AbortController per worker
   **surface:** backend-python
@@ -125,26 +111,40 @@
 
 ### Current
 
-- **id:** S2
-  **title:** #2 verdict event runner ↔ orchestrator wiring
+- **id:** S3
+  **title:** #3 autofix routing policy + #8 subprocess timeout adaptive
   **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #2
-  **depends_on:** []
+  **spec_section:** spec/spec_pilot_findings_closure.md §1 #3 + §2 #8
+  **depends_on:** [S2]
   **acceptance:**
-    - Mock pilot → events.jsonl contains verdict=approve after WORKER_FINISHED
-    - integration branch creation triggered on approve via merge_to_integration_subscriber
-    - request_changes event on reject with parseable reason
-    - +9 tests in test_verdict_event_emission.py
-  **safety_gates:**
-    - Touches agent/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh — banned-phrase gate must NOT block legitimate verdict text
+    - Routing policy YAML loaded; security-critical tag → opus; iter ≥2 → opus
+    - Auto-split triggered on WORKER_HALT_FILE with loc_cap_exceeded
+    - Default subprocess timeout 3600s; ENV `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` honoured; adaptive by AC count
+    - +9 + +7 = +16 tests
+  **safety_gates: []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-18 22:13 UTC (auto-promoted after S1)
+  **started:** 2026-05-19 (auto-promoted after S2)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S2
+  **title:** #2 verdict event runner ↔ orchestrator wiring
+  **completed:** 2026-05-19 UTC
+  **commit:** 4ac3e565a5e2
+  **files_changed:** 6 (2 new + 4 modified; src + tests)
+  **tests_passed:** 1892 (was 1883; +9 new spec tests; target +9 ✓)
+  **decisions_made:**
+    - Chose Variant B (orchestrator-side fallback reader) over Variant A (modify 825-line runner.sh). Reasoning: lower risk, doesn't depend on runner.sh stdout JSON propagation through claude_event parser, easier to test with mock fixtures.
+    - New module `runtime/verdict_fallback.py` (single-file, ~80 LOC) — no upstream skill changes.
+    - Fallback fires ONLY when spec stage verdict=="error" (no parseable event). Quality stage uses unchanged path — if it returns error after spec approve via fallback, final verdict goes through standard worst-wins logic.
+    - Most-recent mtime wins for multi-log resolution — autofix re-review (`<id>-retry-1.log`) supersedes initial review (`<id>.log`). Mirrors runner.sh's `tail -n 5 | grep -Eo | tail -n 1` semantics.
+    - Added `source` field to emitted CODE_REVIEW_VERDICT payload (`runner_log_fallback` or `merge_gate_spec`) for observability — fields are passed through bus.emit(**kwargs).
+  **deferred_items:**
+    - Symmetric fallback for quality stage (low priority — quality-stage 'error' after spec-approve is rare in pilots; current worst-wins+HUMAN_QUERY path is acceptable).
 
 - **id:** S1
   **title:** #1 mark-done ID normalization + #9 spawned/succeeded counter split
@@ -170,11 +170,15 @@
 
 [2026-05-18 22:13 UTC] S1 — resolver lives in `runtime/bmad_format.py` (not new `agent/story_id.py`) because the file already owns the kebab/dotted regex toolkit; adding `agent/story_id.py` would split related helpers across two modules.
 
+[2026-05-19 UTC] S2 — chose Variant B (orchestrator reads runner log) over Variant A (modify runner.sh stdout). Variant A would require coordinating JSON line format with claude_event parser; Variant B reuses runner's existing on-disk artifact and ships as a single 80-LOC module.
+
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 8 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure, runtime=loop_wrapper, delay=300s, auto_merge=false.
 
 [2026-05-18 22:13 UTC] S1 done, runtime=loop_wrapper — wrapper handles next iteration. commit=7edc9bb, tests 1883 PASS, ruff+mypy clean. S2 promoted to Current.
+
+[2026-05-19 UTC] S2 done, runtime=loop_wrapper — wrapper handles next iteration. commit=4ac3e56, tests 1892 PASS (+9), ruff clean. Variant B (runner-log fallback) shipped. S3 promoted to Current.
 
 ## Final Report
 (empty)
