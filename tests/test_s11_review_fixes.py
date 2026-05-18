@@ -392,6 +392,103 @@ class TestH3CmdlineMatchProject:
             proc.wait(timeout=5)
 
 
+# ── H-4 + H-5: validate_decomposition disjointness, parent subset, AC cap ──
+
+
+class TestH4H5Decomposition:
+    """``validate_decomposition`` enforces disjoint touches_files + AC cap."""
+
+    @staticmethod
+    def _sub(idx: str, **extra: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "id": f"p-{idx}",
+            "title": f"sub {idx}",
+            "scope": "one",
+            "ac": ["AC1"],
+            "estimated_minutes": 20,
+            "deps_on": [],
+            "touches_files": [f"src/{idx}.py"],
+        }
+        base.update(extra)
+        return base
+
+    def test_overlap_in_touches_files_rejected(self) -> None:
+        from bmad_orchestrator.runtime.story_splitter import (
+            DecompositionError,
+            validate_decomposition,
+        )
+
+        a = self._sub("a", touches_files=["src/x.py", "src/y.py"])
+        b = self._sub("b", touches_files=["src/y.py"])
+        with pytest.raises(DecompositionError, match="disjoint"):
+            validate_decomposition([a, b])
+
+    def test_disjoint_touches_files_pass(self) -> None:
+        from bmad_orchestrator.runtime.story_splitter import (
+            validate_decomposition,
+        )
+
+        a = self._sub("a", touches_files=["src/a.py"])
+        b = self._sub("b", touches_files=["src/b.py"])
+        out = validate_decomposition([a, b])
+        assert len(out) == 2
+
+    def test_parent_subset_widening_rejected(self) -> None:
+        from bmad_orchestrator.runtime.story_splitter import (
+            DecompositionError,
+            validate_decomposition,
+        )
+
+        a = self._sub("a", touches_files=["src/a.py"])
+        b = self._sub("b", touches_files=["src/extra.py"])
+        with pytest.raises(DecompositionError, match="outside the parent"):
+            validate_decomposition(
+                [a, b], parent_touches_files=["src/a.py"]
+            )
+
+    def test_parent_subset_when_inside_pass(self) -> None:
+        from bmad_orchestrator.runtime.story_splitter import (
+            validate_decomposition,
+        )
+
+        a = self._sub("a", touches_files=["src/a.py"])
+        b = self._sub("b", touches_files=["src/b.py"])
+        validate_decomposition(
+            [a, b], parent_touches_files=["src/a.py", "src/b.py", "src/c.py"]
+        )
+
+    def test_ac_over_cap_rejected(self) -> None:
+        from bmad_orchestrator.runtime.story_splitter import (
+            DecompositionError,
+            validate_decomposition,
+        )
+
+        a = self._sub("a", ac=[f"AC{i}" for i in range(6)])
+        b = self._sub("b")
+        with pytest.raises(DecompositionError, match=r"ac length 6 > 5"):
+            validate_decomposition([a, b])
+
+    def test_ac_wrong_type_rejected(self) -> None:
+        from bmad_orchestrator.runtime.story_splitter import (
+            DecompositionError,
+            validate_decomposition,
+        )
+
+        a = self._sub("a", ac="not-a-list")
+        b = self._sub("b")
+        with pytest.raises(DecompositionError, match="ac must be list"):
+            validate_decomposition([a, b])
+
+    def test_ac_at_cap_passes(self) -> None:
+        from bmad_orchestrator.runtime.story_splitter import (
+            validate_decomposition,
+        )
+
+        a = self._sub("a", ac=[f"AC{i}" for i in range(5)])
+        b = self._sub("b")
+        validate_decomposition([a, b])
+
+
 # ── H-2: stale worker home cleanup ─────────────────────────────────────────
 
 

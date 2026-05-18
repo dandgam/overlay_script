@@ -147,7 +147,10 @@ class DecompositionError(ValueError):
 
 
 def validate_decomposition(
-    payload: Any, *, parent_id: str | None = None
+    payload: Any,
+    *,
+    parent_id: str | None = None,
+    parent_touches_files: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate Opus-emitted sub-story list. Returns the same list on success.
 
@@ -155,6 +158,17 @@ def validate_decomposition(
     wrong outer type, count outside ``[MIN_SUBS, MAX_SUBS]``, missing required
     key, non-string id, duplicate id, id colliding with parent, ``deps_on`` not
     ``list[str]``, dep referring to unknown peer, cycle in deps_on graph.
+
+    Review findings H-4/H-5 also enforce:
+    * ``ac`` (if present) is a list of length ≤ 5 — matches the prompt cap so
+      a misbehaving LLM that emits a 12-AC sub-story does not defeat the
+      splitting purpose.
+    * ``touches_files`` is pairwise disjoint across sub-stories — the whole
+      point of structured splitting is to guarantee disjoint write sets so
+      squash-merge is conflict-free.
+    * If ``parent_touches_files`` is supplied, the union of sub-story
+      ``touches_files`` must be a subset — sub-stories cannot widen the parent
+      File List into new modules the parent never promised to change.
     """
     if not isinstance(payload, list):
         raise DecompositionError(f"expected list, got {type(payload).__name__}")
@@ -190,6 +204,30 @@ def validate_decomposition(
             raise DecompositionError(
                 f"sub_stories[{idx}].deps_on must be list[str]"
             )
+        # Review finding H-5 — AC cap matches the prompt's ``AC per
+        # sub-story <= 5`` rule. Defensively check type even if key absent.
+        if "ac" in item:
+            ac = item["ac"]
+            if not isinstance(ac, list):
+                raise DecompositionError(
+                    f"sub_stories[{idx}].ac must be list, got "
+                    f"{type(ac).__name__}"
+                )
+            if len(ac) > 5:
+                raise DecompositionError(
+                    f"sub_stories[{idx}].ac length {len(ac)} > 5 "
+                    f"(splitting must keep each sub-story small)"
+                )
+        # Review finding H-4 — touches_files schema check; pairwise/subset
+        # checks happen after the loop once all sub-stories are validated.
+        if "touches_files" in item:
+            tf = item["touches_files"]
+            if not isinstance(tf, list) or any(
+                not isinstance(p, str) for p in tf
+            ):
+                raise DecompositionError(
+                    f"sub_stories[{idx}].touches_files must be list[str]"
+                )
         validated.append(item)
 
     all_ids = {s["id"] for s in validated}
@@ -216,6 +254,34 @@ def validate_decomposition(
 
     for sid in deps_map:
         dfs(sid)
+
+    # Review finding H-4 — pairwise disjointness of touches_files. Squash
+    # merge across sub-stories was advertised as conflict-free precisely
+    # because each sub-story owns a disjoint write set. Allow sub-stories to
+    # omit ``touches_files`` (legacy planner emissions) but if two declare
+    # the same file the decomposition is rejected.
+    files_by_sub: dict[str, set[str]] = {
+        s["id"]: set(s.get("touches_files", []) or []) for s in validated
+    }
+    sub_ids = list(files_by_sub)
+    for i, a in enumerate(sub_ids):
+        for b in sub_ids[i + 1:]:
+            overlap = files_by_sub[a] & files_by_sub[b]
+            if overlap:
+                raise DecompositionError(
+                    f"sub_stories {a!r} and {b!r} both touch "
+                    f"{sorted(overlap)} — touches_files must be disjoint"
+                )
+
+    if parent_touches_files is not None:
+        parent_set = set(parent_touches_files)
+        union = set().union(*files_by_sub.values()) if files_by_sub else set()
+        widened = union - parent_set
+        if widened:
+            raise DecompositionError(
+                f"sub_stories collectively touch {sorted(widened)} which is "
+                f"outside the parent File List {sorted(parent_set)}"
+            )
 
     return validated
 

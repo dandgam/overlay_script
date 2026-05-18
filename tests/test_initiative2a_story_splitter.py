@@ -217,7 +217,7 @@ def _valid_sub(idx: str = "a", **extra: object) -> dict[str, object]:
         "ac": ["AC1"],
         "estimated_minutes": 20,
         "deps_on": [],
-        "touches_files": ["src/x.py"],
+        "touches_files": [f"src/x_{idx}.py"],
     }
     base.update(extra)
     return base
