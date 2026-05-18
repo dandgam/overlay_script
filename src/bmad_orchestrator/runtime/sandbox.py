@@ -44,6 +44,17 @@ _SANDBOX_DEFAULT_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "PWD", "SHELL", "TERM",
 })
 
+# Env vars that the OUTER ``systemd-run --user`` cgroup wrapper needs to reach
+# the user systemd manager, but that must NOT cross into the INNER sandboxed
+# worker. ``worker_spawn.ALLOWED_WORKER_ENV`` forwards them to the spawned
+# process so systemd-run works; ``BwrapSandbox.wrap_command`` excludes them
+# from its ``--setenv`` list so the sandboxed ``claude -p`` cannot reach the
+# user's D-Bus session (keyring, desktop services). claude -p provably runs
+# fine without either.
+_SANDBOX_INNER_ENV_BLOCKLIST: frozenset[str] = frozenset({
+    "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
+})
+
 # FS9 H3+H4 + R5 P0-1 — defence-in-depth resource limits applied via ``prlimit(1)``.
 # bwrap itself has no native rlimit flags; a worker that escapes the mount/net
 # sandbox but stays in-process can still fork-bomb the host or fill tmpfs.
@@ -532,6 +543,11 @@ class BwrapSandbox:
         if env:
             merged_env.update(env)
         for k, v in merged_env.items():
+            # Exclude session-bus vars from the inner sandbox — they are
+            # forwarded to the OUTER systemd-run wrapper only (see
+            # _SANDBOX_INNER_ENV_BLOCKLIST).
+            if k in _SANDBOX_INNER_ENV_BLOCKLIST:
+                continue
             wrapped += ["--setenv", k, v]
 
         wrapped += ["--"]

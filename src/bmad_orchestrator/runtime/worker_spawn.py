@@ -94,6 +94,14 @@ def _worker_timeout_sec() -> int:
 # GOOGLE_*, GH_*, GITHUB_* — gets stripped automatically by the allowlist.
 ALLOWED_WORKER_ENV: frozenset[str] = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "PWD", "SHELL", "TERM",
+    # XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS — required so the OUTER
+    # ``systemd-run --user --scope`` cgroup wrapper can reach the user systemd
+    # manager. Without them systemd-run dies with "Failed to connect to bus:
+    # No medium found" and the whole worker spawn fails. The bwrap sandbox
+    # strips both for the INNER worker process (``--unsetenv`` in
+    # sandbox.py::BwrapSandbox.wrap_command) so the sandboxed ``claude -p``
+    # still cannot reach the session bus — isolation is preserved.
+    "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
 })
 
 

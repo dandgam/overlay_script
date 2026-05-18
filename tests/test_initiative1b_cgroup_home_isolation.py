@@ -32,6 +32,8 @@ from bmad_orchestrator.runtime.sandbox import (
     _systemd_run_available,
 )
 from bmad_orchestrator.runtime.worker_spawn import (
+    ALLOWED_WORKER_ENV,
+    _build_worker_env,
     _cleanup_isolated_home,
     _create_isolated_home,
     spawn_worker,
@@ -164,6 +166,50 @@ def test_bwrap_wrap_command_cgroup_is_outermost(
     pl_idx = out.index("/usr/bin/prlimit")
     bw_idx = out.index("/usr/bin/bwrap")
     assert sd_idx < pl_idx < bw_idx, f"order broken: {out[:10]}"
+
+
+# ── D-Bus / systemd-run env regression (2026-05-19) ───────────────────────────
+#
+# Bug: cgroup-wrapped workers died instantly with "Failed to connect to bus:
+# No medium found". Root cause — ``systemd-run --user`` (outer cgroup wrapper)
+# ran with a worker env that lacked XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS,
+# so it could not reach the user systemd manager. Fix: forward both vars in
+# ALLOWED_WORKER_ENV (so systemd-run works) but exclude them from the bwrap
+# ``--setenv`` list (so the inner sandboxed worker stays isolated).
+
+
+def test_worker_env_forwards_dbus_vars_for_systemd_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_build_worker_env`` must forward XDG_RUNTIME_DIR + DBUS_SESSION_BUS_ADDRESS
+    so the outer ``systemd-run --user`` cgroup wrapper can reach the user bus."""
+    assert "XDG_RUNTIME_DIR" in ALLOWED_WORKER_ENV
+    assert "DBUS_SESSION_BUS_ADDRESS" in ALLOWED_WORKER_ENV
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+    env = _build_worker_env(None)
+    assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+
+
+def test_bwrap_excludes_dbus_vars_from_inner_setenv(tmp_path: Path) -> None:
+    """The inner sandboxed worker must NOT receive the session-bus env — those
+    vars are for the outer systemd-run wrapper only. ``wrap_command`` excludes
+    them from its ``--setenv`` list (D-Bus isolation preserved)."""
+    sb = BwrapSandbox(bwrap_path="/usr/bin/bwrap", prlimit_path="/usr/bin/prlimit")
+    out = sb.wrap_command(
+        ["echo", "x"],
+        worktree=tmp_path,
+        env={
+            "PATH": "/usr/bin",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        },
+    )
+    # PATH is forwarded via --setenv; the two bus vars are NOT.
+    assert "PATH" in out
+    assert "XDG_RUNTIME_DIR" not in out
+    assert "DBUS_SESSION_BUS_ADDRESS" not in out
 
 
 def test_bwrap_wrap_command_cgroup_skipped_when_unavailable(
