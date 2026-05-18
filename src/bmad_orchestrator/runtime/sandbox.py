@@ -194,6 +194,44 @@ class Sandbox(Protocol):
         ...
 
 
+def _resolve_target_dotgit(worktree: Path) -> Path | None:
+    """Patch DD: walk up from a linked-worktree to find the main repo's ``.git/``.
+
+    Antares + Odyssey layout is sibling: ``<target>/.worktrees/wt-<id>/`` →
+    main repo at ``<target>/``, main .git dir at ``<target>/.git/``.
+
+    A linked worktree contains ``.git`` as a *file* pointing at
+    ``<main>/.git/worktrees/<id>/``; we parse the ``gitdir:`` line to find the
+    main .git dir reliably regardless of layout depth.
+
+    Returns ``None`` when the worktree's ``.git`` cannot be resolved (test
+    fixtures often skip git init — bwrap should then proceed without the rw
+    bind, preserving prior behavior).
+    """
+    dotgit = worktree / ".git"
+    if dotgit.is_dir():
+        # The "worktree" is itself a main repo (uncommon for production but
+        # the test fixtures do this). The .git is already inside the rw bind.
+        return None
+    if not dotgit.is_file():
+        return None
+    try:
+        content = dotgit.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not content.startswith("gitdir:"):
+        return None
+    inner = Path(content.split(":", 1)[1].strip())
+    # ``gitdir`` points at ``<main>/.git/worktrees/<id>``; walk up to
+    # ``<main>/.git``. Use ``parents[1]`` so we land on the common dir.
+    if not inner.is_absolute():
+        inner = (worktree / inner).resolve(strict=False)
+    if len(inner.parents) < 2:
+        return None
+    common = inner.parents[1]
+    return common if common.is_dir() else None
+
+
 @dataclass(frozen=True, slots=True)
 class BwrapSandbox:
     """``bwrap``-backed sandbox (Bubblewrap, Flatpak's isolation primitive).
@@ -302,6 +340,26 @@ class BwrapSandbox:
             "--ro-bind", "/dev/null", "/proc/meminfo",
             "--bind", str(wt_abs), str(wt_abs),
             "--chdir", str(wt_abs),
+            # Patch DD 2026-05-18: bind the parent repo's ``.git`` directory
+            # rw so the worker can ``git commit`` from inside the worktree.
+            # A linked worktree's ``.git`` file points at
+            # ``<main>/.git/worktrees/<name>/`` (HEAD + index) and shares
+            # ``<main>/.git/refs/heads/`` + ``<main>/.git/objects/`` with the
+            # main repo. Without this bind, ``--ro-bind / /`` exposes ``.git``
+            # read-only → ``git commit`` fails EROFS and Stage 5 ends with
+            # uncommitted changes (silent-failure or manual close).
+            #
+            # Trade-off: the worker can rewrite ``refs/heads/master`` of the
+            # main repo. Mitigated by branch isolation (worker only operates
+            # on ``feature/<story>``) + integration-branch merge gate; if
+            # threat model tightens, narrow this to just
+            # ``worktrees/<name>/``, ``refs/heads/feature/<story>``,
+            # ``objects/`` and ``logs/refs/heads/feature/<story>``.
+            *(
+                ["--bind", str(_resolve_target_dotgit(wt_abs)), str(_resolve_target_dotgit(wt_abs))]
+                if _resolve_target_dotgit(wt_abs) is not None
+                else []
+            ),
             # Review finding H-1 — explicit blackouts on sensitive host paths.
             # ``--ro-bind / /`` exposes every readable file to the worker; a
             # poisoned story description ("read /home/server/crm/.env for

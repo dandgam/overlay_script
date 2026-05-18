@@ -458,6 +458,15 @@ async def spawn_worker(
 
     jsonl_path = worker_jsonl_path(worktree)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    # Patch CC 2026-05-18: a re-used worktree path inherits events.jsonl
+    # from any previous pilot. tail_jsonl_events stops at the first
+    # ``worker_completed`` line it sees, so a stale terminal event from
+    # the prior run would short-circuit the new pilot in <1s with a
+    # bogus "silent_failure" verdict (zero new commits since base_sha).
+    # Truncate to a fresh slate per spawn — preserves history only when
+    # the caller archives the file before re-spawning.
+    if jsonl_path.exists():
+        jsonl_path.write_text("", encoding="utf-8")
 
     if skills_result is not None:
         _emit(
@@ -627,15 +636,24 @@ async def spawn_worker(
 
 
 async def tail_jsonl_events(
-    jsonl_path: Path, poll_interval: float = 0.25
+    jsonl_path: Path,
+    poll_interval: float = 0.25,
+    start_seen: int = 0,
 ) -> AsyncIterator[dict[str, Any]]:
     """Async generator yielding new events as they appear (file tail-follow).
 
     Останавливается когда последний event имеет `event_type == worker_completed`
     или `event_type == worker_halt_file`. Полезно для real-time observation в
     тестах + watchdog'е.
+
+    Patch CC 2026-05-18: ``start_seen`` skips that many existing lines before
+    tailing — set by callers that share an events.jsonl with prior pilots on
+    the same worktree path. Default ``0`` preserves test contract. The fresh-
+    start logic lives in :func:`spawn_worker`, which now truncates a reused
+    events.jsonl so the tailer never observes stale ``worker_completed`` from
+    a prior run (that 0-second silent-failure trap was discovered 2026-05-18).
     """
-    seen = 0
+    seen = start_seen
     while True:
         if not jsonl_path.exists():
             await asyncio.sleep(poll_interval)
