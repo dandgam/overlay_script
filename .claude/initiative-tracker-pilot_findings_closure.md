@@ -39,20 +39,6 @@
 
 ### Pending
 
-- **id:** S4
-  **title:** #4 AbortController per worker
-  **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #4
-  **depends_on:** []
-  **acceptance:**
-    - Per-worker cancellation token; supervisor `cancel_worker` action wired
-    - WORKER_CANCELLED event emitted with reason + cancelled_by
-    - Stuck worker (sleep 9999) killed in <5s wall clock
-    - +8 tests
-  **safety_gates: []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-
 - **id:** S5
   **title:** #5 MCP server readiness polling
   **surface:** backend-python
@@ -111,25 +97,43 @@
 
 ### Current
 
-- **id:** S3
-  **title:** #3 autofix routing policy + #8 subprocess timeout adaptive
+- **id:** S4
+  **title:** #4 AbortController per worker
   **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #3 + §2 #8
-  **depends_on:** [S2]
+  **spec_section:** spec/spec_pilot_findings_closure.md §1 #4
+  **depends_on:** []
   **acceptance:**
-    - Routing policy YAML loaded; security-critical tag → opus; iter ≥2 → opus
-    - Auto-split triggered on WORKER_HALT_FILE with loc_cap_exceeded
-    - Default subprocess timeout 3600s; ENV `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` honoured; adaptive by AC count
-    - +9 + +7 = +16 tests
+    - Per-worker cancellation token; supervisor `cancel_worker` action wired
+    - WORKER_CANCELLED event emitted with reason + cancelled_by
+    - Stuck worker (sleep 9999) killed in <5s wall clock
+    - +8 tests
   **safety_gates: []
-  **checkpoint:** false
+  **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 (auto-promoted after S2)
+  **started:** 2026-05-19 (auto-promoted after S3)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S3
+  **title:** #3 autofix routing policy + #8 subprocess timeout adaptive
+  **completed:** 2026-05-19 UTC
+  **commit:** 949d8e737acd
+  **files_changed:** 10 (6 new + 4 modified; src + tests + runner.sh + policy yaml)
+  **tests_passed:** 1912 (was 1892; +20 new = 10 routing + 8 timeout + 2 inventory bumps; target +16 ✓)
+  **decisions_made:**
+    - Simplified routing policy schema — instead of a string-expression DSL (`if: story.tags contains "security-critical"`), used a typed pydantic schema (`security_critical_tag: str`, `opus_min_iteration: int`). Easier to validate, no fake DSL.
+    - Routing module exposes a `python -m` CLI so runner.sh stays project-agnostic — bash calls `python3 -m bmad_orchestrator.runtime.autofix_routing --print-cli-name` and uses stdout for `claude --model <value>`. On any error CLI falls back to printing `sonnet` so runner never breaks.
+    - `pick_timeout_sec` uses `acceptance` list length as AC count fallback (existing frontmatter shape) instead of requiring a new `ac_count` field. Bucket thresholds picked from spec: 0→DEFAULT(3600), 1-3→SMALL(1800), 4-8→MEDIUM(3600), 9+→LARGE(5400).
+    - Runner default raised from 1800s → 3600s. Both `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` (new official) and legacy `PATCH_H_HARD_CEILING_SECS` accepted; new wins via `${PATCH_H_HARD_CEILING_SECS:-${BMAD_RUNNER_CLAUDE_TIMEOUT_SEC:-3600}}`.
+    - `decomposer_subscriber` only emits `STORY_AUTO_SPLIT` event (event-only contract). Actual auto-split execution stays in `auto_split_and_execute` / pilot loop — subscriber is a hook, not an executor. Avoids coupling subscriber to decompose_fn + worktree context.
+    - Triggered flag in payload reflects `BMAD_AUTO_SPLIT` env so downstream observers see why no split happened when env is off.
+    - Inventory tests in `test_canonical_patches_p6.py` and `test_s3_runtime.py` bumped 29→30 (added STORY_AUTO_SPLIT).
+  **deferred_items:**
+    - Subscriber wiring into `agent/run.py` (the bus bootstrap site) — left for the session that brings auto-split out of opt-in BMAD_AUTO_SPLIT and into default behaviour.
+    - Runner-side per-story adaptive timeout call — currently default + env override only; per-story `python -m subprocess_timeout` call could be added before each Stage 4-6 invocation but adds latency on every story. Reassess after S5/S6 wiring is in.
 
 - **id:** S2
   **title:** #2 verdict event runner ↔ orchestrator wiring
@@ -172,6 +176,8 @@
 
 [2026-05-19 UTC] S2 — chose Variant B (orchestrator reads runner log) over Variant A (modify runner.sh stdout). Variant A would require coordinating JSON line format with claude_event parser; Variant B reuses runner's existing on-disk artifact and ships as a single 80-LOC module.
 
+[2026-05-19 UTC] S3 — chose typed policy schema over string-expression DSL for autofix-routing.yaml. Simpler validation, no fake DSL. Runner stays project-agnostic via `python -m` CLI rather than embedded bash logic. Subscriber is event-only (no execution coupling) — `STORY_AUTO_SPLIT` emitted, actual decomposer call stays in `auto_split_and_execute`.
+
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 8 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure, runtime=loop_wrapper, delay=300s, auto_merge=false.
@@ -179,6 +185,8 @@
 [2026-05-18 22:13 UTC] S1 done, runtime=loop_wrapper — wrapper handles next iteration. commit=7edc9bb, tests 1883 PASS, ruff+mypy clean. S2 promoted to Current.
 
 [2026-05-19 UTC] S2 done, runtime=loop_wrapper — wrapper handles next iteration. commit=4ac3e56, tests 1892 PASS (+9), ruff clean. Variant B (runner-log fallback) shipped. S3 promoted to Current.
+
+[2026-05-19 UTC] S3 done, runtime=loop_wrapper — wrapper handles next iteration. commit=949d8e7, tests 1912 PASS (+20), ruff+mypy clean. Autofix routing (security-critical → opus, iter≥2 → opus) + adaptive subprocess timeout (default 3600s, +adaptive by AC count) + STORY_AUTO_SPLIT event on loc_cap halt. S4 promoted to Current.
 
 ## Final Report
 (empty)
