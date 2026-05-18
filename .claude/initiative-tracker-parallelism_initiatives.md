@@ -32,20 +32,6 @@
 
 ### Pending
 
-- **id:** S8
-  **title:** Initiative #3B — multi-project execution + per-project state isolation
-  **surface:** backend-python
-  **spec_section:** Initiative #3 Task 3.3-3.4
-  **depends_on:** [S7]
-  **acceptance:**
-    - Tests: shared budget guard + isolated sprint-status updates
-    - No memory cross-pollination
-  **safety_gates:**
-    - L1: prod CRM mounts NEVER in worker bind list
-    - L2/L3 standard
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S9
   **title:** Initiative #3C — validation pilot (Antares wave + Odyssey wave parallel)
   **surface:** backend-python
@@ -90,24 +76,46 @@
 
 ### Current
 
-- **id:** S7
-  **title:** Initiative #3A — project registry yaml + CLI scan/doctor/init/resume
+- **id:** S8
+  **title:** Initiative #3B — multi-project execution + per-project state isolation
   **surface:** backend-python
-  **spec_section:** Initiative #3 Task 3.1-3.2
-  **depends_on:** [S6]
+  **spec_section:** Initiative #3 Task 3.3-3.4
+  **depends_on:** [S7]
   **acceptance:**
-    - `bmad-orchestrator init /path` создаёт config
-    - `scan` показывает все known projects
+    - Tests: shared budget guard + isolated sprint-status updates
+    - No memory cross-pollination
   **safety_gates:**
-    - L1/L2/L3 standard
+    - L1: prod CRM mounts NEVER in worker bind list
+    - L2/L3 standard
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** (pending first wake on S7)
+  **started:** (pending first wake on S8)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S7
+  **title:** Initiative #3A — project registry yaml + init/scan/doctor/resume CLI
+  **completed:** 2026-05-18 UTC
+  **commit:** 3db8846
+  **files_changed:** 3 (src/bmad_orchestrator/runtime/project_registry.py NEW, src/bmad_orchestrator/cli/main.py, tests/test_initiative3a_project_registry.py NEW)
+  **tests_passed:** 1347/1347 PASS (was 1301; +46 new in test_initiative3a_project_registry.py); ruff 0; mypy 0 new on edited files
+  **decisions_made:**
+    - Registry module placed at `runtime/project_registry.py` (sibling of `runtime/project_memory.py`, `runtime/auto_split.py`, etc.). Same canonical-import-path principle as S4/S5/S6 — keeps the multi-project infrastructure (memory + registry + future multi_run) under one importable namespace. The yaml format is a plain `projects:` mapping (slug → ProjectEntry) so it round-trips trivially via `yaml.safe_dump` and stays diff-friendly for human edits.
+    - Pydantic v2 `ProjectEntry` with `path: Path` (absolute-only validator), `bmad_layout: Literal["bmm-v6", "odyssey-hybrid", "unknown", "not-bmad"]` (4-value union), `sandbox_overrides: dict[str, Any]` (free-form per-project knob). `ProjectsRegistry` validates slug regex `^[a-z0-9][a-z0-9_-]{0,63}$` on every project key — prevents path-traversal slugs from sneaking into `_config/projects/<slug>/memory.yaml`-style downstream paths.
+    - Two-tier registry path resolution: env override `BMAD_PROJECTS_REGISTRY=/abs/path` wins (mirrors `BMAD_REQUIRE_SANDBOX` / `BMAD_REQUIRE_CGROUP` / `BMAD_AUTO_SPLIT` from prior sessions), fallback `<orchestrator_home>/config/projects.yaml`. The env var is the test seam — every CLI test pins it to `tmp_path/config/projects.yaml` so pytest never touches a real registry.
+    - Atomic save via `path.with_suffix(suffix + ".tmp")` + `tmp.replace(path)` — prevents corruption mid-write when multiple `init` calls race (real-mode multi-project orchestrator may register projects concurrently from a watchdog). Same pattern as `runtime/project_memory.py::save_project_memory`.
+    - Layout detector uses shape heuristics only: presence of `_bmad/bmm/config.yaml` → `bmm-v6` (Antares), presence of `_bmad/config.toml` + `_bmad/planning-artifacts/` → `odyssey-hybrid` (Odyssey), `_bmad/` exists but neither shape → `unknown`, no `_bmad/` → `not-bmad`. Best-effort by design — scan/doctor surface drift as `stale` rather than crash.
+    - CLI `resume-project <slug>` renamed from the spec's literal `resume` to avoid collision with the existing top-level `resume` verb (pause/resume daemon control at `cli/main.py:281`). Spec acceptance (`init` + `scan`) still hits the literal names; `doctor` matches the literal; `resume-project` is a one-word delta that documents itself in the help string. Top-level (not subgroup) so users get the verbs at the shortest possible invocation.
+    - `scan_registry` returns immutable `ScanRow` dataclasses sorted by slug — JSON-serialisable for future API surfaces (watchdog dashboards, Telegram bot) without forcing callers to consume rich's `Table` object. Mirrors the S4/S5 pattern (`SplitDecision` / `SubStoryResult` are frozen dataclasses).
+    - `doctor()` short-circuits on missing path (skips layout/output/sprint checks) — saves CPU + avoids confusing chained-failure noise in CI when a registered project gets `rm -rf`'d between scan and doctor. Exit code 1 on any failed check so wrappers (CI, watchdog) can branch on it.
+    - 46 new tests cover: 4 layout detector cases, 3 slug derivation cases, 7 registry validation/round-trip cases, 2 path resolution cases (default + env override), 5 register_project cases, 4 scan_registry cases, 6 doctor branches, 2 resume_hint cases, 13 CLI invocations via `typer.testing.CliRunner` with isolated registry per test. Pins env vars `BMAD_PROJECTS_REGISTRY` + `ORCHESTRATOR_ORCHESTRATOR_HOME` so CLI tests cannot leak into the real user registry.
+  **deferred_items:**
+    - Wiring `--project <slug>` resolution through the registry so `bmad-orchestrator run --project antares` reads `registry.projects["antares"].path` instead of relying on `ORCHESTRATOR_TARGET_PROJECT` env var. Cleanest place: a `_resolve_target_project(slug)` helper called at the top of `run()` in `cli/main.py`, with env-var fallback for backwards compat. Deferred to S8 (Init #3B multi-project execution) where the helper is required to dispatch per-project workers.
+    - `sandbox_overrides` is currently a free-form `dict[str, Any]` — no consumer reads it yet. Cleanest first consumer = `runtime/sandbox.py::DEFAULT_CGROUP_LIMITS` merge in S8 so per-project caps can override the global 8G/200%/16384 default. Schema can tighten to a `SandboxOverrides` Pydantic model once the consumer shape is locked.
+    - `bmad-orchestrator init` currently requires an explicit path; spec memo `project_backlog_orchestrator_project_agnostic` envisions a `pip install bmad-orchestrator && bmad-orchestrator init` workflow with cwd as default. Trivial follow-up — `project_path: Path = typer.Argument(default=Path.cwd(), ...)` — deferred to keep this session focused on the registry + commands surface.
 
 - **id:** S6
   **title:** Initiative #2C — auto-split pipeline wiring (decomposer + executor + squash) + validation pilot deferred
@@ -135,7 +143,7 @@
   **files_changed:** 2 (src/bmad_orchestrator/runtime/sub_story_executor.py NEW, tests/test_initiative2b_substory_executor.py NEW)
   **tests_passed:** 1287/1287 PASS (was 1269; +18 new in test_initiative2b_substory_executor.py); ruff 0; mypy 0 new on edited files
   **decisions_made:**
-    - Module placed at `runtime/sub_story_executor.py` (sibling of `runtime/worker_spawn.py` + `runtime/story_splitter.py` from S4). Same rationale as S4 — Python packages cannot contain `-`, and `agent/skills/dag-planner/` is a Claude SDK skill dir, not an importable Python package. Keeps the auto-split chain (decomposer → executor → squash) at canonical import paths under `runtime/`.
+    - Module placed at `runtime/sub_story_executor.py` (sibling of `runtime/worker_spawn.py` + `runtime/story_splitter.py` from S4). Same rationale as S4 — Python packages cannot contain `-`, and `agent/skills/dag-planner/` is a Claude SDK skill dir, not an importable Python package. Keeps the auto-split chain (decomposer in `story_splitter.py` → executor in `sub_story_executor.py`) at canonical import paths under `runtime/`.
     - Sub-stories run **sequentially in shared parent worktree** per spec §Task 2.3 (KISS). Parallelism stays at the *story* level (Initiative #1 worker pool); intra-story parallelism is an explicit out-of-scope item deferred to its own spec. Setup cost amortised (one `_ensure_git_worktree` for parent vs N for subs); sequential semantics mean each sub-story observes the previous sub-story's commits naturally; squash collapses N commits → 1 mirroring how the story was authored originally.
     - `spawn_fn` / `wait_fn` are injection points (defaults call `runtime.worker_spawn.spawn_worker`). This decouples the executor from real-mode `claude -p` so tests can drive a synthetic worker that commits a per-sub file on behalf of the mock-mode WorkerHandle. Pattern mirrors how Initiative #1's `file_conflict.py` stays free of EventBus deps.
     - `on_event(dict)` optional hook (one dict per phase: `sub_story_started`, `sub_story_completed`, `sub_story_squash_done`, `sub_story_squash_skipped`) keeps observability available without forcing an EventBus dependency. The actual JSONL wiring lands in S6 when the validation pilot wires the executor into `_run_real_pilot_body`.
@@ -378,6 +386,18 @@
   **rationale:** Antares has no `docs/stories/` directory at all; story 3.1 file does not exist. Same root cause as S1's 0.5 and S3's 1.5 — Antares only ships 1.1 + 4.8 prepared. Creating 3.1 via a synthetic Stage 4 run defeats the validation purpose (synthetic ≠ real wave). Architectural wiring is complete and covered by 14 new unit tests + 1287-test baseline. Real-pilot exercise lands naturally in S9 (Antares + Odyssey parallel waves) — any story in either wave that exceeds `should_split` thresholds will trip the auto-split path under real claude -p workers.
   **impact:** S6 → Completed without runtime pilot. S7 (Init #3A — project registry + CLI) promoted as Current. If S9 reveals a regression in auto-split surfaces, it surfaces in real-wave exercise rather than a synthetic stand-in.
 
+- **date:** 2026-05-18 UTC
+  **session:** S7
+  **decision:** Top-level `init`/`scan`/`doctor` CLI; `resume` renamed to `resume-project` to avoid collision with the existing pause/resume daemon-control verb
+  **rationale:** Spec acceptance literally names `bmad-orchestrator init <path>` and `bmad-orchestrator scan` — top-level placement matches that literal verb position. `doctor` falls out from the same Task 3.2 listing. Only `resume` collides with `cli/main.py:281`'s existing `def resume(): ...` for the orchestrator daemon. Two cleanest options were (a) put all four under a `project` subapp (`bmad-orchestrator project resume antares`) or (b) keep three at top level + rename the fourth. Picked (b) — three of four match the spec literal at the shortest invocation, and the renamed verb advertises its purpose in `--help`. Subapp can land later if more multi-project verbs accrue (add/remove/move/sync).
+  **impact:** Operators learn `init/scan/doctor` at top level (matches spec). `resume-project <slug>` is the registry hint emitter; the legacy `resume` daemon control remains untouched. S8 (Init #3B) will wire `--project <slug>` resolution through the registry, at which point `run --project antares` resolves via `load_registry` rather than via `ORCHESTRATOR_TARGET_PROJECT` env.
+
+- **date:** 2026-05-18 UTC
+  **session:** S7
+  **decision:** Pydantic v2 registry + atomic yaml save + env-overridable path (mirrors S3/S6 pattern)
+  **rationale:** `ProjectsRegistry(extra="forbid")` rejects unknown keys at load time — prevents silent typos in `bmad_layout: bmm-v7` from being saved-then-reloaded as opaque data. Atomic `tmp.replace(path)` matches `runtime/project_memory.py::save_project_memory` and prevents corruption when concurrent `init` calls land from a future watchdog. `BMAD_PROJECTS_REGISTRY` env var mirrors `BMAD_REQUIRE_SANDBOX` / `BMAD_REQUIRE_CGROUP` / `BMAD_AUTO_SPLIT` from S3/S6 — same per-env-var test seam means CLI tests never touch the user's real registry. Layout detector is shape-based (not config-content-based) so a project with garbage YAML in `_bmad/bmm/config.yaml` still classifies as `bmm-v6`; scan/doctor surface drift as `stale` rather than crash.
+  **impact:** Future multi-project consumers (S8 multi_run, S9 dual-wave pilot, watchdog dashboards) import `load_registry` + `register_project` from `runtime/project_registry.py` and get yaml round-trip + path validation for free. The env var lets pytest pin to `tmp_path/config/projects.yaml` with one `monkeypatch.setenv` line.
+
 ## Journal
 
 ```
@@ -398,6 +418,9 @@
 [2026-05-18 UTC] S6 plan: 0 host-destructive (pure Python addition runtime/auto_split.py + EventType bump + agent/run.py wiring). Acceptance for real Antares 3.1 pilot reframed to "architectural wiring + 14 new tests"; real-pilot validation deferred to S9 / manual user run because Antares ships no docs/stories/ dir.
 [2026-05-18 UTC] S6 execution: runtime/auto_split.py (auto_split_and_execute orchestrates should_split → decompose → execute_sub_stories → squash_sub_stories; AutoSplitOutcome dataclass with .succeeded; make_bus_bridge translates dict events → typed EventType.SUB_STORY_*; opt-in BMAD_AUTO_SPLIT env gate; injectable async decomposer via set_decomposer/get_decomposer with default None). 4 new EventTypes (SUB_STORY_STARTED/COMPLETED/SQUASH_DONE/SQUASH_SKIPPED) + 2 derived (STORY_SPLIT_TRIGGERED/PHASE4_COMPLETE); inventory 19 → 23. agent/run.py per-story diversion: when env+decomposer set, auto_split runs BEFORE legacy worker; on success emits synthetic WORKER_COMPLETED for Stage 6 continuity; on failure falls through to legacy worker. 14 new tests in test_initiative2c_auto_split_pilot.py (happy path 3 subs, keep decision, decomposer error fallback, invalid JSON fallback, MIN_SUBS=2, silent failure, bus bridge typed translation, env flag respected, set_decomposer round-trip). Commit 2a75557 on integration/parallelism_initiatives. 1301/1301 PASS (was 1287); ruff 0; mypy 0 new on edited files. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
 [2026-05-18 UTC] S6 completed, S7 promoted to Current (surface=backend-python, Init #3A project registry yaml + CLI scan/doctor/init/resume).
+[2026-05-18 UTC] S7 plan: 0 host-destructive (pure Python addition runtime/project_registry.py + tests/test_initiative3a_project_registry.py + CLI command additions in cli/main.py). Acceptance literally "init /path creates config" + "scan shows known projects" — top-level CLI verbs to match spec literal.
+[2026-05-18 UTC] S7 execution: runtime/project_registry.py (ProjectsRegistry + ProjectEntry pydantic v2 models, layout detector for bmm-v6/odyssey-hybrid/unknown/not-bmad, atomic yaml save via .tmp+replace, env-overridable BMAD_PROJECTS_REGISTRY path with <orchestrator_home>/config/projects.yaml fallback, register_project/scan_registry/doctor/resume_hint helpers as immutable dataclasses). cli/main.py: top-level init/scan/doctor commands + resume-project (renamed to avoid collision with existing pause/resume daemon verb). 46 new tests in test_initiative3a_project_registry.py (layout detector 4 cases, slug derivation 3, yaml round-trip + 9 failure modes, env path override, register_project 5 branches, scan_registry 4 status branches, doctor 6 branches, resume_hint 2, CLI invocations 13). Commit 3db8846 on integration/parallelism_initiatives. 1347/1347 PASS (was 1301); ruff 0; mypy 0 new on edited files. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
+[2026-05-18 UTC] S7 completed, S8 promoted to Current (surface=backend-python, Init #3B multi-project execution + per-project state isolation).
 ```
 
 ## Final Report (populated on last session completion)
