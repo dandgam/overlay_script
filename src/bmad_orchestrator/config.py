@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     # Anthropic beta headers (§11.1, all mandatory) — canonical в agent/betas.py
     beta_headers: list[str] = Field(default_factory=lambda: list(ANTHROPIC_BETA_HEADERS))
 
+    # Auto-elicitation engine — path to YAML policy. None → fallback to
+    # examples/elicitation-policy.example.yaml at engine load time.
+    elicitation_policy_path: Path | None = None
+
     locale: str = "ru"
 
 

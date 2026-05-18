@@ -30,7 +30,7 @@
 | Паттерн | Применение в Virgil | Статус |
 |---|---|---|
 | **P1 Chaining** | Stages внутри `/bmad-auto-dev`: create-story → gauntlet → dev-story → code-review | ✅ Реализован |
-| **P2 Routing** | `RoleModels` (planner=Opus, reviewer=Opus, dev=Sonnet, routine=Sonnet) + `set_model` tool для runtime swap; preset routing (parallelism presets) | ✅ Реализован (`config.py` + `agent/system_prompt.py` + tool) |
+| **P2 Routing** | `RoleModels` (planner=Opus, reviewer=Opus, dev=Sonnet, routine=Sonnet) + `set_model` tool для runtime swap; preset routing; **auto-elicitation engine** (Tier 0/1/2) для WORKER_ELICITATION → auto_resolve/escalate | ✅ Реализован (`config.py` + `agent/system_prompt.py` + `elicitation/`) |
 | **P3 Parallelization** | DAG planner + worker pool (4-8 параллельных workers в worktrees); sectioning независимых stories | ✅ Merged `6e8a18e` (parallelism_initiatives S1..S11) |
 | **P4 Orchestrator-Workers** | **Основной паттерн** — central orchestrator делит эпик на stories, динамически спавнит workers с tool harness | ✅ Реализован (наш core loop) |
 | **P5 Evaluator-Optimizer** | bmad-code-review → autofix loop (Pilot 2 прошёл «via autofix loop»). `max_review_iterations` cap в `CodeReviewGates` (default=3) + `_gate_iteration_cap` + `review_iteration` payload field. Runaway-loop guard escalates на HUMAN_QUERY за cap | ✅ Formalised 2026-05-18 |
@@ -116,7 +116,7 @@
 
 - ✅ **Step A: Eval harness + 5 synthetic cases** (2026-05-18) — `bmad_orchestrator.eval` module (metrics + runner) + CLI `bmad-orchestrator eval run` + 28 unit-тестов + 5 cases (2 easy + 2 medium + 1 hard) в `evals/cases/`. Mock-mode baseline: 5/5 PASS (100%)
 - ⬜ **Step B: Real BMad stories** — добавить 10+ реальных stories из target BMad-проекта (configurable `--project-root`, не привязано к конкретному проекту) в `evals/cases/`, прогнать в `--mode real`, baseline cost/latency
-- ⬜ **Auto-elicitation policy engine** (1-2 сессии) — `elicitation-router` skill wired, нужна LLM-driven логика поверх 8 policy YAML
+- ✅ **Auto-elicitation policy engine** (2026-05-18) — P2 Routing двухтировая (Tier 0 hard-override + Tier 1 rule match + Tier 2 LLM-judge stub + window cap). Модуль `bmad_orchestrator.elicitation` (4 файла, ~580 строк) + `runtime/elicitation_routing.py` subscriber + Settings.elicitation_policy_path. **34 unit-тестов**, mypy/ruff clean. Tests: 1509 PASS
 - ⬜ **R3 security minors** (0.3 сессии) — canonicalize+allowed-root для `--lessons-dir` / `--skills-root` / `--orchestrator-home`
 - ⬜ **4 security gates** из lesson `code_review_pipeline_gaps`
 - ⬜ **Wire worker → review_iteration** (0.5 сессии) — bmad-auto-dev runner.sh должен эмитить `review_iteration` в WORKER_COMPLETED payload (orchestrator принимает поле, worker его пока не пишет)
@@ -166,5 +166,5 @@
 ---
 
 **Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v5 — project-agnostic. Phase 3 Step A ✅ (eval harness + 5 synthetic cases mock-mode 100% PASS, 28 new tests). Tests: 1475 PASS. Next: Step B (real BMad stories из любого target проекта) или Auto-elicitation engine.
+**Status:** v6 — Auto-elicitation engine ✅. P2 Routing двухтировая (Tier 0 hard-override → Tier 1 rule match → Tier 2 LLM-judge stub) + window cap. Tests: 1509 PASS (+34). Next: Step B (real BMad stories) или Wire worker → review_iteration emit или R3 security minors.
 **Owner:** user + Claude orchestrator

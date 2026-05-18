@@ -81,6 +81,10 @@ from bmad_orchestrator.runtime.commit_recovery import recover_pre_merge
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
 from bmad_orchestrator.runtime.dag_planner import DagPlanner
 from bmad_orchestrator.runtime.deletion_safety import deletion_safety_subscriber
+from bmad_orchestrator.runtime.elicitation_routing import (
+    load_engine as _load_elicitation_engine,
+    make_elicitation_subscriber,
+)
 from bmad_orchestrator.runtime.diff_size_gate import (
     gate_verdict as _diff_size_gate_verdict,
 )
@@ -947,6 +951,15 @@ async def _run_real_pilot_body(
     )
     bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
     bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
+
+    # Auto-elicitation engine (Phase 3 — P2 Routing). Loads policy YAML (path
+    # configurable via Settings.elicitation_policy_path; falls back to
+    # examples/ default). Subscribes to WORKER_ELICITATION: low-risk auto-
+    # resolves are logged + delivered through the existing respond channel,
+    # high-risk / hard-override topics emit HUMAN_QUERY for the operator.
+    elicitation_policy_path = getattr(settings, "elicitation_policy_path", None)
+    elicitation_engine = _load_elicitation_engine(elicitation_policy_path)
+    bus.on(cast(EventCallback, partial(make_elicitation_subscriber(elicitation_engine), bus=bus)))
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []
