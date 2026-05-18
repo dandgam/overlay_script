@@ -165,12 +165,12 @@ class Decision(BaseModel):
 
 ## 10. References
 
-- Universal methodology: `~/.claude/skills/build-agent/REFERENCE.md`
+- Universal methodology: `~/.claude/skills/888/REFERENCE.md`
 - Project methodology: `spec/methodology-virgil.md` §4 Phase 3, §5 queue item «Auto-elicitation»
 - Existing skill: `src/bmad_orchestrator/agent/skills/elicitation-router/SKILL.md`
 - Example policy: `examples/elicitation-policy.example.yaml`
 - Pattern decision tree: REFERENCE.md §5 → P2 Routing
-- Template applied: `~/.claude/skills/build-agent/templates/routing-decision-tree.md` §4B (Dynamic routing via LLM-judge)
+- Template applied: `~/.claude/skills/888/templates/routing-decision-tree.md` §4B (Dynamic routing via LLM-judge)
 
 ---
 

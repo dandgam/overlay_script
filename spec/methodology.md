@@ -1,6 +1,6 @@
 # Methodology — pointer
 
-> **Внимание:** это pointer-файл. Полная универсальная методичка живёт в глобальном skill `build-agent`.
+> **Внимание:** это pointer-файл. Полная универсальная методичка живёт в глобальном skill `888`.
 
 ---
 
@@ -8,9 +8,9 @@
 
 | Файл | Расположение | Назначение |
 |---|---|---|
-| **Универсальная методичка** | `~/.claude/skills/build-agent/REFERENCE.md` | Полный playbook ADLC + Anthropic паттерны — единый источник истины |
-| **Skill dispatcher** | `~/.claude/skills/build-agent/SKILL.md` | Краткие правила использования методички |
-| **Templates** | `~/.claude/skills/build-agent/templates/*.md` | 9 готовых шаблонов (eval suite, system message, tool design, memory, routing, security, observability, prompt injection defense, methodology-template) |
+| **Универсальная методичка** | `~/.claude/skills/888/REFERENCE.md` | Полный playbook ADLC + Anthropic паттерны — единый источник истины |
+| **Skill dispatcher** | `~/.claude/skills/888/SKILL.md` | Краткие правила использования методички |
+| **Templates** | `~/.claude/skills/888/templates/*.md` | 9 готовых шаблонов (eval suite, system message, tool design, memory, routing, security, observability, prompt injection defense, methodology-template) |
 | **Применение к Virgil** | `spec/methodology-virgil.md` (рядом с этим файлом) | Gap-analysis + priority queue для Virgil конкретно |
 
 ---
@@ -19,13 +19,13 @@
 
 ### Хочешь почитать методичку
 ```
-$ cat ~/.claude/skills/build-agent/REFERENCE.md
+$ cat ~/.claude/skills/888/REFERENCE.md
 ```
 
 ### Хочешь применить к новому агенту
 Скажи Claude в нужном репо одно из:
 - «делаю нового агента»
-- `/build-agent`
+- `/888`
 - «как развивать агента»
 
 Skill автоматически прочитает REFERENCE.md, создаст `methodology-<agent>.md` из шаблона и проведёт через фазы ADLC.

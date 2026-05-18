@@ -319,13 +319,13 @@ llm_judge_prompts:
 
 ## 10. References
 
-- Universal methodology: `~/.claude/skills/build-agent/REFERENCE.md`
+- Universal methodology: `~/.claude/skills/888/REFERENCE.md`
 - Patterns используемые:
   - P4 Orchestrator-Workers (Supervisor = meta-orchestrator поверх существующего)
   - P2 Routing (классификация event'а в один из 5 action types)
   - P5 Evaluator-Optimizer (опционально — Supervisor оценивает свои предыдущие decisions через retrospective)
 - Project methodology: `spec/methodology-virgil.md` §4 Phase 4 item #9
-- Template applied: `~/.claude/skills/build-agent/templates/routing-decision-tree.md` (Tier 0/1/2 паттерн)
+- Template applied: `~/.claude/skills/888/templates/routing-decision-tree.md` (Tier 0/1/2 паттерн)
 - Related skill: `agent/skills/intent-router/SKILL.md` — Supervisor дополняет, не заменяет
 - Existing infra: `cli/tui.py`, `elicitation/`, `agent/tools/control.py`
 

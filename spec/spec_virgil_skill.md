@@ -1,12 +1,12 @@
 # Spec — Skill `/virgil` для Claude Code
 
 > Замена Textual TUI на интерактивное меню **прямо в чате Claude Code**.
-> Стиль и механика — как у `/build-agent`. Все кнопки на русском.
+> Стиль и механика — как у `/888`. Все кнопки на русском.
 > Python CLI (`bmad-orchestrator`) остаётся as is — skill это **тонкий UI-слой** поверх.
 
 **Версия:** v1
 **Дата:** 2026-05-19
-**Автор:** user + Claude (build-agent flow)
+**Автор:** user + Claude (888 flow)
 **Статус:** draft, готов к имплементации
 
 ---
@@ -747,7 +747,7 @@ Skill готов когда:
 
 ## 19. References
 
-- **Образец:** `~/.claude/skills/build-agent/SKILL.md` (структура меню)
+- **Образец:** `~/.claude/skills/888/SKILL.md` (структура меню)
 - **Tool docs:** `AskUserQuestion` parameters (limit 4 options, single-select preview)
 - **Virgil CLI:** `src/bmad_orchestrator/cli/main.py` (30+ команд, источник истины)
 - **Текущий TUI:** `src/bmad_orchestrator/cli/menu/*.py` (что заменяем как UI)
