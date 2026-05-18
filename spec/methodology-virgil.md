@@ -84,7 +84,9 @@
 
 - ⬜ **GAP:** Нет eval suite — benchmark из N stories с известным baseline
 - ⬜ **GAP:** Production-mode end-to-end pilot на реальном target BMad-проекте не запущен
-- 🟡 Red-team/security: lesson `code_review_pipeline_gaps` зафиксирован (4 gate'а identified, не встроены)
+- ✅ **Red-team gates** (closed retroactively 2026-05-18 — discovery): 4 gate'а из lesson `code_review_pipeline_gaps` уже в `agent/run.py` после Phase 2 closure (`0070d6f`):
+  - `_gate_p0_threshold` (P0-count) + `_gate_compliance` (152-ФЗ/187-ФЗ tags) + `_gate_test_coverage` (ratio + todo!() placeholders) + `quarterly_sweep_subscriber` (compliance sweep каждые N stories)
+  - Tests: 35 PASS в `test_e5_code_review_gates.py`. Methodology запись была стале
 - ⬜ R3 security-auditor minors: canonicalize+allowed-root для `--lessons-dir` / `--skills-root` / `--orchestrator-home`
 - ⬜ Acceptance criteria для exit из фазы не определены
 
@@ -118,7 +120,6 @@
 - ⬜ **Step B: Real BMad stories** — добавить 10+ реальных stories из target BMad-проекта (configurable `--project-root`, не привязано к конкретному проекту) в `evals/cases/`, прогнать в `--mode real`, baseline cost/latency
 - ✅ **Auto-elicitation policy engine** (2026-05-18) — P2 Routing двухтировая (Tier 0 hard-override + Tier 1 rule match + Tier 2 LLM-judge stub + window cap). Модуль `bmad_orchestrator.elicitation` (4 файла, ~580 строк) + `runtime/elicitation_routing.py` subscriber + Settings.elicitation_policy_path. **34 unit-тестов**, mypy/ruff clean. Tests: 1509 PASS
 - ⬜ **R3 security minors** (0.3 сессии) — canonicalize+allowed-root для `--lessons-dir` / `--skills-root` / `--orchestrator-home`
-- ⬜ **4 security gates** из lesson `code_review_pipeline_gaps`
 - ✅ **Wire worker → review_iteration** (2026-05-18) — `_read_review_iteration` helper в `worker_spawn.py` читает `<worktree>/_bmad/auto-dev-state/current-batch.json:retries[story_id]`, surface через `_wait_and_finalize` + mock path + bridge в `run.py`. P5 loop integration закрыт end-to-end (worker → JSONL → bus → `_gate_iteration_cap`). 11 unit-тестов
 
 ### Фаза 4 — Deploy (после закрытия Phase 3)
@@ -166,5 +167,5 @@
 ---
 
 **Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v7 — P5 loop integration closed end-to-end (review_iteration surfaced from worker state → JSONL → bus → `_gate_iteration_cap`). Tests: 1520 PASS (+11). Next: R3 security minors (canonicalize paths) или 4 security gates из code_review_pipeline_gaps lesson.
+**Status:** v8 — 4 security gates retroactively confirmed already-merged (Phase 2 `0070d6f`). Tests: 1520 PASS. Next: R3 security minors (canonicalize paths) или Step B (real BMad stories).
 **Owner:** user + Claude orchestrator
