@@ -319,6 +319,68 @@ class TestP1BTimeout:
         assert "timeout" in (outcome.per_project["slow"].error or "")
 
 
+# ── H-1: sandbox sensitive-path blackouts ──────────────────────────────────
+
+
+class TestH1SandboxBlackouts:
+    """``BwrapSandbox.wrap_command`` includes blackouts on sensitive host paths."""
+
+    def test_crm_directory_blackout_present_when_host_has_path(
+        self, tmp_path: Path
+    ) -> None:
+        from bmad_orchestrator.runtime.sandbox import BwrapSandbox
+
+        if not Path("/home/server/crm").exists():
+            pytest.skip("no /home/server/crm on this host — blackout no-op")
+        sb = BwrapSandbox()
+        out = sb.wrap_command(["echo"], worktree=tmp_path)
+        tmpfs_indices = [i for i, t in enumerate(out) if t == "--tmpfs"]
+        crm_blacked = any(out[i + 1] == "/home/server/crm" for i in tmpfs_indices)
+        assert crm_blacked, "expected --tmpfs /home/server/crm in bwrap args"
+
+    def test_etc_shadow_blackout_present(self, tmp_path: Path) -> None:
+        from bmad_orchestrator.runtime.sandbox import BwrapSandbox
+
+        if not Path("/etc/shadow").exists():
+            pytest.skip("no /etc/shadow on this host")
+        sb = BwrapSandbox()
+        out = sb.wrap_command(["echo"], worktree=tmp_path)
+        # /etc/shadow is a file → --ro-bind /dev/null /etc/shadow
+        for i, t in enumerate(out):
+            if t == "--ro-bind" and out[i + 1] == "/dev/null" and out[i + 2] == "/etc/shadow":
+                return
+        pytest.fail("expected --ro-bind /dev/null /etc/shadow in bwrap args")
+
+    def test_blackouts_appear_after_open_ro_bind(self, tmp_path: Path) -> None:
+        """Override order: blackouts must come after the blanket ``--ro-bind / /``."""
+        from bmad_orchestrator.runtime.sandbox import BwrapSandbox
+
+        sb = BwrapSandbox()
+        out = sb.wrap_command(["echo"], worktree=tmp_path)
+        ro_root_idx = next(
+            (
+                i
+                for i, t in enumerate(out)
+                if t == "--ro-bind" and out[i + 1] == "/" and out[i + 2] == "/"
+            ),
+            None,
+        )
+        assert ro_root_idx is not None, "missing --ro-bind / / in bwrap args"
+        if Path("/etc/shadow").exists():
+            shadow_idx = next(
+                (
+                    i
+                    for i, t in enumerate(out)
+                    if t == "--ro-bind"
+                    and i + 2 < len(out)
+                    and out[i + 1] == "/dev/null"
+                    and out[i + 2] == "/etc/shadow"
+                ),
+                None,
+            )
+            assert shadow_idx is not None and shadow_idx > ro_root_idx
+
+
 # ── P1-F: auto-split fallback resets worktree ──────────────────────────────
 
 

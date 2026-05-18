@@ -302,6 +302,38 @@ class BwrapSandbox:
             "--ro-bind", "/dev/null", "/proc/meminfo",
             "--bind", str(wt_abs), str(wt_abs),
             "--chdir", str(wt_abs),
+            # Review finding H-1 — explicit blackouts on sensitive host paths.
+            # ``--ro-bind / /`` exposes every readable file to the worker; a
+            # poisoned story description ("read /home/server/crm/.env for
+            # context") could exfil prod secrets, /etc/shadow, other users'
+            # homes, or this user's auth tokens. Blackout = bind ``/dev/null``
+            # over the path so reads return zero bytes regardless of how the
+            # worker resolves the path. Order matters — these come AFTER the
+            # blanket ``--ro-bind / /`` and BEFORE the writable workspace bind
+            # so they override the open mount but never shadow legitimate work.
+        ]
+        # H-1 sensitive-path blackouts. Directories get an empty ``--tmpfs``
+        # mount (writable but invisible to host); files get ``--ro-bind
+        # /dev/null`` (zero-byte read). Tolerates missing host paths so the
+        # rule list is identical across environments — test hosts without
+        # ``/home/server/crm`` simply skip that entry.
+        _SANDBOX_BLACKOUT_PATHS = (
+            "/home/server/crm",
+            "/etc/shadow",
+            "/etc/gshadow",
+            "/etc/sudoers",
+            "/etc/sudoers.d",
+            "/root",
+        )
+        for blackout in _SANDBOX_BLACKOUT_PATHS:
+            blackout_path = Path(blackout)
+            if not blackout_path.exists():
+                continue
+            if blackout_path.is_dir():
+                wrapped += ["--tmpfs", blackout]
+            else:
+                wrapped += ["--ro-bind", "/dev/null", blackout]
+        wrapped += [
             "--unshare-pid",
             "--unshare-uts",
             "--unshare-ipc",
