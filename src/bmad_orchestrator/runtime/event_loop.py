@@ -47,6 +47,12 @@ class EventType(StrEnum):
     MONTHLY_REVIEW_SCHEDULED = "monthly_review_scheduled"
     VOICE_MESSAGE_RECEIVED = "voice_message_received"
     STORY_SPLIT_TRIGGERED = "story_split_triggered"
+    # Initiative pilot_findings_closure S3 (#3 rycag 2): emitted by
+    # ``runtime/decomposer_subscriber.py`` when a WORKER_HALT_FILE arrives with
+    # ``halt_reason="loc_cap_exceeded"`` and the auto-split decomposer is
+    # invoked. Distinct from STORY_SPLIT_TRIGGERED (heuristic-only); this fires
+    # on the recovery path after Sonnet hit the 300-LOC diff cap.
+    STORY_AUTO_SPLIT = "story_auto_split"
     SUB_STORY_STARTED = "sub_story_started"
     SUB_STORY_COMPLETED = "sub_story_completed"
     SUB_STORY_SQUASH_DONE = "sub_story_squash_done"

@@ -413,8 +413,9 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     # 2026-05-19 Phase 4 hardening #2 adds WORKER_STATE_PERSISTED → 25 + 1 = 26.
     # 2026-05-19 Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED → 26 + 1 = 27.
     # 2026-05-19 Phase 4 hardening #6 adds STORY_COMPLETED + STORY_METRICS_AGGREGATED → 27 + 2 = 29.
-    assert len(ALL_EVENT_TYPES) == 29, (
-        f"Expected 29 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # 2026-05-19 spec_pilot_findings_closure S3 #3 adds STORY_AUTO_SPLIT → 29 + 1 = 30.
+    assert len(ALL_EVENT_TYPES) == 30, (
+        f"Expected 30 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 

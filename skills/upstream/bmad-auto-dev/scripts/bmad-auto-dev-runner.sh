@@ -119,16 +119,23 @@ BATCH_GATE="$SCRIPT_DIR/batch_gate.py"
 #   «если ошибка сети — пытаться бесконечно пока не появится связь»). Separate budget
 #   from Patch H: API/network errors retry indefinitely with exponential back-off (30s
 #   → 60s → 120s → 300s cap). Anthropic probe between retries informational only.
-# Patch H 2026-05-15: hard timeout 1800s (30 min) hang ceiling per claude -p call —
-#   bounded retries (real hang is BAD, shouldn't loop forever). Default 2 attempts.
+# Patch H 2026-05-15 + S3 #8 (2026-05-19): hard timeout 3600s (60 min)
+#   hang ceiling per claude -p call — bounded retries (real hang is BAD,
+#   shouldn't loop forever). Default 2 attempts.
 # Reasoning (post Story 1.5 24-min hang lesson): stdout silence ≠ hang (Sonnet
 # can edit files 15+ min without stdout). Real hang signature is process not
-# exiting beyond 30 min wall clock. timeout(1) gives us hard ceiling without
+# exiting beyond N min wall clock. timeout(1) gives us hard ceiling without
 # false positives.
+#
+# Default raised from 1800 → 3600 after Antares 1.3 + 1.5 subprocess_timeout
+# halts on legitimately heavy stories (12+ AC). Override via
+# BMAD_RUNNER_CLAUDE_TIMEOUT_SEC (preferred) or PATCH_H_HARD_CEILING_SECS
+# (legacy). Adaptive per-story bump happens later in the story loop via
+# `python3 -m bmad_orchestrator.runtime.subprocess_timeout`.
 #
 # Output streamed via tee to log file (passed as $1). Remaining args = claude command.
 # Returns: 0 on success, non-zero on hang-budget exhaustion or non-retryable error.
-PATCH_H_HARD_CEILING_SECS="${PATCH_H_HARD_CEILING_SECS:-1800}"
+PATCH_H_HARD_CEILING_SECS="${PATCH_H_HARD_CEILING_SECS:-${BMAD_RUNNER_CLAUDE_TIMEOUT_SEC:-3600}}"
 PATCH_G_TIMEOUT_MAX_ATTEMPTS="${PATCH_G_TIMEOUT_MAX_ATTEMPTS:-2}"      # hang ceiling retries (bounded)
 PATCH_G_API_BACKOFF_INITIAL="${PATCH_G_API_BACKOFF_INITIAL:-30}"        # API error first back-off (sec)
 PATCH_G_API_BACKOFF_MAX="${PATCH_G_API_BACKOFF_MAX:-300}"               # API error back-off cap (sec)
@@ -566,7 +573,19 @@ Working dir: $PROJECT_DIR."; then
       # overwhelmed Sonnet and produced partial fixes. Structured per-P-id
       # instructions force Sonnet to enumerate findings explicitly and apply
       # them one by one, with build verification between batches.
-      if claude --model sonnet -p "Auto-fix code review findings for BMad story $story_id on branch $feature_branch.
+      #
+      # S3 #3 (2026-05-19): autofix model routing — security-critical stories
+      # AND review iteration >= 2 route to Opus instead of default Sonnet.
+      # Resolved via `python -m bmad_orchestrator.runtime.autofix_routing`;
+      # falls back to `sonnet` on any error so the runner never breaks.
+      autofix_iteration=$((retry_count + 1))
+      autofix_model="$(python3 -m bmad_orchestrator.runtime.autofix_routing \
+        --story-file "${STORIES_DIR}/${story_id}.md" \
+        --iteration "$autofix_iteration" \
+        --print-cli-name 2>/dev/null || echo sonnet)"
+      autofix_model="${autofix_model:-sonnet}"
+      log "Stage 6.retry — autofix model: $autofix_model (iteration=$autofix_iteration)"
+      if claude --model "$autofix_model" -p "Auto-fix code review findings for BMad story $story_id on branch $feature_branch.
 
 REVIEW LOG: $review_log (read this file first to extract structured findings).
 

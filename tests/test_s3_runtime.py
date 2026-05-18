@@ -98,10 +98,12 @@ def test_event_loop_has_all_spec_types() -> None:
         # 2026-05-19 Phase 4 hardening #6 — Stop-hook cost + learning consolidation.
         "story_completed",
         "story_metrics_aggregated",
+        # 2026-05-19 spec_pilot_findings_closure S3 #3 — auto-split trigger.
+        "story_auto_split",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 29
+    assert len(ALL_EVENT_TYPES) == 30
 
 
 @pytest.mark.asyncio

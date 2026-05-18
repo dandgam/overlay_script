@@ -1,0 +1,24 @@
+# Autofix model routing — Initiative pilot_findings_closure S3 (2026-05-19).
+#
+# pick_autofix_model(story, review_iteration) -> "sonnet" | "opus"
+# Rules:
+#   * security_critical tag in story.tags → opus
+#   * review_iteration >= opus_min_iteration → opus
+#   * else → default_model
+#
+# ENV override (highest precedence): BMAD_AUTOFIX_MODEL=opus|sonnet
+#
+# Schema (validated by bmad_orchestrator.runtime.autofix_routing.AutofixRoutingPolicy):
+#   enabled: bool                  — master switch. Default true.
+#   security_critical_tag: str     — tag string that forces opus. Default "security-critical".
+#   opus_min_iteration: int        — review iteration threshold (1-based). Default 2.
+#   default_model: str             — "sonnet" or "opus". Default "sonnet".
+#   opus_model: str                — CLI value for --model when opus selected. Default "opus".
+#   sonnet_model: str              — CLI value for --model when sonnet selected. Default "sonnet".
+
+enabled: true
+security_critical_tag: security-critical
+opus_min_iteration: 2
+default_model: sonnet
+opus_model: opus
+sonnet_model: sonnet
