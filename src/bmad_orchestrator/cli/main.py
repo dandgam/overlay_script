@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,23 @@ console = Console()
 # (see Initiative #1 Task 1.3 cgroup work). Adding a value here without a
 # matching sandbox preset = silent over-subscription on a busy host.
 PARALLEL_PRESETS: tuple[int, ...] = (1, 3, 5, 10)
+
+
+# H-B (S11 re-review): regex-validate CLI inputs that downstream code embeds
+# in shell args, file paths, branch names, or registry lookups. Mirrors the
+# registry's `_SLUG_RE` for project slugs; wave/story patterns accept dots so
+# operators can pass "1.5" or "Epic1.Story1" without escaping.
+_PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_WAVE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_STORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_cli_token(value: str, *, name: str, pattern: re.Pattern[str]) -> None:
+    """Raise typer.BadParameter if value violates the allowed pattern."""
+    if not pattern.match(value):
+        raise typer.BadParameter(
+            f"invalid --{name} {value!r}: must match {pattern.pattern}"
+        )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -176,6 +194,10 @@ def run(
     ),
 ) -> None:
     """Запустить оркестратор на указанной wave."""
+    _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
+    for sid in story:
+        _validate_cli_token(sid, name="story", pattern=_STORY_RE)
     if parallel is not None:
         if parallel not in PARALLEL_PRESETS:
             raise typer.BadParameter(
@@ -282,6 +304,10 @@ def status(
     iterations: int | None = typer.Option(None, "--iterations", hidden=True),
 ) -> None:
     """Снимок состояния или live TUI (§14.2)."""
+    if project is not None:
+        _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+    if wave is not None:
+        _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     if live or watch:
         run_live(
             lambda: _build_snapshot(project=project, wave=wave),
@@ -315,6 +341,8 @@ def stop(graceful: bool = typer.Option(True, "--graceful/--hard")) -> None:
 @app.command()
 def budget(wave: str | None = typer.Option(None, "--wave")) -> None:
     """Показать текущий бюджет."""
+    if wave is not None:
+        _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     settings = load_settings()
     table = Table(title=f"Budget ({wave or 'overall'})", show_header=True)
     table.add_column("scope")
@@ -349,6 +377,7 @@ def logs(
 @app.command()
 def dag(wave: str = typer.Option(..., "--wave")) -> None:
     """Показать DAG в ASCII."""
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     from bmad_orchestrator.runtime.dag_planner import DagPlanner
 
     planner = DagPlanner.from_target()
@@ -377,6 +406,7 @@ def dag(wave: str = typer.Option(..., "--wave")) -> None:
 @app.command()
 def retro(wave: str = typer.Option(..., "--wave")) -> None:
     """Запустить retrospective вручную."""
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     console.print(f"[cyan]→[/cyan] retro wave={wave} (will use bmad-retrospective skill)")
 
 
@@ -406,6 +436,7 @@ def validate_policy(
 @app.command()
 def memory(wave: str = typer.Option(..., "--wave")) -> None:
     """Показать lessons из wave."""
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     settings = load_settings()
     mem = settings.orchestrator_home / ".claude" / "memory" / "per-wave" / f"{wave}-retrospective.md"
     if not mem.is_file():
@@ -779,9 +810,12 @@ def multi(
     mock: bool = typer.Option(True, "--mock/--real"),
 ) -> None:
     """Запустить оркестратор одновременно над несколькими проектами (Init #3 Task 3.3-3.4)."""
+    _validate_cli_token(wave, name="wave", pattern=_WAVE_RE)
     slugs = tuple(s.strip() for s in projects.split(",") if s.strip())
     if not slugs:
         raise typer.BadParameter("--projects must list at least one slug")
+    for slug in slugs:
+        _validate_cli_token(slug, name="projects", pattern=_PROJECT_RE)
 
     plan = MultiProjectPlan(
         projects=slugs,
