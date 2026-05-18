@@ -39,20 +39,6 @@
 
 ### Pending
 
-- **id:** S6
-  **title:** #6 budget auto-detect (subscription mode) + #7 halt pre-flight check
-  **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §2 #6 + #7
-  **depends_on:** []
-  **acceptance:**
-    - subscription_mode detect auto-sets Settings._budget_disabled, emits BUDGET_AUTO_DISABLED
-    - Pre-spawn halt-reason.txt check skips spawn with WORKER_HALT_PRESPAWN event
-    - --resume flag clears halt before spawn
-    - +5 + +5 = +10 tests
-  **safety_gates: []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S7
   **title:** #10 Step B real eval cases — harness + first 5 cases
   **surface:** backend-python
@@ -83,25 +69,46 @@
 
 ### Current
 
-- **id:** S5
-  **title:** #5 MCP server readiness polling
+- **id:** S6
+  **title:** #6 budget auto-detect (subscription mode) + #7 halt pre-flight check
   **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #5
+  **spec_section:** spec/spec_pilot_findings_closure.md §2 #6 + #7
   **depends_on:** []
   **acceptance:**
-    - poll_mcp_ready util (30s max, 500ms interval)
-    - MCP_NOT_READY event; worker not spawned if required MCP not authenticated
-    - Per-story override via frontmatter requires_mcp:[]
-    - +8 tests
+    - subscription_mode detect auto-sets Settings._budget_disabled, emits BUDGET_AUTO_DISABLED
+    - Pre-spawn halt-reason.txt check skips spawn with WORKER_HALT_PRESPAWN event
+    - --resume flag clears halt before spawn
+    - +5 + +5 = +10 tests
   **safety_gates: []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 (auto-promoted after S4)
+  **started:** 2026-05-19 (auto-promoted after S5)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S5
+  **title:** #5 MCP server readiness polling
+  **completed:** 2026-05-19 UTC
+  **commit:** 2a3a0d6
+  **files_changed:** 7 (2 new + 5 modified; runtime + config + tests)
+  **tests_passed:** 1928 (was 1920; +8 new = 4 polling unit + 2 parse unit + 2 spawn-gate integration; target +8 ✓)
+  **decisions_made:**
+    - New module `runtime/mcp_readiness.py` with `poll_mcp_ready(required_tools, *, timeout_s=30, interval_ms=500, cli_argv=None, clock=time.monotonic, sleep=asyncio.sleep)` returning `ReadinessResult(ok, missing, elapsed_ms, polls, last_error)`. Clock+sleep injected for deterministic tests (real callers use defaults).
+    - `parse_mcp_list_output` accepts BOTH `{"servers": [...]}` wrapped shape and bare list shape — Claude CLI has emitted both historically. Unknown shape / malformed JSON → empty mapping (treated as "every required tool missing") so CLI breakage degrades into halt-before-spawn, never false positive.
+    - `authenticated` is strict-True check (`authed is True`) not truthy — JSON `true` becomes Python `True`, anything else (None, "yes", 1) treated as not ready. Eliminates partial-credit semantics.
+    - Empty `required_tools` short-circuits with `ok=True, polls=0` — no subprocess, no overhead for the default (opt-in) case where `Settings.required_mcp_tools=[]`.
+    - `spawn_worker` accepts `required_mcp_tools: list[str] | None = None` + `mcp_readiness_timeout_s` + `mcp_readiness_interval_ms`. Backward-compatible default (None/empty = skip check). When non-empty and not-ok → emit `mcp_not_ready` JSONL audit event then raise `MCPNotReadyError(story_id, missing, elapsed_ms, last_error)`. Caller (orchestrator) catches and converts to bus event + story halt.
+    - `MCPNotReadyError` is a `RuntimeError` subclass exported from `runtime.worker_spawn` so existing tools/spawn.py wrappers see it as a normal exception. Carries structured fields for callers that want machine-readable halt reasons.
+    - Pre-spawn check placed AFTER worktree existence check but BEFORE skills_result/mock branch — so even mock-mode callers can exercise the gate in tests (and prod mock-mode honours the gate when caller opts in).
+    - `Settings.required_mcp_tools: list[str] = Field(default_factory=list)` — pydantic v2 friendly, env-overridable via `ORCHESTRATOR_REQUIRED_MCP_TOOLS=["analyzer","postgres-mcp"]` (JSON list per pydantic-settings convention).
+    - Inventory tests in `test_canonical_patches_p6.py` (31 → 32) and `test_s3_runtime.py` (31 → 32) bumped — keeps EventType drift visible.
+  **deferred_items:**
+    - Per-story frontmatter override (`requires_mcp: [analyzer, postgres-mcp]`) — the gate is wired with `required_mcp_tools` param but the per-story override that merges `Settings.required_mcp_tools ∪ story.frontmatter.requires_mcp` is best added at the orchestrator/dispatch layer (where the story md is already parsed), not in `spawn_worker`. Leaving for the session that wires the orchestrator-side bus subscriber for `MCP_NOT_READY` and per-story frontmatter routing.
+    - Orchestrator-side `MCP_NOT_READY` bus subscriber that converts the per-worker halt into a `WORKER_HALT_PRESPAWN` semantically equivalent to S6's halt-reason.txt path — same session as S6 wiring.
+    - `claude mcp list --json` real-shape verification — current parser supports the two documented shapes; if a third surfaces (e.g. nested under `result.tools`), add a unit test pinning the new shape rather than re-architecting.
 
 - **id:** S4
   **title:** #4 AbortController per worker
@@ -184,6 +191,8 @@
 
 [2026-05-19 UTC] S4 — module-level registry (process-local dict) for worker tokens chosen over async-context-manager scoped registry: orchestrator runs in a single asyncio process, so a dict + worker_id keys is enough. CancellationToken keeps reason+cancelled_by inside the object so audit attribution survives even if the process exits before the JSONL flush, and SupervisorAction.cancel_worker resolves worker_id via tool_call args → payload → story_id lookup so the LLM judge does not have to learn PID-suffixed IDs.
 
+[2026-05-19 UTC] S5 — single-file `runtime/mcp_readiness.py` module with injectable clock+sleep for deterministic tests, rather than embedding polling logic inside `worker_spawn`. Keeps the gate testable without spawning subprocesses and lets future callers (e.g. CLI doctor command, supervisor pre-flight) reuse the same helper. Per-story frontmatter override deferred to orchestrator-layer (where stories are already parsed) — `spawn_worker` stays a pure pre-Popen gate.
+
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 8 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure, runtime=loop_wrapper, delay=300s, auto_merge=false.
@@ -195,6 +204,8 @@
 [2026-05-19 UTC] S3 done, runtime=loop_wrapper — wrapper handles next iteration. commit=949d8e7, tests 1912 PASS (+20), ruff+mypy clean. Autofix routing (security-critical → opus, iter≥2 → opus) + adaptive subprocess timeout (default 3600s, +adaptive by AC count) + STORY_AUTO_SPLIT event on loc_cap halt. S4 promoted to Current.
 
 [2026-05-19 UTC] S4 done, runtime=loop_wrapper — wrapper handles next iteration. commit=6929ee7, tests 1920 PASS (+8), ruff clean, mypy clean on changed files. Per-worker CancellationToken + module registry + cancel_worker(SIGTERM→SIGKILL); supervisor `cancel_worker` action wired; WORKER_CANCELLED event (+1 → 31 total). S5 promoted to Current.
+
+[2026-05-19 UTC] S5 done, runtime=loop_wrapper — wrapper handles next iteration. commit=2a3a0d6, tests 1928 PASS (+8), ruff clean, mypy clean on changed files. runtime/mcp_readiness.poll_mcp_ready (30s/500ms, injectable clock+sleep) + spawn_worker pre-Popen gate (required_mcp_tools param) + MCPNotReadyError + Settings.required_mcp_tools + MCP_NOT_READY event (+1 → 32 total). S6 promoted to Current.
 
 ## Final Report
 (empty)
