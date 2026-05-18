@@ -102,6 +102,36 @@ def normalize_story_id(raw: str) -> str:
     return text
 
 
+def resolve_sprint_status_key(raw: str, sprint_keys: Any) -> str | None:
+    """Find the sprint-status key matching *raw* story id.
+
+    Looks up ``raw`` in ``sprint_keys`` (any iterable of strings):
+
+    1. Exact match (case-insensitive) → return that key verbatim.
+    2. Else normalize ``raw`` to dotted form (``"1.3"``) and find the first
+       sprint key whose normalized form matches → return that key.
+    3. Else return ``None`` (caller decides fallback).
+
+    Used by the real-pilot mark-done loop to bridge dotted spawned ids
+    (``"1.3"``) to the kebab-with-prose keys actually present in
+    sprint-status.yaml (``"1-3-fastapi-app-lifespan-health"``).
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    keys = list(sprint_keys) if sprint_keys is not None else []
+    if not keys:
+        return None
+    raw_lower = raw.lower()
+    for k in keys:
+        if isinstance(k, str) and k.lower() == raw_lower:
+            return k
+    raw_norm = normalize_story_id(raw)
+    for k in keys:
+        if isinstance(k, str) and normalize_story_id(k) == raw_norm:
+            return k
+    return None
+
+
 def extract_status_token(value: Any) -> str:
     """Return the first whitespace-separated token of *value*, stripped of
     Python/YAML comments.
