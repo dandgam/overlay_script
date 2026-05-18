@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bmad_orchestrator.agent.memory.levels import MemoryPersistor
 from bmad_orchestrator.agent.safety.session_start import (
     _resolve_skill_slug,
     build_session_start_block,
@@ -57,6 +58,10 @@ from bmad_orchestrator.runtime.sandbox import (
 )
 
 log = logging.getLogger(__name__)
+
+# Phase 4 hardening #2 — module-level MemoryPersistor instance shared across
+# all spawn calls in the same process (stateless — all state lives on disk).
+_MEMORY_PERSISTOR = MemoryPersistor()
 
 CLAUDE_BIN_DEFAULT = "claude"
 # Patch Y 2026-05-18: bypass `/bmad-auto-dev` slash-command. LLM workers
@@ -310,6 +315,70 @@ def _resolve_claude_bin() -> str | None:
 def _emit(jsonl_path: Path, event: dict[str, Any]) -> None:
     payload = {"ts": now_iso(), **event}
     append_jsonl(jsonl_path, payload)
+
+
+def trigger_precompact_dump(
+    worktree: str,
+    story_id: str,
+    retry_count: int = 0,
+    last_event_seq: int = 0,
+    active_skill: str = "bmad-auto-dev",
+    scope_drift_warnings: int = 0,
+    worker_started_at: str | None = None,
+    jsonl_path: Path | None = None,
+) -> Path:
+    """Persist worker state to the precompact snapshot before a model swap.
+
+    Phase 4 hardening #2 — called from ``set_model`` (orchestrator tool) or
+    any other compact-trigger boundary to ensure mid-story context is not lost.
+
+    Emits a ``WORKER_STATE_PERSISTED`` entry to ``jsonl_path`` (if provided)
+    for observability. Returns the path of the written snapshot.
+
+    Args:
+        worktree: Absolute path to the worker's worktree directory.
+        story_id: The story currently being processed.
+        retry_count: Number of review-fix iterations completed so far.
+        last_event_seq: The last JSONL event sequence number observed.
+        active_skill: The skill currently active in the worker.
+        scope_drift_warnings: Count of scope-drift warnings emitted so far.
+        worker_started_at: ISO-8601 timestamp when the worker was spawned.
+            Used as the freshness marker for ``load_state``.
+        jsonl_path: Optional JSONL events file to write the observability event.
+            When ``None``, no event is written (silent persist).
+
+    Returns:
+        The ``Path`` of the written ``_precompact.json`` snapshot.
+    """
+    started_at = worker_started_at or now_iso()
+    state = {
+        "current_story_id": story_id,
+        "retry_count": retry_count,
+        "last_event_seq": last_event_seq,
+        "active_skill": active_skill,
+        "scope_drift_warnings": scope_drift_warnings,
+        "worker_started_at": started_at,
+    }
+    snap_path = _MEMORY_PERSISTOR.dump_state(Path(worktree), state)
+
+    if jsonl_path is not None:
+        _emit(
+            jsonl_path,
+            {
+                "event_type": "worker_state_persisted",
+                "worktree": worktree,
+                "story_id": story_id,
+                "snapshot_path": str(snap_path),
+                "retry_count": retry_count,
+                "scope_drift_warnings": scope_drift_warnings,
+                "active_skill": active_skill,
+            },
+        )
+        log.debug(
+            "worker_state_persisted story=%s snap=%s", story_id, snap_path
+        )
+
+    return snap_path
 
 
 async def _stream_subprocess_stdout(
@@ -586,9 +655,14 @@ async def spawn_worker(
     # Phase 4 hardening #1 — SessionStart hook: inject worker policy + skill
     # snippet + workflow phase marker before subprocess.Popen so the worker
     # session starts with full context regardless of CLAUDE.md drift.
+    # Phase 4 hardening #2 integration: also embed precompact state if available
+    # (worker_started_at=None means skip stale guard on first launch).
     _spawn_payload = {"skill_slug": None, "skill_invocation": skill_invocation}
     _skill_slug = _resolve_skill_slug(_spawn_payload)
-    _bootstrap_block = build_session_start_block(_skill_slug, story_id)
+    _resumed_state = _MEMORY_PERSISTOR.load_state(wt_path, worker_started_at=None)
+    _bootstrap_block = build_session_start_block(
+        _skill_slug, story_id, resumed_state=_resumed_state
+    )
     merged_env = inject_into_worker_env(merged_env, _bootstrap_block)
 
     # FS7 — wrap the worker command in an OS-level sandbox (default: bwrap)
@@ -735,4 +809,5 @@ __all__ = [
     "WorkerHandle",
     "spawn_worker",
     "tail_jsonl_events",
+    "trigger_precompact_dump",
 ]

@@ -91,10 +91,12 @@ def test_event_loop_has_all_spec_types() -> None:
         # 2026-05-19 BMad Phase 4 gap-closure event types.
         "sprint_scope_change_detected",
         "forensic_investigation_needed",
+        # 2026-05-19 Phase 4 hardening #2 — PreCompact memory persistence.
+        "worker_state_persisted",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 25
+    assert len(ALL_EVENT_TYPES) == 26
 
 
 @pytest.mark.asyncio

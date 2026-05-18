@@ -15,11 +15,16 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from bmad_orchestrator.agent.tools._common import memory_dir, now_iso
+
+_log = logging.getLogger(__name__)
 
 # FS3 H11: minimum body length (chars beyond frontmatter) for a retro to be
 # considered "done" by gates.can_promote_wave. Empty/seed files (e.g. the
@@ -177,9 +182,117 @@ def has_valid_retro_schema(path: Path) -> bool:
     return all(k in keys_found for k in _REQUIRED_FRONTMATTER_KEYS_WAVE)
 
 
+# ─── PreCompact / SessionStart memory persistence ────────────────────────────
+
+
+class MemoryPersistor:
+    """Persist and restore worker state across context compaction boundaries.
+
+    Phase 4 hardening #2 — per spec_phase4_hardening §1.2. Mirrors the ECC
+    ``hooks/memory-persistence/`` pattern adapted for Virgil's per-worktree
+    state model.
+
+    State is written to ``<worktree>/.claude/memory/_precompact.json`` before
+    the worker process crosses a context-compaction boundary (model swap or
+    explicit flush). On the next SessionStart the orchestrator reads back the
+    state and embeds a ``Resumed from:`` line in the bootstrap block so the
+    worker LLM can continue where it left off.
+
+    Stale-file protection: ``load_state`` only returns data when the file's
+    mtime is >= ``worker_started_at`` (passed in as an ISO-8601 string).
+    Corrupted JSON and missing files both return ``None`` — callers treat
+    absent state as a fresh start.
+    """
+
+    #: Relative path inside a worktree where the precompact snapshot lives.
+    PRECOMPACT_SUBPATH = Path(".claude") / "memory" / "_precompact.json"
+
+    def dump_state(self, worktree_path: Path, state: dict[str, Any]) -> Path:
+        """Write the worker state snapshot to ``<worktree>/.claude/memory/_precompact.json``.
+
+        The state dict SHOULD contain:
+          - ``current_story_id`` (str)
+          - ``retry_count`` (int)
+          - ``last_event_seq`` (int)
+          - ``active_skill`` (str)
+          - ``scope_drift_warnings`` (int)
+          - ``worker_started_at`` (ISO-8601 str)
+
+        Any extra keys are preserved as-is. The file is overwritten on each call
+        (no append semantics — the snapshot reflects the *current* state).
+
+        Returns the path written.
+        """
+        out_path = worktree_path / self.PRECOMPACT_SUBPATH
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _log.debug(
+            "precompact_state_dumped path=%s story=%s retry=%s",
+            out_path,
+            state.get("current_story_id"),
+            state.get("retry_count"),
+        )
+        return out_path
+
+    def load_state(
+        self,
+        worktree_path: Path,
+        worker_started_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Load the worker state snapshot, or return ``None`` if not available.
+
+        Returns ``None`` when:
+          - The snapshot file does not exist.
+          - The file's mtime is older than ``worker_started_at`` (stale-state guard).
+          - The file contains invalid JSON (corruption guard).
+
+        ``worker_started_at`` is an ISO-8601 timestamp string. If ``None`` is
+        passed, the stale check is skipped (useful in tests and non-production
+        code paths).
+        """
+        snap_path = worktree_path / self.PRECOMPACT_SUBPATH
+
+        if not snap_path.exists():
+            return None
+
+        # Stale-state guard: only load if the file was written *at or after* the
+        # worker's start time. This prevents a prior worker run's snapshot from
+        # bleeding into a fresh spawn on the same worktree path.
+        if worker_started_at is not None:
+            try:
+                started_ts = datetime.fromisoformat(worker_started_at).timestamp()
+                file_mtime = snap_path.stat().st_mtime
+                if file_mtime < started_ts:
+                    _log.debug(
+                        "precompact_state_stale path=%s file_mtime=%s started_at=%s",
+                        snap_path,
+                        file_mtime,
+                        worker_started_at,
+                    )
+                    return None
+            except (ValueError, OSError):
+                return None
+
+        try:
+            raw = snap_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            _log.debug("precompact_state_load_failed path=%s error=%s", snap_path, exc)
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        return dict(data)
+
+
 __all__ = [
     "RETRO_MIN_BODY_CHARS",
     "ArchitecturalLesson",
+    "MemoryPersistor",
     "StrategicLesson",
     "TacticalLesson",
     "append_retro_artifact",

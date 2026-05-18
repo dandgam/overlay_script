@@ -410,8 +410,9 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     """
     # 2026-05-19 BMad Phase 4 gap-closure adds SPRINT_SCOPE_CHANGE_DETECTED
     # and FORENSIC_INVESTIGATION_NEEDED → 23 + 2 = 25.
-    assert len(ALL_EVENT_TYPES) == 25, (
-        f"Expected 25 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # 2026-05-19 Phase 4 hardening #2 adds WORKER_STATE_PERSISTED → 25 + 1 = 26.
+    assert len(ALL_EVENT_TYPES) == 26, (
+        f"Expected 26 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 
