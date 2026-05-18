@@ -163,6 +163,54 @@ class MCPNotReadyError(RuntimeError):
         )
 
 
+# Initiative pilot_findings_closure S6 (#7 P2) — worktree path of the halt
+# marker written by the BMad auto-dev runner. Mirrors Patch BB orphan-story
+# pre-flight in spirit: a stale halt-reason from a prior run causes silent
+# Stage 0 failures in every spawned worker. The pre-spawn gate refuses to
+# spawn until either the file is cleared manually or ``auto_clear_halt=True``
+# is passed (CLI ``--resume``).
+HALT_REASON_RELPATH = Path("_bmad") / "auto-dev-state" / "halt-reason.txt"
+
+
+class WorkerHaltPrespawnError(RuntimeError):
+    """Pre-spawn gate detected ``halt-reason.txt`` and ``auto_clear_halt`` was False.
+
+    Initiative pilot_findings_closure S6 (#7 P2). Carries the worktree path,
+    the story id, and the first line of the halt reason so the orchestrator
+    can surface an actionable error to the operator.
+    """
+
+    def __init__(
+        self,
+        *,
+        story_id: str,
+        worktree: str,
+        halt_path: str,
+        reason: str,
+    ) -> None:
+        self.story_id = story_id
+        self.worktree = worktree
+        self.halt_path = halt_path
+        self.reason = reason
+        super().__init__(
+            f"worker_halt_prespawn story={story_id} halt_path={halt_path} "
+            f"reason={reason!r} (pass auto_clear_halt=True / CLI --resume to clear)"
+        )
+
+
+def _read_halt_reason(halt_path: Path) -> str:
+    """Read first non-empty line from halt-reason.txt. Tolerant to noise."""
+    try:
+        raw = halt_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:512]
+    return ""
+
+
 @dataclass(slots=True)
 class WorkerHandle:
     worktree: str
@@ -571,6 +619,7 @@ async def spawn_worker(
     required_mcp_tools: list[str] | None = None,
     mcp_readiness_timeout_s: int = MCP_READINESS_DEFAULT_TIMEOUT_S,
     mcp_readiness_interval_ms: int = MCP_READINESS_DEFAULT_INTERVAL_MS,
+    auto_clear_halt: bool = False,
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 
@@ -599,6 +648,52 @@ async def spawn_worker(
     wt_path = Path(worktree)
     if not wt_path.exists():
         raise FileNotFoundError(f"worktree path missing: {worktree}")
+
+    # Initiative pilot_findings_closure S6 (#7 P2): halt-reason pre-flight.
+    # Spawning a worker into a worktree that still has the prior run's
+    # halt-reason.txt produces a silent Stage 0 failure (the runner refuses
+    # to start). Detect the marker before any heavier work (MCP probe,
+    # sandbox setup) so the orchestrator can surface a real error or, with
+    # ``auto_clear_halt=True`` (CLI ``--resume``), wipe the marker and
+    # proceed exactly as a fresh spawn would.
+    halt_path = wt_path / HALT_REASON_RELPATH
+    if halt_path.is_file():
+        reason = _read_halt_reason(halt_path)
+        if auto_clear_halt:
+            try:
+                halt_path.unlink()
+            except OSError as exc:
+                log.warning(
+                    "halt_reason_clear_failed path=%s error=%s",
+                    str(halt_path),
+                    str(exc),
+                )
+            else:
+                log.info(
+                    "halt_reason_cleared path=%s story_id=%s reason=%r",
+                    str(halt_path),
+                    story_id,
+                    reason,
+                )
+        else:
+            prespawn_jsonl_path = worker_jsonl_path(worktree)
+            prespawn_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            _emit(
+                prespawn_jsonl_path,
+                {
+                    "event_type": "worker_halt_prespawn",
+                    "worktree": worktree,
+                    "story_id": story_id,
+                    "halt_path": str(halt_path),
+                    "reason": reason,
+                },
+            )
+            raise WorkerHaltPrespawnError(
+                story_id=story_id,
+                worktree=worktree,
+                halt_path=str(halt_path),
+                reason=reason,
+            )
 
     # Initiative pilot_findings_closure S5 (#5 R2): MCP readiness gate.
     # When ``required_mcp_tools`` is non-empty, poll ``claude mcp list --json``
@@ -929,7 +1024,9 @@ __all__ = [
     "DEFAULT_CGROUP_LIMITS",
     "DEFAULT_MODEL",
     "DEFAULT_SKILL_INVOCATION",
+    "HALT_REASON_RELPATH",
     "MCPNotReadyError",
+    "WorkerHaltPrespawnError",
     "WorkerHandle",
     "spawn_worker",
     "tail_jsonl_events",

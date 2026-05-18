@@ -77,6 +77,10 @@ from bmad_orchestrator.runtime.auto_split import (
 )
 from bmad_orchestrator.runtime.bmad_format import resolve_sprint_status_key
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
+from bmad_orchestrator.runtime.budget_autodetect import (
+    BudgetAutoDisableState,
+    evaluate_budget_disabled,
+)
 from bmad_orchestrator.runtime.build_check import build_check_subscriber
 from bmad_orchestrator.runtime.commit_recovery import recover_pre_merge
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
@@ -1091,6 +1095,11 @@ async def _run_real_pilot_body(
     bus.start_backstop_task()
 
     daily_halt_reached = False
+    # Initiative pilot_findings_closure S6 (#6 P2) — one auto-disable state
+    # per pilot run. evaluate_budget_disabled keeps the BUDGET_AUTO_DISABLED
+    # emission idempotent across spawn rounds and across stories within a
+    # round.
+    budget_autodisable_state = BudgetAutoDisableState()
     while (
         rounds < max_rounds
         and not daily_halt_reached
@@ -1134,10 +1143,13 @@ async def _run_real_pilot_body(
             projected_daily = daily_spent_usd + story_reserve
 
             # Subscription-mode bypass: на Claude subscription нет per-token
-            # billing'а — $ метрика фантомная. BMAD_DISABLE_BUDGET=1 skip'ает
-            # все $$ гейты (cap, daily, story alarm) сохраняя token tracking
-            # для observability. См. feedback_no_anthropic_api.
-            _budget_disabled = os.environ.get("BMAD_DISABLE_BUDGET") == "1"
+            # billing'а — $ метрика фантомная. Initiative pilot_findings_closure
+            # S6 (#6 P2) — теперь авто-детект: отсутствие ANTHROPIC_API_KEY
+            # эквивалентно ручному BMAD_DISABLE_BUDGET=1, но с одноразовым
+            # BUDGET_AUTO_DISABLED event для аудита. Manual flag не event'ится.
+            _budget_disabled = await evaluate_budget_disabled(
+                budget_autodisable_state, bus
+            )
 
             # Local user-supplied hard cap (W1.2 --max-spend-usd).
             if not _budget_disabled and projected_daily > max_spend_usd:

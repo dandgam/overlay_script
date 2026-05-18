@@ -67,6 +67,22 @@ class EventType(StrEnum):
     # ``last_error`` so the orchestrator can halt the story instead of
     # spawning a worker that would die later on ``tool not found``.
     MCP_NOT_READY = "mcp_not_ready"
+    # Initiative pilot_findings_closure S6 (#6 P2): emitted by
+    # :mod:`runtime.budget_autodetect` the first time a pilot run detects
+    # subscription auth mode (no ANTHROPIC_API_KEY) and auto-skips the
+    # $-budget gates. One emission per run (idempotent). Payload carries
+    # ``reason`` (always ``"subscription_mode"`` for now) so audit consumers
+    # can distinguish auto-disable from the manual ``BMAD_DISABLE_BUDGET=1``
+    # path (which does NOT emit this event).
+    BUDGET_AUTO_DISABLED = "budget_auto_disabled"
+    # Initiative pilot_findings_closure S6 (#7 P2): emitted by
+    # :func:`runtime.worker_spawn.spawn_worker` when a pre-spawn check
+    # detects ``<worktree>/_bmad/auto-dev-state/halt-reason.txt`` from a
+    # prior run. Default behaviour skips spawn and raises
+    # :class:`runtime.worker_spawn.WorkerHaltPrespawnError`. With
+    # ``auto_clear_halt=True`` (e.g. CLI ``--resume``) the file is removed
+    # and the spawn proceeds without emitting this event.
+    WORKER_HALT_PRESPAWN = "worker_halt_prespawn"
     SUB_STORY_STARTED = "sub_story_started"
     SUB_STORY_COMPLETED = "sub_story_completed"
     SUB_STORY_SQUASH_DONE = "sub_story_squash_done"
