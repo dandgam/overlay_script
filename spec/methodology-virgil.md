@@ -219,5 +219,5 @@
 ---
 
 **Last updated:** 2026-05-19 (v13.2 — Phase 4 hardening Session 2 (#1 + #2))
-**Status:** v13.2 — Phase 4 hardening Session 2 ✅ closed (#1 SessionStart hook `c00ff93` + #2 PreCompact memory persistence `0ba9407`). Tier 1 pre-pilot hardening complete (all 4 items: #3 #4 #1 #2). Tests: **1726 PASS** (+19 vs Session 2 start 1707 / +38 vs v13 baseline 1688). mypy/ruff clean on all new files. EventType count: 26. Phase 4 remaining: #10 (production pilot) — Tier 2 (#5 #6 #7) in Session 3.
+**Status:** v13.2 — Phase 4 hardening Session 2 ✅ closed (#1 SessionStart hook `c00ff93` + #2 PreCompact memory persistence `0ba9407`). Tier 1 pre-pilot hardening complete (all 4 items: #3 #4 #1 #2). Tests: **1831 PASS** (+19 vs Session 1 close 1812 / +43 vs v13 baseline 1788). mypy/ruff clean. EventType count: 26. Phase 4 remaining: #10 (production pilot) — Tier 2 (#5 #6 #7) in Session 3.
 **Owner:** user + Claude orchestrator
