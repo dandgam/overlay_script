@@ -97,17 +97,6 @@ from bmad_orchestrator.runtime.elicitation_routing import (
     make_elicitation_subscriber,
 )
 from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
-from bmad_orchestrator.runtime.supervisor_subscriber import (
-    load_supervisor_engine as _load_supervisor_engine,
-)
-from bmad_orchestrator.runtime.supervisor_subscriber import (
-    make_supervisor_subscriber,
-)
-from bmad_orchestrator.runtime.self_learning_subscriber import (
-    load_self_learning_config as _load_self_learning_config,
-    make_self_learning_subscriber,
-)
-from bmad_orchestrator.self_learning.consolidator import Consolidator
 from bmad_orchestrator.runtime.file_list_parser import (
     collect_allow_list,
     has_explicit_file_list,
@@ -136,7 +125,19 @@ from bmad_orchestrator.runtime.security_review import (
 from bmad_orchestrator.runtime.security_review import (
     VERDICT_ERROR as SECURITY_VERDICT_ERROR,
 )
+from bmad_orchestrator.runtime.self_learning_subscriber import (
+    load_self_learning_config as _load_self_learning_config,
+)
+from bmad_orchestrator.runtime.self_learning_subscriber import (
+    make_self_learning_subscriber,
+)
 from bmad_orchestrator.runtime.stage5_completeness import stage5_completeness_subscriber
+from bmad_orchestrator.runtime.supervisor_subscriber import (
+    load_supervisor_engine as _load_supervisor_engine,
+)
+from bmad_orchestrator.runtime.supervisor_subscriber import (
+    make_supervisor_subscriber,
+)
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
     tail_jsonl_events,
@@ -145,6 +146,7 @@ from bmad_orchestrator.runtime.worker_spawn import (
     spawn_worker as runtime_spawn_worker,
 )
 from bmad_orchestrator.runtime.worktree import cleanup_worktree
+from bmad_orchestrator.self_learning.consolidator import Consolidator
 from bmad_orchestrator.skills_repo import (
     CodeReviewGates,
     PolicyInvalidError,
