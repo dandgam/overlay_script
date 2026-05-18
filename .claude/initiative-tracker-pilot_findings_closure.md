@@ -38,6 +38,9 @@
 ## Sessions
 
 ### Pending
+(none)
+
+### Current
 
 - **id:** S8
   **title:** #10 part 2 (5 hard cases + baseline) + methodology Phase 3 close-out
@@ -53,27 +56,32 @@
   **safety_gates: []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-
-### Current
-
-- **id:** S7
-  **title:** #10 Step B real eval cases — harness + first 5 cases
-  **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §4 #10 (part 1)
-  **depends_on:** []
-  **acceptance:**
-    - evals/cases/real/ contains 5 cases (3 easy + 2 medium) with YAML schema
-    - CLI `bmad-orchestrator eval run --mode real --project-root <path> --cases-dir evals/cases/real/` works
-    - +6 tests
-  **safety_gates: []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 (auto-promoted after S6)
+  **started:** 2026-05-19 (auto-promoted after S7)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S7
+  **title:** #10 Step B real eval cases — harness + first 5 cases
+  **completed:** 2026-05-19 UTC
+  **commit:** 5073856
+  **files_changed:** 9 (7 new + 2 modified; 5 case fixtures + cases.yaml + new test module + runner.py + cli/main.py)
+  **tests_passed:** 1945 (was 1938; +7 new — target was +6 ✓)
+  **decisions_made:**
+    - New manifest `evals/cases/real/cases.yaml` keeps its own directory rather than appending to `evals/cases.yaml`. Reason: mock-mode and real-mode have different `final_verdict`/`max_cost_usd` baselines, and mixing both in one manifest forces every run to filter by mode. Separating dirs lets `--cases-dir` pin scope cleanly and keeps the existing mock-mode suite frozen for regression.
+    - Schema additions are STRICTLY additive — `tags: list[str]` is optional, validated for type only (no enum), so future cases can grow new tags without a schema bump. Cases without `tags` simply never match a `--tag` filter; they are not invisible to the default (unfiltered) run.
+    - `filter_cases_by_tags` uses OR semantics over the wanted set (case kept if it has at least one matching tag). AND semantics rejected because real-mode workflows naturally want "give me anything tagged cli OR low-risk" rather than "exactly both". A future `--tag-all` flag could layer on if needed; YAGNI now.
+    - `cases_dir` is a separate kwarg, not a replacement for `evals_root`. Reason: `worktree_root` still derives from `evals_root` for jsonl namespacing, and the existing CLI default (`evals_root=evals`) keeps working unchanged. Override is one-way (cases_dir wins when set).
+    - `project_root` env override (`ORCHESTRATOR_TARGET_PROJECT`) fires ONLY in real mode. In mock mode the existing behaviour (point env at `worktree_root` so jsonl lands inside the eval scratch tree) is preserved — mock callers don't need a real BMad checkout and shouldn't have to provide one.
+    - CLI guards: `--project-root` is REQUIRED in `--mode real`; both `--cases-dir` and `--project-root` are validated for `is_dir()` before suite launch. Fail-fast Exit(2) instead of deep-stack ValueError.
+    - `# noqa: B008` only on the new `tag: list[str] | None = typer.Option(...)` line. Other typer.Option calls in the file don't trigger B008 because ruff treats `list[...]` defaults as mutable triggers; rest of file already conforms. Inline suppression chosen over project-wide config bump (single instance, idiomatic Typer pattern).
+    - 7 tests instead of 6 because the bundled-manifest discovery test (`test_real_cases_manifest_has_five_well_formed_cases`) doubles as an acceptance harness — it asserts ≥5 cases, level distribution, tags present, and each story_path resolves to a fixture on disk. Splitting that into a separate "fixture exists" + "manifest parses" pair would have duplicated setup; kept as one comprehensive test plus 6 isolated unit tests.
+  **deferred_items:**
+    - S8 owns: 5 more real cases (medium/hard mix to reach ≥10 total), baseline.json generation, methodology-virgil.md §5 + Phase 3 status flip, backlog clear-out.
+    - `--cases-dir` resolution of story_path relative to project_root (currently resolved relative to cases_dir). Deferred until S8 wires a real BMad target project and we can validate the resolution mode against real story trees.
+    - Per-case timeout override in cases.yaml (currently global via runner). Not in S7/S8 acceptance; backlog item for future eval-suite hardening.
 
 - **id:** S6
   **title:** #6 budget auto-detect (subscription mode) + #7 halt pre-flight check
@@ -203,6 +211,8 @@
 
 [2026-05-19 UTC] S6 — `evaluate_budget_disabled` differentiates manual flag (no event) vs auto-detect (one-shot event) on purpose: the audit signal is reserved for the "operator didn't realise they were on subscription auth" path, where the BUDGET_AUTO_DISABLED row is the only breadcrumb in events.jsonl. The manual `BMAD_DISABLE_BUDGET=1` path is an explicit operator action — emitting on every manual run would dilute that signal. W1 max-spend tests pin `ANTHROPIC_API_KEY` because the spec is explicit that subscription mode auto-skips ALL $-gates (cap/daily/story alarm), including the W1.2 local `--max-spend-usd` knob.
 
+[2026-05-19 UTC] S7 — kept real-mode manifest in its own dir (`evals/cases/real/cases.yaml`) rather than appending to the mock-mode manifest. Reason: cost / iteration baselines differ, and a single mixed manifest would force every CLI invocation to filter by mode. `--cases-dir` cleanly pins scope. Tags filter uses OR semantics (case kept if it has any wanted tag) — AND was rejected as YAGNI; can layer a `--tag-all` later if a real workflow needs it. `--project-root` only pins `ORCHESTRATOR_TARGET_PROJECT` in real mode so mock-mode tests keep landing jsonl inside the eval scratch tree.
+
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 8 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure, runtime=loop_wrapper, delay=300s, auto_merge=false.
@@ -218,6 +228,8 @@
 [2026-05-19 UTC] S5 done, runtime=loop_wrapper — wrapper handles next iteration. commit=2a3a0d6, tests 1928 PASS (+8), ruff clean, mypy clean on changed files. runtime/mcp_readiness.poll_mcp_ready (30s/500ms, injectable clock+sleep) + spawn_worker pre-Popen gate (required_mcp_tools param) + MCPNotReadyError + Settings.required_mcp_tools + MCP_NOT_READY event (+1 → 32 total). S6 promoted to Current.
 
 [2026-05-19 UTC] S6 done, runtime=loop_wrapper — wrapper handles next iteration. commit=185a948, tests 1938 PASS (+10), ruff clean on changed files, mypy clean on S6 modules. runtime/budget_autodetect (BudgetAutoDisableState + evaluate_budget_disabled; idempotent BUDGET_AUTO_DISABLED on subscription auto path; manual BMAD_DISABLE_BUDGET=1 suppressed from emission) + spawn_worker auto_clear_halt kwarg + WorkerHaltPrespawnError + pre-Popen halt-reason.txt gate + WORKER_HALT_PRESPAWN event (+2 → 34 total). W1 max-spend tests pinned ANTHROPIC_API_KEY for cap assertion. S7 promoted to Current.
+
+[2026-05-19 UTC] S7 done, runtime=loop_wrapper — wrapper handles next iteration. commit=5073856, tests 1945 PASS (+7), ruff+mypy clean on changed files. evals/cases/real/ (5 BMad-shaped story fixtures + cases.yaml manifest with `tags` field) + load_cases tags-schema validation + filter_cases_by_tags helper (OR semantics) + run_eval_suite kwargs cases_dir/project_root/tags + CLI flags --cases-dir/--project-root/--tag (project-root required for --mode real). S8 promoted to Current.
 
 ## Final Report
 (empty)
