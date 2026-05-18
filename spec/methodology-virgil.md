@@ -33,7 +33,7 @@
 | **P2 Routing** | `RoleModels` (planner=Opus, reviewer=Opus, dev=Sonnet, routine=Sonnet) + `set_model` tool для runtime swap; preset routing; **auto-elicitation engine** (Tier 0/1/2) для WORKER_ELICITATION → auto_resolve/escalate | ✅ Реализован (`config.py` + `agent/system_prompt.py` + `elicitation/`) |
 | **P3 Parallelization** | DAG planner + worker pool (4-8 параллельных workers в worktrees); sectioning независимых stories | ✅ Merged `6e8a18e` (parallelism_initiatives S1..S11) |
 | **P4 Orchestrator-Workers** | **Основной паттерн** — central orchestrator делит эпик на stories, динамически спавнит workers с tool harness | ✅ Реализован (наш core loop) |
-| **P5 Evaluator-Optimizer** | bmad-code-review → autofix loop (Pilot 2 прошёл «via autofix loop»). `max_review_iterations` cap в `CodeReviewGates` (default=3) + `_gate_iteration_cap` + `review_iteration` payload field. Runaway-loop guard escalates на HUMAN_QUERY за cap. **Supervisor circuit breaker** добавил вторую защиту (max_consecutive_escalations) | ✅ Formalised 2026-05-18 |
+| **P5 Evaluator-Optimizer** | bmad-code-review → autofix loop (Pilot 2 прошёл «via autofix loop»). `max_review_iterations` cap в `CodeReviewGates` (default=3) + `_gate_iteration_cap` + `review_iteration` payload field. Runaway-loop guard escalates на HUMAN_QUERY за cap. **Supervisor circuit breaker** добавил вторую защиту (max_consecutive_escalations). **Self-learning loop (Phase 5 #11)**: extract lessons → risk gate → auto-apply low-risk → regression guard N=2 waves → auto-rollback. Pluggable ExtractorProtocol + StubExtractor. 4 bus triggers. Monthly cron scheduler (asyncio task + CLI). | ✅ Closed 2026-05-18 (v12) |
 
 ---
 
@@ -183,5 +183,5 @@
 ---
 
 **Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v11 — Supervisor LLM-loop + TUI ✅ closed (Phase 4 #9). Virgil становится standalone: Tier 0/1/2 routing для 5 orchestrator-level event типов, rate limit + circuit breaker, anti-loop, audit inline в `control.events.jsonl`. Tests: 1588 PASS (+50). Phase 4 remaining: только #10 (production pilot — нужен реальный run). Phase 5 next: self-learning consolidation loop.
+**Status:** v12 — Self-learning consolidation loop ✅ closed (Phase 5 #11). P5 Evaluator-Optimizer pattern: extract lessons → risk classify → auto-apply low-risk → regression guard N=2 waves → auto-rollback. 4 trigger events wired (WAVE_BOUNDARY + EPIC_BOUNDARY + PHASE4_COMPLETE + MONTHLY_REVIEW_SCHEDULED). StubExtractor + pluggable ExtractorProtocol. Monthly cron scheduler (embedded asyncio task + CLI `cron-emit`). Audit inline in `control.events.jsonl`. Tests: 1641 PASS (+53). Phase 4 remaining: only #10 (production pilot). Phase 5 item #11 closed.
 **Owner:** user + Claude orchestrator

@@ -78,6 +78,13 @@ eval_app = typer.Typer(
 )
 app.add_typer(eval_app, name="eval")
 
+# Phase 5 self-learning subcommand group — `bmad-orchestrator self-learning {run,status,rollback,cron-emit}`.
+self_learning_app = typer.Typer(
+    help="Self-learning consolidation loop — run, inspect status, rollback, or emit cron trigger",
+    no_args_is_help=True,
+)
+app.add_typer(self_learning_app, name="self-learning")
+
 
 @eval_app.command("run")
 def eval_run(
@@ -1305,6 +1312,131 @@ def bot_start(
 def bot_stop() -> None:
     """Остановить Telegram bot (kill by name)."""
     console.print("[cyan]→[/cyan] bot stop (manual: pkill -f bmad_orchestrator.bot.main)")
+
+
+@self_learning_app.command("run")
+def sl_run(
+    trigger: str = typer.Option(
+        "manual",
+        "--trigger",
+        help="Trigger event name (e.g. wave_boundary_reached, monthly_review_scheduled).",
+    ),
+    config_path: str | None = typer.Option(
+        None,
+        "--config",
+        help="Path to self-learning.yaml. Default: config/self-learning.yaml.",
+    ),
+) -> None:
+    """Run self-learning consolidation once (manual trigger)."""
+    from bmad_orchestrator.runtime.self_learning_subscriber import load_self_learning_config
+    from bmad_orchestrator.self_learning.consolidator import Consolidator
+
+    cfg_path = Path(config_path) if config_path else None
+    cfg = load_self_learning_config(cfg_path)
+    if not cfg.enabled:
+        console.print("[yellow]self-learning is disabled (check config)[/yellow]")
+        raise typer.Exit(1)
+
+    consolidator = Consolidator(config=cfg)
+    result = asyncio.run(consolidator.run(trigger_event=trigger))
+    console.print(f"[green]consolidation done[/green] trigger={trigger}")
+    console.print(f"  proposals: {result.total_proposals} (low={len(result.low_risk)} medium={len(result.medium_risk)} high={len(result.high_risk)})")
+    if result.errors:
+        for err in result.errors:
+            console.print(f"  [red]error:[/red] {err}")
+
+
+@self_learning_app.command("status")
+def sl_status(
+    config_path: str | None = typer.Option(
+        None,
+        "--config",
+        help="Path to self-learning.yaml.",
+    ),
+) -> None:
+    """Show self-learning configuration and status."""
+    from bmad_orchestrator.runtime.self_learning_subscriber import load_self_learning_config
+
+    cfg_path = Path(config_path) if config_path else None
+    cfg = load_self_learning_config(cfg_path)
+    table = Table(title="Self-learning config")
+    table.add_column("setting")
+    table.add_column("value")
+    table.add_row("enabled", str(cfg.enabled))
+    table.add_row("version", str(cfg.version))
+    table.add_row("min_pattern_occurrences", str(cfg.defaults.min_pattern_occurrences))
+    table.add_row("auto_apply_max_risk", cfg.defaults.auto_apply_max_risk)
+    table.add_row("measure_window_waves", str(cfg.defaults.measure_window_waves))
+    table.add_row("regression_threshold_pct", str(cfg.defaults.regression_threshold_pct))
+    table.add_row("excluded_policy_files", ", ".join(cfg.excluded_policy_files))
+    table.add_row("excluded_compliance_tags", ", ".join(cfg.excluded_compliance_tags))
+    console.print(table)
+
+
+@self_learning_app.command("rollback")
+def sl_rollback(
+    proposal_id: str = typer.Argument(
+        ...,
+        help="Backup timestamp (proposal_id) to rollback. See audit log for IDs.",
+    ),
+    skills_root: str = typer.Option(
+        "skills",
+        "--skills-root",
+        help="Path to skills/ directory containing policy/ subdirectory.",
+    ),
+) -> None:
+    """Rollback a previously applied proposal by its proposal_id."""
+    from bmad_orchestrator.runtime.lesson_parser import PolicyApplyError, rollback_policy
+
+    try:
+        restored, backup = rollback_policy(
+            skills_root=Path(skills_root),
+            proposal_id=proposal_id,
+        )
+        console.print(f"[green]rollback ok[/green] restored={restored.name} from={backup.name}")
+    except PolicyApplyError as exc:
+        console.print(f"[red]rollback failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+@self_learning_app.command("cron-emit")
+def sl_cron_emit(
+    state_db: str = typer.Option(
+        "./state.db",
+        "--state-db",
+        help="Path to state.db (used for last_emit persistence).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Emit regardless of date check (for testing).",
+    ),
+) -> None:
+    """Emit MONTHLY_REVIEW_SCHEDULED event (for systemd timer / crontab).
+
+    Checks whether a monthly emit is due; exits quietly if not (idempotent).
+    Use --force to emit unconditionally.
+    """
+    from datetime import UTC, datetime
+
+    from bmad_orchestrator.runtime.monthly_scheduler import _should_emit
+    from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
+
+    now = datetime.now(UTC)
+    if not force and not _should_emit(now, None):
+        console.print(f"[dim]no emit needed (day={now.day}, hour={now.hour})[/dim]")
+        return
+
+    async def _emit() -> None:
+        bus = EventLoop()
+        await bus.emit(
+            EventType.MONTHLY_REVIEW_SCHEDULED,
+            source="cron_emit",
+            triggered_at=now.isoformat(),
+        )
+
+    asyncio.run(_emit())
+    console.print("[green]MONTHLY_REVIEW_SCHEDULED emitted[/green]")
 
 
 def main() -> None:

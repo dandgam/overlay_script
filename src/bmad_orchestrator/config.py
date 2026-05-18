@@ -153,6 +153,10 @@ class Settings(BaseSettings):
     # config/supervisor-policy.yaml at engine load time.
     supervisor_policy_path: Path | None = None
 
+    # Self-learning consolidation loop — path to YAML config. None → fallback to
+    # config/self-learning.yaml at subscriber load time.
+    self_learning_policy_path: Path | None = None
+
     locale: str = "ru"
 
 

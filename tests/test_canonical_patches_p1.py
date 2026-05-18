@@ -221,8 +221,9 @@ async def test_deletion_safety_wired_before_code_review(
     # P1=4 subscribers (deletion+review+merge+sweep), P2 adds build_check=5,
     # P3 adds stage5_completeness=6, P5 adds security_review=7,
     # Phase 3 Auto-elicitation adds elicitation_subscriber=8,
-    # Phase 4 Supervisor LLM-loop adds supervisor_subscriber=9.
-    assert len(bus._subs) == 9
+    # Phase 4 Supervisor LLM-loop adds supervisor_subscriber=9,
+    # Phase 5 Self-learning adds self_learning_subscriber=10.
+    assert len(bus._subs) == 10
     funcs = [getattr(s, "func", s) for s in bus._subs]
     assert funcs[0] is stage5_completeness_subscriber, (
         f"Patch S subscriber must be wired first; got {funcs[0]!r}"

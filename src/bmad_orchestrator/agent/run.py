@@ -103,6 +103,11 @@ from bmad_orchestrator.runtime.supervisor_subscriber import (
 from bmad_orchestrator.runtime.supervisor_subscriber import (
     make_supervisor_subscriber,
 )
+from bmad_orchestrator.runtime.self_learning_subscriber import (
+    load_self_learning_config as _load_self_learning_config,
+    make_self_learning_subscriber,
+)
+from bmad_orchestrator.self_learning.consolidator import Consolidator
 from bmad_orchestrator.runtime.file_list_parser import (
     collect_allow_list,
     has_explicit_file_list,
@@ -978,6 +983,15 @@ async def _run_real_pilot_body(
     supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
     supervisor_engine = _load_supervisor_engine(supervisor_policy_path)
     bus.on(cast(EventCallback, partial(make_supervisor_subscriber(supervisor_engine), bus=bus)))
+
+    # Self-learning consolidation loop (Phase 5 — P5 Evaluator-Optimizer).
+    # Listens on 4 trigger events (WAVE_BOUNDARY_REACHED, EPIC_BOUNDARY_REACHED,
+    # PHASE4_COMPLETE, MONTHLY_REVIEW_SCHEDULED). Filters out self-emitted events
+    # (source=self_learning). StubExtractor by default — no token cost.
+    self_learning_policy_path = getattr(settings, "self_learning_policy_path", None)
+    sl_config = _load_self_learning_config(self_learning_policy_path)
+    sl_consolidator = Consolidator(config=sl_config)
+    bus.on(cast(EventCallback, partial(make_self_learning_subscriber(sl_consolidator), bus=bus)))
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []

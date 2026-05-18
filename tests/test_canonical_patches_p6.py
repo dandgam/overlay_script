@@ -370,8 +370,9 @@ async def test_all_seven_canonical_subscribers_wired_in_correct_order(
         await bus.stop()
 
     funcs = [getattr(s, "func", s) for s in bus._subs]
-    # 7 canonical + elicitation_subscriber (Phase 3) + supervisor_subscriber (Phase 4).
-    assert len(funcs) == 9, f"Expected 9 subscribers, got {len(funcs)}: {funcs!r}"
+    # 7 canonical + elicitation_subscriber (Phase 3) + supervisor_subscriber (Phase 4)
+    # + self_learning_subscriber (Phase 5).
+    assert len(funcs) == 10, f"Expected 10 subscribers, got {len(funcs)}: {funcs!r}"
     expected_in_order = [
         stage5_completeness_subscriber,
         build_check_subscriber,
