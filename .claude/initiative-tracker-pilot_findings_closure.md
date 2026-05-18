@@ -39,20 +39,6 @@
 
 ### Pending
 
-- **id:** S5
-  **title:** #5 MCP server readiness polling
-  **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #5
-  **depends_on:** []
-  **acceptance:**
-    - poll_mcp_ready util (30s max, 500ms interval)
-    - MCP_NOT_READY event; worker not spawned if required MCP not authenticated
-    - Per-story override via frontmatter requires_mcp:[]
-    - +8 tests
-  **safety_gates: []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S6
   **title:** #6 budget auto-detect (subscription mode) + #7 halt pre-flight check
   **surface:** backend-python
@@ -97,25 +83,43 @@
 
 ### Current
 
-- **id:** S4
-  **title:** #4 AbortController per worker
+- **id:** S5
+  **title:** #5 MCP server readiness polling
   **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #4
+  **spec_section:** spec/spec_pilot_findings_closure.md §1 #5
   **depends_on:** []
   **acceptance:**
-    - Per-worker cancellation token; supervisor `cancel_worker` action wired
-    - WORKER_CANCELLED event emitted with reason + cancelled_by
-    - Stuck worker (sleep 9999) killed in <5s wall clock
+    - poll_mcp_ready util (30s max, 500ms interval)
+    - MCP_NOT_READY event; worker not spawned if required MCP not authenticated
+    - Per-story override via frontmatter requires_mcp:[]
     - +8 tests
   **safety_gates: []
-  **checkpoint:** true
+  **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 (auto-promoted after S3)
+  **started:** 2026-05-19 (auto-promoted after S4)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S4
+  **title:** #4 AbortController per worker
+  **completed:** 2026-05-19 UTC
+  **commit:** 6929ee7
+  **files_changed:** 8 (2 new + 6 modified; runtime + supervisor + tests)
+  **tests_passed:** 1920 (was 1912; +8 new = 3 token mechanics + 2 cancel_worker semantics + 2 supervisor flow + 1 real-subprocess regression; target +8 ✓)
+  **decisions_made:**
+    - CancellationToken wraps asyncio.Event with reason + cancelled_by metadata fields; `set` is idempotent (first call wins). Avoids losing audit attribution if multiple paths race to cancel.
+    - Module-level _REGISTRY (process-local dict) keyed by `worker_id = story_id::branch::pid`. Orchestrator spawns workers inside one asyncio process, so no cross-process IPC needed. PID disambiguates retries with same story_id (different runs, same epic).
+    - cancel_worker SIGTERM → 2s grace → SIGKILL fallback. Grace exposed as `grace_seconds` kwarg for tests. Idempotent: returns False on already-set token without re-killing.
+    - SupervisorAction Literal extended with `cancel_worker`. actions.execute_decision resolves worker_id in priority: tool_call.args["worker_id"] → source_payload["worker_id"] → registry lookup by story_id. Avoids forcing the LLM judge to know PID-suffixed worker_ids.
+    - WORKER_CANCELLED event written via append_jsonl directly (not bus.emit) because it's a per-worker audit record, not an orchestrator event. Bus-level signal lives in supervisor actions log.
+    - Mock-mode workers also get a token registered + immediately unregistered. The token stays on WorkerHandle so tests can assert post-hoc semantics even after the mock "completes". No registry pollution because unregister runs synchronously.
+    - _wait_and_finalize gained worker_id kwarg → unregister on subprocess exit. Prevents stale registry entries after natural completion.
+  **deferred_items:**
+    - Wiring a Tier 0 hard rule `WORKER_SILENT_FAILURE + reason_contains "stuck" → cancel_worker` in config/supervisor-policy.yaml — left for a future supervisor-policy tuning pass; mechanism is now available, policy still defaults to escalate_human for safety.
+    - Surfacing cancel_worker from CLI (e.g. `bmad-orchestrator cancel-worker --story <id>`) — out of session scope. Can be added when CLI tooling has a richer worker-state subcommand.
 
 - **id:** S3
   **title:** #3 autofix routing policy + #8 subprocess timeout adaptive
@@ -178,6 +182,8 @@
 
 [2026-05-19 UTC] S3 — chose typed policy schema over string-expression DSL for autofix-routing.yaml. Simpler validation, no fake DSL. Runner stays project-agnostic via `python -m` CLI rather than embedded bash logic. Subscriber is event-only (no execution coupling) — `STORY_AUTO_SPLIT` emitted, actual decomposer call stays in `auto_split_and_execute`.
 
+[2026-05-19 UTC] S4 — module-level registry (process-local dict) for worker tokens chosen over async-context-manager scoped registry: orchestrator runs in a single asyncio process, so a dict + worker_id keys is enough. CancellationToken keeps reason+cancelled_by inside the object so audit attribution survives even if the process exits before the JSONL flush, and SupervisorAction.cancel_worker resolves worker_id via tool_call args → payload → story_id lookup so the LLM judge does not have to learn PID-suffixed IDs.
+
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 8 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure, runtime=loop_wrapper, delay=300s, auto_merge=false.
@@ -187,6 +193,8 @@
 [2026-05-19 UTC] S2 done, runtime=loop_wrapper — wrapper handles next iteration. commit=4ac3e56, tests 1892 PASS (+9), ruff clean. Variant B (runner-log fallback) shipped. S3 promoted to Current.
 
 [2026-05-19 UTC] S3 done, runtime=loop_wrapper — wrapper handles next iteration. commit=949d8e7, tests 1912 PASS (+20), ruff+mypy clean. Autofix routing (security-critical → opus, iter≥2 → opus) + adaptive subprocess timeout (default 3600s, +adaptive by AC count) + STORY_AUTO_SPLIT event on loc_cap halt. S4 promoted to Current.
+
+[2026-05-19 UTC] S4 done, runtime=loop_wrapper — wrapper handles next iteration. commit=6929ee7, tests 1920 PASS (+8), ruff clean, mypy clean on changed files. Per-worker CancellationToken + module registry + cancel_worker(SIGTERM→SIGKILL); supervisor `cancel_worker` action wired; WORKER_CANCELLED event (+1 → 31 total). S5 promoted to Current.
 
 ## Final Report
 (empty)
