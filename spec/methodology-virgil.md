@@ -183,5 +183,5 @@
 ---
 
 **Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v12 — Self-learning consolidation loop ✅ closed (Phase 5 #11). P5 Evaluator-Optimizer pattern: extract lessons → risk classify → auto-apply low-risk → regression guard N=2 waves → auto-rollback. 4 trigger events wired (WAVE_BOUNDARY + EPIC_BOUNDARY + PHASE4_COMPLETE + MONTHLY_REVIEW_SCHEDULED). StubExtractor + pluggable ExtractorProtocol. Monthly cron scheduler (embedded asyncio task + CLI `cron-emit`). Audit inline in `control.events.jsonl`. Tests: 1641 PASS (+53). Phase 4 remaining: only #10 (production pilot). Phase 5 item #11 closed.
+**Status:** v12 — Self-learning consolidation loop ✅ closed (Phase 5 #11). P5 Evaluator-Optimizer pattern: extract lessons → risk classify → auto-apply low-risk → regression guard N=2 waves → auto-rollback. 4 trigger events wired (WAVE_BOUNDARY + EPIC_BOUNDARY + PHASE4_COMPLETE + MONTHLY_REVIEW_SCHEDULED). StubExtractor + pluggable ExtractorProtocol. Monthly cron scheduler (embedded asyncio task + CLI `cron-emit`). Audit inline in `control.events.jsonl`. Tests: 1657 PASS (+69). Phase 4 remaining: only #10 (production pilot). Phase 5 item #11 closed.
 **Owner:** user + Claude orchestrator
