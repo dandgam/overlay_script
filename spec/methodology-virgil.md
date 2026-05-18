@@ -167,5 +167,5 @@
 ---
 
 **Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v8 — 4 security gates retroactively confirmed already-merged (Phase 2 `0070d6f`). Tests: 1520 PASS. Next: R3 security minors (canonicalize paths) или Step B (real BMad stories).
+**Status:** v9 — R3 security minors closed (path traversal/deny-list guard на 4 CLI callsites). Tests: 1538 PASS (+18). Phase 3 remaining: только Step B (real BMad stories) — нужен реальный pilot.
 **Owner:** user + Claude orchestrator

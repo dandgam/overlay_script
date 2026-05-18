@@ -38,6 +38,10 @@ from rich.table import Table
 from bmad_orchestrator.agent.run import run_orchestrator
 from bmad_orchestrator.cli import models_yaml
 from bmad_orchestrator.cli.i18n import t
+from bmad_orchestrator.cli.path_validation import (
+    ensure_inside_root,
+    safe_resolve_path,
+)
 from bmad_orchestrator.cli.tui import DashboardSnapshot, render_once, run_live
 from bmad_orchestrator.config import ModelConfig, load_settings
 from bmad_orchestrator.runtime.multi_run import (
@@ -1037,6 +1041,8 @@ def skill_update(
     ``skills/customize/``, ``skills/policy/``, ``skills/lessons/`` are never
     touched.
     """
+    skills_root = safe_resolve_path(skills_root, name="--skills-root")
+
     from bmad_orchestrator.runtime.skill_update import (
         BmadVersionInvalidError,
         BmadVersionNotFoundError,
@@ -1123,6 +1129,24 @@ def policy_apply(
     audit event with before/after values for rollback.
     """
     _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+
+    skills_root = safe_resolve_path(skills_root, name="--skills-root")
+    if orchestrator_home is not None:
+        orchestrator_home = safe_resolve_path(
+            orchestrator_home, name="--orchestrator-home"
+        )
+    if lessons_dir is not None:
+        lessons_dir = safe_resolve_path(
+            lessons_dir, name="--lessons-dir", must_exist=True
+        )
+        # Lessons must live under skills_root so a malicious path can't pull
+        # a YAML proposal from an attacker-controlled directory.
+        lessons_dir = ensure_inside_root(
+            lessons_dir,
+            skills_root,
+            child_name="--lessons-dir",
+            root_name="--skills-root",
+        )
 
     from bmad_orchestrator.runtime.lesson_parser import (
         LessonProposal,
@@ -1212,6 +1236,8 @@ def policy_rollback(
     # constraints as a story id so a malformed timestamp can't path-traverse.
     _validate_cli_token(proposal_id, name="proposal-id", pattern=_STORY_RE)
 
+    skills_root = safe_resolve_path(skills_root, name="--skills-root")
+
     from bmad_orchestrator.runtime.lesson_parser import (
         PolicyApplyError,
         rollback_policy,
@@ -1240,6 +1266,8 @@ def skill_status_cmd(
     ),
 ) -> None:
     """Show current upstream version + applied patches + pending conflict reports."""
+    skills_root = safe_resolve_path(skills_root, name="--skills-root")
+
     from bmad_orchestrator.runtime.skill_update import skill_status
 
     snapshot = skill_status(skills_root)
