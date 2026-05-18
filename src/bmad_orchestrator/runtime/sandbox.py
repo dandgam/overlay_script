@@ -317,13 +317,43 @@ class BwrapSandbox:
         # /dev/null`` (zero-byte read). Tolerates missing host paths so the
         # rule list is identical across environments — test hosts without
         # ``/home/server/crm`` simply skip that entry.
+        #
+        # H-A security follow-up (Phase 4B re-review): expand to cover every
+        # credential store and orchestrator-internal directory readable via
+        # the ``--ro-bind / /`` mount. A poisoned story description that
+        # tells the worker to ``cat ~/.ssh/id_rsa`` or
+        # ``cat ~/.aws/credentials`` would otherwise exfiltrate to the
+        # Anthropic API on the next reasoning turn (stdout JSONL flows back
+        # to the parent and into the next prompt). Blackouts are applied
+        # before the claude_subpaths binds below, so ``~/.claude/`` /
+        # ``~/.claude.json`` / ``~/.local/share/claude/`` (worker-required)
+        # remain accessible while everything else under $HOME is invisible.
+        _host_home = os.path.expanduser("~")
         _SANDBOX_BLACKOUT_PATHS = (
+            # System / other-user secrets (S10 H-1 baseline).
             "/home/server/crm",
             "/etc/shadow",
             "/etc/gshadow",
             "/etc/sudoers",
             "/etc/sudoers.d",
             "/root",
+            # SSH keys, known_hosts, agent socket directory.
+            f"{_host_home}/.ssh",
+            # Cloud / registry credential stores.
+            f"{_host_home}/.aws",
+            f"{_host_home}/.gnupg",
+            f"{_host_home}/.netrc",
+            f"{_host_home}/.docker",
+            f"{_host_home}/.kube",
+            # CLI tool auth stores (github / gitlab / gcloud / azure).
+            f"{_host_home}/.config/gh",
+            f"{_host_home}/.config/git",
+            f"{_host_home}/.config/gcloud",
+            f"{_host_home}/.config/azure",
+            f"{_host_home}/.gitconfig",
+            # Orchestrator's own state (state.db, tokens, memory, runs).
+            f"{_host_home}/.bmad-orchestrator",
+            f"{_host_home}/.config/bmad-orchestrator",
         )
         for blackout in _SANDBOX_BLACKOUT_PATHS:
             blackout_path = Path(blackout)
