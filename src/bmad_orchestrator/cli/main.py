@@ -605,15 +605,41 @@ async def _subprocess_runner(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    # Review finding P1-B — hard timeout. A hung child (auth prompt, network
+    # deadlock, runaway sub-agent loop) must not park the entire multi-run
+    # forever. On expiry: SIGTERM → 30s grace → SIGKILL; surface as failed
+    # ProjectRunResult so siblings continue.
+    timed_out = False
+    try:
+        _, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=plan.per_project_timeout_sec,
+        )
+    except TimeoutError:
+        timed_out = True
+        stderr = b""
+        try:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=30)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+        except ProcessLookupError:
+            pass
     spent_usd = _read_spend_report(spend_report)
     if spent_usd > 0:
         await tracker.add(spent_usd)
-    completed = proc.returncode == 0
-    err = None if completed else (
-        f"exit {proc.returncode}: "
-        f"{stderr.decode('utf-8', errors='replace')[:400]}"
-    )
+    completed = (not timed_out) and proc.returncode == 0
+    if timed_out:
+        err = f"timeout after {plan.per_project_timeout_sec}s"
+    elif completed:
+        err = None
+    else:
+        err = (
+            f"exit {proc.returncode}: "
+            f"{stderr.decode('utf-8', errors='replace')[:400]}"
+        )
     return ProjectRunResult(
         slug=slot.slug,
         completed=completed,

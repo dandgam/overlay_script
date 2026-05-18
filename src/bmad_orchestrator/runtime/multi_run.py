@@ -83,6 +83,10 @@ class MultiProjectPlan:
     per_project_max_stories: int = 50
     daily_max_spend_usd: float = 50.0
     mock: bool = True
+    # Review finding P1-B — hard liveness ceiling per child subprocess.
+    # Default 4h matches the longest expected real wave; child orchestrator
+    # ``--max-stories`` × per-story budget already bounds reasonable cases.
+    per_project_timeout_sec: float = 4 * 60 * 60
 
     def __post_init__(self) -> None:
         if not self.projects:
@@ -97,6 +101,11 @@ class MultiProjectPlan:
             raise ValueError(
                 f"daily_max_spend_usd must be non-negative, got "
                 f"{self.daily_max_spend_usd}"
+            )
+        if self.per_project_timeout_sec <= 0:
+            raise ValueError(
+                f"per_project_timeout_sec must be positive, got "
+                f"{self.per_project_timeout_sec}"
             )
 
 

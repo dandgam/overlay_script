@@ -125,4 +125,61 @@ class TestP1ASpendHandoff:
         assert outcome.per_project["alpha"].spent_usd == pytest.approx(7.5)
 
 
+# ── P1-B: per-child timeout ─────────────────────────────────────────────────
+
+
+class TestP1BTimeout:
+    """``per_project_timeout_sec`` validated + slow child SIGKILLed."""
+
+    def test_timeout_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="per_project_timeout_sec"):
+            MultiProjectPlan(
+                projects=("a",),
+                total_parallel=1,
+                wave="1a",
+                per_project_timeout_sec=0,
+            )
+
+    async def test_slow_child_times_out_and_sibling_completes(
+        self, tmp_path: Path
+    ) -> None:
+        """Hung shim should not park the wave; sibling still completes."""
+        registry = _fixture_registry(tmp_path, ("fast", "slow"))
+
+        async def runner(slot, tracker, plan):
+            if slot.slug == "slow":
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, "-c", "import time; time.sleep(60)",
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                timed_out = False
+                try:
+                    await asyncio.wait_for(
+                        proc.wait(), timeout=plan.per_project_timeout_sec
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    proc.kill()
+                    await proc.wait()
+                return ProjectRunResult(
+                    slug=slot.slug,
+                    completed=not timed_out,
+                    error="timeout" if timed_out else None,
+                )
+            return ProjectRunResult(slug=slot.slug, completed=True)
+
+        plan = MultiProjectPlan(
+            projects=("fast", "slow"),
+            total_parallel=2,
+            wave="1a",
+            per_project_timeout_sec=0.5,
+        )
+        outcome = await run_multi(plan, registry=registry, runner_fn=runner)
+        assert outcome.per_project["fast"].completed is True
+        assert outcome.per_project["slow"].completed is False
+        assert "timeout" in (outcome.per_project["slow"].error or "")
+
+
 __all__: list[str] = []
