@@ -22,9 +22,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import typer
@@ -574,12 +576,18 @@ async def _subprocess_runner(
     resolves to that project's tree. State.db rows, project memory files,
     and sprint-status writes therefore never cross project boundaries.
 
-    The subprocess returncode is the completion signal; aggregate spend is
-    fed back into the shared tracker so the daily cap halts the second
-    project once the first has consumed the shared budget.
+    The subprocess returncode is the completion signal. Final per-project
+    spend is read from a child-written ``spend.json`` (review finding P1-A:
+    parent <-> child handoff via filesystem since stdout is discarded), then
+    folded into the shared :class:`SharedSpendTracker` so the daily cap halts
+    subsequent waves once the aggregate is reached.
     """
+    spend_report = Path(
+        tempfile.mkdtemp(prefix=f"bmad-multi-{slot.slug}-")
+    ) / "spend.json"
     env = dict(os.environ)
     env["ORCHESTRATOR_TARGET_PROJECT"] = str(slot.path)
+    env["BMAD_MULTI_SPEND_REPORT"] = str(spend_report)
     args = [
         sys.executable, "-m", "bmad_orchestrator.cli", "run",
         "--project", slot.slug,
@@ -598,14 +606,47 @@ async def _subprocess_runner(
         stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
+    spent_usd = _read_spend_report(spend_report)
+    if spent_usd > 0:
+        await tracker.add(spent_usd)
     completed = proc.returncode == 0
     err = None if completed else (
         f"exit {proc.returncode}: "
         f"{stderr.decode('utf-8', errors='replace')[:400]}"
     )
     return ProjectRunResult(
-        slug=slot.slug, completed=completed, error=err
+        slug=slot.slug,
+        completed=completed,
+        spent_usd=spent_usd,
+        error=err,
     )
+
+
+def _read_spend_report(path: Path) -> float:
+    """Read ``spend.json`` written by a child orchestrator (P1-A handoff).
+
+    Returns the reported ``spent_usd`` on success, ``0.0`` on missing or
+    malformed file. Best-effort cleanup of the tempdir; we never raise from
+    a parsing error because the subprocess returncode is the authoritative
+    completion signal — failed cost telemetry should not mask a real exit.
+    """
+    try:
+        if not path.exists():
+            return 0.0
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return float(payload.get("spent_usd", 0.0))
+    except (OSError, ValueError, TypeError):
+        return 0.0
+    finally:
+        try:
+            if path.exists():
+                path.unlink()
+            if path.parent.exists() and path.parent.name.startswith(
+                "bmad-multi-"
+            ):
+                path.parent.rmdir()
+        except OSError:
+            pass
 
 
 @app.command()

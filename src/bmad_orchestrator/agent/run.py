@@ -40,6 +40,7 @@ tools cover the workflow until SDK exposes server-managed tool blocks.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import secrets
@@ -1166,6 +1167,26 @@ async def _run_real_pilot_body(
         daily_spent_usd=daily_spent_usd,
         halted=daily_halt_reached,
     )
+
+    # Review finding P1-A — feed total spend back to a multi-run parent (if
+    # spawned via cli/main.py::_subprocess_runner) so the shared
+    # ``SharedSpendTracker`` aggregate halts subsequent waves at the configured
+    # cap. Single-project runs leave the env unset and skip this hop.
+    _emit_spend_report(daily_spent_usd)
+
+
+def _emit_spend_report(spent_usd: float) -> None:
+    """Write final cumulative spend to ``$BMAD_MULTI_SPEND_REPORT`` if set."""
+    target = os.environ.get("BMAD_MULTI_SPEND_REPORT")
+    if not target:
+        return
+    try:
+        Path(target).write_text(
+            json.dumps({"spent_usd": float(spent_usd)}),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.warning("spend_report_write_failed", path=target, error=str(exc))
 
 
 def _persist_project_memory_snapshot(
