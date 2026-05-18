@@ -32,33 +32,36 @@
 
 ### Pending
 
-(empty — S11 is now Current; no further sessions planned)
+(empty — initiative complete; ready for manual merge to main)
 
 ### Current
 
-- **id:** S11
-  **title:** Phase 4B — auto-fix P0/P1/High findings + re-review + security-auditor + final report
-  **surface:** backend-python
-  **spec_section:** Phase 4 Task 4.2-4.5
-  **depends_on:** [S10]
-  **acceptance:**
-    - Auto-fix всех P0/P1/High findings from S10 (12 findings: 6 P1 + 6 High; max 2 retry each); each fix commit "fix(<scope>): address review finding <id>"
-    - Re-review verdict PASS от обоих reviewer'ов (code-reviewer + code-auditor)
-    - security-auditor pass: no новых vulnerabilities
-    - pytest 1386+ PASS, ruff 0, mypy 0 new errors
-    - Final Report written in tracker с merge hint (`Auto merge: false` → manual merge instructions)
-  **safety_gates:**
-    - L1: never `--no-verify`, never force-push
-    - L2/L3 standard
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-  **started:** (pending first wake on S11)
-  **workflow:** workflows/backend-python.md
-  **retry_count:** 0
-  **worker_branches:** []
-  **findings_to_fix:** see .claude/checkpoints/parallelism_initiatives-review-S10.md §P1 and §High (12 items total)
+(empty — S11 completed)
 
 ### Completed
+
+- **id:** S11
+  **title:** Phase 4B — auto-fix P0/P1/High findings + re-review + security-auditor + final report
+  **completed:** 2026-05-18 UTC
+  **commits:** 21 (f54a8a1 P1-A, 671fba1 P1-B, 20bb6ff P1-C, 36b18b2 P1-D, bb5529d P1-E, debed52 P1-F, 4ca2b7e H-1, e95b37a H-2, 2ffdf32 H-3, 6c82648 H-4+H-5, 299fc87 H-6, 03c6528 H-7, b6df8ee H-2+H-3 follow-ups, 6b46b77 N-1 reviewer, cb90d81 N-1 auditor, 9a1efc8 N-2 auditor, 412d97a H-A r1, d70a0a3 H-B r1, 298c1d4 sandbox r2, fc8477a CLI r2, f7948d1 sandbox r3)
+  **files_changed:** 13 source files; +1411 / -59 LOC vs S10 head (e260b79)
+  **tests_passed:** 1426/1426 PASS (was 1386); ruff 0; mypy 1 pre-existing baseline error in main_merge_token.py:40 (unchanged from main, confirmed via `git show main:.../main_merge_token.py`)
+  **verdict:** PASS (R3 reviewer + R3 security-auditor; deferred items recorded to backlog)
+  **decisions_made:**
+    - **Three review rounds total — converged on PASS after R3.** R1 (paired Opus reviewer + auditor + security-auditor) on initial 13-commit fix batch returned 2 new HIGH security findings (H-A sandbox blackouts incomplete; H-B CLI inputs unvalidated) + 4 MED/LOW. R2 (3 reviewers) on 5 follow-up commits returned 1 MED reviewer (positional `project` args bypass) + 2 MED security (positional args + git-config blackout regression breaking worker commits) + 3 HIGH auditor (orchestrator state dir readable, HOME fragility, missing credential stores). R3 (2 reviewers) on 2 follow-up commits returned PASS (code-reviewer) + PASS-WITH-MINORS (security-auditor — 1 HIGH on docker.sock socket-shadow infeasibility, 1 HIGH on libsecret/keyring missed; both addressed in commit f7948d1). Remaining minors after R3 are operator-trusted flag traversal + bwrap socket-shadow limitation + LOW fragility — all deferred to backlog with rationale.
+    - **Spend telemetry handoff via spend.json file** (P1-A, commit f54a8a1) — production `_subprocess_runner` previously returned `ProjectRunResult(spent_usd=0.0)` and never called `await tracker.add(...)`, making the entire SharedSpendTracker daily cap inert in real `multi --real` runs (10 projects × $50 cap allowed $500 real spend before any guard fired). Fixed by having each child write a `spend.json` to a parent-supplied tempdir at the end of `_run_real_pilot`'s finally block (with the spend_carry mutable-holder pattern from N-1 auditor in cb90d81 guaranteeing the write survives body exceptions); parent's `_subprocess_runner` reads the value and calls `tracker.add(spent_usd)`. The single shared `BudgetGuard` instance now actually sees aggregate spend across projects.
+    - **Defence-in-depth at three layers for L1 forbidden-path gate** (P1-E, commit bb5529d) — previously `validate_project_isolation` only enforced inside `run_multi`. `register_project` accepted `bmad-orchestrator init /home/server/crm`, and single-project `run` skipped the gate entirely. Three-call fix: at top of `register_project` (reject at insertion is best), at top of `run_orchestrator` single-project entry (catch already-poisoned registry from prior version), and the existing `run_multi` check (defence-in-depth). Gate now sits at every boundary; symlink-resolution test added in H-7 (commit 03c6528) pins the `Path.resolve(strict=False)` invariant so a future refactor that drops it fails loudly.
+    - **Sandbox blackout list grew 3x across S11 rounds** (H-1 commit 4ca2b7e baseline → H-A r1 commit 412d97a → r2 commit 298c1d4 → r3 commit f7948d1). Final blackout tuple covers: system secrets (/etc/shadow, /etc/sudoers, /etc/ssh, /root, /home/server/crm), SSH+cloud+GPG (.ssh, .aws, .gnupg, .netrc, .docker, .kube), CLI-tool auth (.config/gh, .config/gcloud, .config/azure), git credential stores (narrowly: .git-credentials and .config/git/credentials only — .gitconfig left readable so worker commits resolve user.email/name), package-ecosystem creds (.npmrc, .pypirc, .cargo/credentials.toml), secret managers (.vault-token, .config/op, .config/sops, .config/pulumi, .terraform.d/credentials.tfrc.json, .config/helm/registry/config.json, .password-store), desktop secret stores (.local/share/keyrings, /run/user/<uid>/keyring, /run/user/<uid>/gnupg), and orchestrator's own state dir via Path(__file__).parents[3]/.claude (main-merge-token.json single-gate). Loop predicate now distinguishes dir/file/other, with a log.warning on skip so broken-symlink drift between deploys becomes observable.
+    - **CLI input validation regex-gates all attacker-controlled args** (H-B r1 commit d70a0a3 + r2 commit fc8477a). `_validate_cli_token` helper with three patterns: `_PROJECT_RE = ^[a-z0-9][a-z0-9_-]{0,63}$` (mirrors registry slug rules), `_WAVE_RE = ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (allows "1a" / "1.5" / "wave-3"), `_STORY_RE = ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. Applied to every command accepting `--wave`/`--project`/`--story`/positional `project` arg/`logs --worker`: run, status, budget, dag, retro, memory, multi, doctor, resume-project, policy-apply, policy-rollback (both project AND proposal_id), logs. Final coverage independently confirmed clean by R3 code-reviewer.
+    - **Auto-split parent-subset gate now wired** (H-4 commit 6c82648 + N-1 reviewer commit 6b46b77). Original H-4 fix added the `parent_touches_files` arg to `validate_decomposition`'s signature but the real call site in `auto_split.py` was still passing `None`, silently disabling the gate. N-1 reviewer follow-up threads `list(story.get("touches_files") or []) or None` from the parent story into the validation call. Decomposition disjointness + parent-subset checks now fire end-to-end.
+    - **Six P1 + six High findings auto-fixed under spec scope** ("P0/P1/High only"). Original 6 P1 + 6 High in commits f54a8a1..03c6528, with H-2 stdlib-logging printf-style + H-3 test cmdline mock corrections in b6df8ee. 5 R2 follow-ups (one per finding) in commits 6b46b77..d70a0a3. 2 R3 follow-ups (sandbox round 2 + CLI round 2) in 298c1d4..fc8477a. 1 R3 round 3 (sandbox docker.sock + libsecret + warn-on-skip) in f7948d1. All committed individually with "fix(parallelism): address [round] review finding <id>" pattern per CLAUDE.md "1 task = 1 commit" discipline.
+    - **Manual merge to main per `Auto merge: false`** — user reviews integration branch then runs `git checkout main && git merge --no-ff integration/parallelism_initiatives -m "merge parallelism_initiatives S1..S11"`. Verified merge-ready: pytest 1426 PASS, ruff clean, mypy baseline preserved, no uncommitted working-tree changes, no merge conflicts with current main (linear history on integration branch since e260b79 S10-tracker pin).
+  **deferred_items:**
+    - **19 S10 Medium + Low findings** — out of S11 auto-fix scope per spec ("P0/P1/High only"). Track in `project_backlog_post_mvp.md` as `review-findings-followup` entry.
+    - **R3 security-auditor PASS-WITH-MINORS items** deferred to backlog: (a) `--lessons-dir`/`--skills-root`/`--orchestrator-home` Path-flag traversal (operator-trusted flag; principle-of-least-authority hardening, not a security boundary); (b) `Path(__file__).parents[3]` fragility under unusual pip install layouts (current dev/prod setup unaffected); (c) docker.sock blackout infeasibility under bwrap+mount model — operator must drop UID from `docker` group OR migrate sandbox to user namespace for real protection.
+    - **R2 auditor LOW items** deferred: log.warning when auto_split's parent-subset gate is disabled by empty parent `touches_files`; cleanup default vs custom `per_project_timeout_sec` ratio enforcement (e.g., refuse multi-run with timeout > 12h or auto-scale cleanup); spend_carry timing (carry mirrors `projected_daily` before reservation gate — small over-report on aborted story); parametrized tests covering every new blackout entry; test covering spend-carry-on-exception path.
+    - **HOME=unset / symlink resolve fragility** (auditor R2 HIGH but defence-in-depth in practice) — Linux pwd-entry fallback covers the empty-HOME case; production env always sets HOME. Worth `Path.expanduser().resolve(strict=False)` belt-and-suspenders if a future host has symlinked credential paths.
+    - **Architectural follow-ups from S10 audit** — in-process multi-run consolidation (eliminate `_subprocess_runner` heavyweight), end-to-end integration test exercising auto-split + multi-project + per-worker HOME together, `set_decomposer` global mutable → thread-local for pytest-xdist safety. Separate spec proposal after parallelism_initiatives merges.
 
 - **id:** S10
   **title:** Phase 4A — mandatory full code review (Opus + code-auditor cross-check)
@@ -88,18 +91,6 @@
   **commit:** 62285e3
   **files_changed:** 1 (tests/test_initiative3c_validation_pilot.py NEW)
   **tests_passed:** 1386/1386 PASS (was 1378; +8 new in test_initiative3c_validation_pilot.py); ruff 0; mypy 6 untyped-closure notes mirroring S8's 11 (project convention — test closures exempt)
-  **decisions_made:**
-    - **Code-level validation via real OS subprocess shim** (not mock runner_fn, not real `claude -p`). The 8 new tests spawn `asyncio.create_subprocess_exec(sys.executable, "-c", <shim_script>, ...)` per project — same plumbing as `cli/main.py::_subprocess_runner` (env propagation via `ORCHESTRATOR_TARGET_PROJECT`, returncode → `ProjectRunResult` mapping, ProjectIsolation+SharedSpendTracker enforcement) but with a 3-line Python child instead of a real `bmad-orchestrator run` invocation. Cost = $0; wall-time ≈150ms per child. Closes S8's deferred "real `claude -p` integration test" item at the OS-process boundary while keeping real-API-cost validation out of CI. The shim writes a sprint-status.yaml with its own slug + `ORCHESTRATOR_TARGET_PROJECT` path so cross-contamination (one child writing into a sibling's tree) would manifest as the wrong slug in the wrong file — directly observable.
-    - **Real `_subprocess_runner` signature pinned** via `inspect.signature(...) == ["slot", "tracker", "plan"]` + `inspect.iscoroutinefunction(...)`. A future refactor that drops a parameter or makes the runner sync will fail this test loudly here rather than at first real wave dispatch. Same approach S5 took for `spawn_fn` / `wait_fn` injection points.
-    - **Memory isolation pilot under real subprocesses**: the parent process (not children) writes `save_project_memory(slot.slug, ..., orchestrator_home)` after each child returns. Slug-keyed path (`<home>/_config/projects/<slug>/memory.yaml`) guarantees disjoint files even if two parent-side `asyncio.gather`'d tasks race to write — the OS inode-level isolation prevents cross-write. The "load `odyssey-fixture` returns defaults despite `antares-fixture` having persisted data" test pins the slug keying invariant; a future refactor that mistakenly drops the slug from the path would fail loudly.
-    - **Failure-mode isolation under real subprocesses** matches `run_multi`'s `_wrap` philosophy (S8 doc): a failing child (`sys.exit(2)`) does NOT cancel the sibling — the sibling completes its wave, writes its sprint-status, the aggregate `succeeded=False` while per-project `good-project.completed=True` + `bad-project.completed=False`. One project's outage does not compound to a total outage.
-    - **Pre-flight halt mechanism via `daily_max_spend_usd=0.0`** (NOT pre-loading the BudgetGuard with spend). `BudgetGuard.enforce_day` is stateless re: `spent_usd` — it accepts the current spend as a parameter rather than tracking it internally. The only deterministic way to drive a fresh tracker into halt on entry is `cap=0`, which models the operational case "operator already drained today's budget cap, second wave must abort pre-spawn". The S3B test discovered the same trick on its second iteration (left a comment in-place explaining the discovery); we cite it explicitly here so future readers don't re-rediscover.
-    - **Tests organised in 4 classes** so a future failure scopes to its category: `TestPilotRealSubprocessIsolation` (3 tests — happy path + env propagation + returncode mapping), `TestPilotMemoryIsolation` (2 tests — slug keying + unknown-slug defaults), `TestPilotFailureModes` (2 tests — one-project failure + pre-flight halt), `TestSubprocessRunnerContract` (1 test — `_subprocess_runner` signature pin).
-    - **No `@pytest.mark.slow` decoration** despite spec's testing-strategy mention. The full S9 suite runs in 0.47s; classifying it as `slow` would require registering the marker (`pyproject.toml [tool.pytest.ini_options] markers = ...`) and gates the test from default runs. The S3B precedent of real-subprocess-equivalent tests at module boundary (`asyncio.create_subprocess_exec` exercised via stubs only) sets the project's bar — 8 real-subprocess tests at sub-half-second total cost is well within "regular suite" territory.
-  **deferred_items:**
-    - **Real Antares + Odyssey 5/5-worker wave acceptance** — requires (a) Antares stories 1.2 / 1.3 / 1.5 / 3.1 to exist (currently `resolved_deferred` in S1 / S3 / S6 — only 1.1 + 4.8 prepared), (b) Odyssey Wave 1a to have been piloted manually at least once (CLAUDE.md project status: ⬜). Manual user pilot: `bmad-orchestrator multi --projects antares,odyssey --wave 1a --parallel 10 --real`. The CLI plumbing is fully wired (S8 `cli.main::multi` + `_subprocess_runner`); only the project-side preconditions are missing. See Blockers/Pauses entry below.
-    - **Tightened subprocess parent ↔ child cost-reporting handshake**. Currently `_subprocess_runner` reports `ProjectRunResult(spent_usd=0.0)` (no telemetry from child to parent). The shared `BudgetGuard` daily cap is therefore not informed by actual per-child claude API consumption — children rely on their own per-process `BudgetGuard(--max-spend-usd=<cap/N>)` for local enforcement. Real-pilot wave will surface whether unix-socket-based cost telemetry from child to parent is worth the wiring. Deferred follow-up. **[S10 review escalated this to P1-A — S11 must fix.]**
-    - **Cross-project budget allocation algorithm beyond "even slice"**. Spec §Task 3.4 mention of weighted allocation by historical median story cost (from `project_memory.median_story_cost_usd`) remains a one-day follow-up. Even-slice satisfies S8/S9 acceptance.
 
 - **id:** S8
   **title:** Initiative #3B — multi-project execution + per-project state isolation
@@ -107,22 +98,6 @@
   **commit:** 71c521d
   **files_changed:** 3 (src/bmad_orchestrator/runtime/multi_run.py NEW, src/bmad_orchestrator/cli/main.py, tests/test_initiative3b_multi_run.py NEW)
   **tests_passed:** 1378/1378 PASS (was 1347; +31 new in test_initiative3b_multi_run.py); ruff 0; mypy 0 new on edited files
-  **decisions_made:**
-    - Module placed at `runtime/multi_run.py` (sibling of `runtime/project_registry.py` from S7, `runtime/auto_split.py` from S6, `runtime/sub_story_executor.py` from S5). Same canonical-import-path principle — multi-project orchestration belongs to the `runtime/` namespace next to its data dependencies (registry, project_memory). Stable import path means future consumers (watchdog dashboards, Telegram bot multi-project verbs, bmad-orchestrator multi-execution daemon) reference one location.
-    - **Shared budget guard via `SharedSpendTracker`** (small asyncio-lock-fronted accumulator). Single `BudgetGuard` instance threaded through every per-project runner; the tracker increments aggregate spend atomically and re-runs `enforce_day` on the new total. This is the entire "shared budget" mechanism — neither per-project private guards nor a multi-process IPC bus is required because Python in-process asyncio.gather already serialises the lock. Tests confirm 50 concurrent `add(1.0)` calls produce exactly 50.0 total without skew.   **[S10 review note: technically true ONLY IF runner feeds spend back; production `_subprocess_runner` does not → P1-A in S11.]**
-    - **Pre-flight halt** at entry: `tracker.check_only()` (enforce_day at zero spend) — if the shared guard is already at `halt` (prior wave drained the cap, or daily_max_spend_usd=0), `run_multi` returns immediately with `aborted_reason` populated and emits a `multi_run_aborted` event. Subprocess spawning never happens, so neither child process nor sandbox cost is paid for a doomed run.
-    - **L1 safety gate** = `FORBIDDEN_PROJECT_PATHS` tuple (currently `(Path("/home/server/crm"),)`) checked by `validate_project_isolation` at the input boundary. Catches both exact match and any subpath via `resolved.relative_to(forbidden_resolved)` — defeats `Path("/home/server/crm/agent")` and symlinks that resolve into the forbidden tree. Spec §Safety gates §1.3 ("прод CRM mounts НЕ должен оказаться в worker'е bind list") becomes a single-line check at the registration boundary rather than scattered guards inside the sandbox builder. Future forbidden paths (additional prod mounts) extend the tuple. **[S10 review note: gate enforced ONLY in run_multi, NOT in register_project or single-project run → P1-E in S11.]**
-    - **Slot allocation = even split with remainder front-loaded**: 10/2 → [5,5], 10/3 → [4,3,3], 2/2 → [1,1]. Total < projects rejected loudly (`MultiRunError`) — each project must own ≥1 worker, otherwise it has no purpose in the plan. Front-loading the remainder matches the mental model "first project listed gets priority slots" and is deterministic for reproducible test assertions.
-    - **Runner injection via `RunnerFn = Callable[[ProjectSlot, SharedSpendTracker, MultiProjectPlan], Awaitable[ProjectRunResult]]`** — same pattern as S5's `spawn_fn` / `wait_fn` and S6's `set_decomposer`. Tests drive the full pipeline (slot split → isolation gate → shared budget → asyncio.gather → outcome aggregation) with stub runners that never touch `claude -p`. Real consumer = CLI `multi` command wires `_subprocess_runner` which `asyncio.create_subprocess_exec`'s the per-project `bmad-orchestrator run --project <slug>` invocation with `ORCHESTRATOR_TARGET_PROJECT={slot.path}` for env-isolated state.
-    - **Runner exception isolated**: a runner that raises is caught at `_wrap`, logged, and surfaced as `ProjectRunResult(completed=False, error="<exc_type>: <msg>")`. Sibling projects keep running. Matches BudgetGuard's fail-isolated philosophy — one project's crash does NOT cancel the others, which would compound an outage into a total outage.
-    - **Per-project sprint-status isolation = path-based, not lock-based**: each runner constructs a `Settings(target_project=slot.path)` clone and passes it to `write_sprint_status_yaml(settings=settings)`. Since `sprint_status_path(settings)` resolves `settings.target_project / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml"`, two concurrent runners necessarily write to disjoint disk paths. No flock needed — the OS already enforces inode-level isolation. Tests verify with real `read_sprint_status_yaml`/`write_sprint_status_yaml` (not mocks) that antares.yaml and odyssey.yaml end up with disjoint contents.
-    - **Per-project memory isolation = naturally provided by `save_project_memory(slug, ..., orchestrator_home)`**. Files land at `<home>/_config/projects/<slug>/memory.yaml`; the slug keying alone defeats cross-pollination. The test pins this invariant (two projects, two writes, two distinct memory.yaml files) so a future refactor that mistakenly drops the slug from the path would fail loudly.
-    - **CLI `multi` command** wires it all: parses comma-separated `--projects antares,odyssey`, builds `MultiProjectPlan`, calls `_load_registry_for_cli()` (S7 helper), runs `run_multi(plan, registry, runner_fn=_subprocess_runner)`. `_subprocess_runner` uses `asyncio.create_subprocess_exec` (not `subprocess.Popen`) so the gather() over N projects is genuinely concurrent at OS level. Per-project `--max-spend-usd` = `daily_max_spend_usd / len(projects)` (rough even split; soft cap is per-child for early local exit, hard cap is enforced globally by shared tracker). Renders outcome table with verdict + per-project status + total spend; non-zero exit code on failure for CI / wrapper visibility. **[S10 review: 4 P1 hazards inside `_subprocess_runner` → see S11 acceptance.]**
-    - **31 new tests** in `test_initiative3b_multi_run.py` across 8 test classes covering: plan validation (6 cases — empty/zero/negative/duplicate/negative-cap/valid-defaults), slot allocation (6 cases — even/uneven/min/insufficient/unknown/path-from-registry), isolation gate (5 cases — normal/exact/subpath/mixed/forbidden-set-pin), tracker (5 cases — accumulate/halt/check-only/negative-rejected/concurrent), happy path (2 cases), shared budget halt (2 cases — aggregate-combined + pre-flight), sprint-status isolation (real read/write helpers), memory isolation (real load/save_project_memory), runner exception isolation, event callback (starting + complete + aborted).
-  **deferred_items:**
-    - Real `claude -p` integration test (no mock runner_fn) — closed by S9 at the OS-subprocess boundary via shim runner. Real-wave acceptance with real `claude -p` workers still deferred per S9's deferred_items.
-    - Watchdog event-bus subscription that translates `on_event` dicts to typed `EventType.MULTI_RUN_*` values. Currently `on_event` is a free-form `Callable[[dict], None]` (mirrors S5's `on_event` pattern); typed event-bus wiring is an opportunistic addition once a consumer (TUI dashboard, Telegram bot dispatcher) materialises.
-    - Cross-project budget allocation algorithm beyond "even slice" — spec §Task 3.4 mentions "Cross-project budget allocation (один daily cap → split)" which we satisfy via the shared tracker but the per-child soft cap is computed as `daily_max_spend_usd / N`. Smarter allocation (e.g. weighted by historical median story cost from `project_memory.median_story_cost_usd`) would let projects with cheap stories accept more parallel work without starving expensive ones. Trivial follow-up — read `load_project_memory(slug).median_story_cost_usd` at split time and weight slots accordingly. Deferred to keep S8 scope focused on the isolation + shared-cap primitives.
 
 - **id:** S7
   **title:** Initiative #3A — project registry yaml + init/scan/doctor/resume CLI
@@ -191,6 +166,18 @@
 - **[2026-05-18 UTC] pilot_validation_deferred — Antares wave + Odyssey wave real 5/5-worker pilot (Task 3.5)**
   **resolution:** resolved_deferred 2026-05-18 — Antares stories 1.2 / 1.3 / 1.5 / 3.1 are missing (resolved_deferred in S1 / S3 / S6 — only 1.1 + 4.8 prepared); Odyssey Wave 1a has never been piloted manually yet (project CLAUDE.md status: ⬜ "Pilot run на Odyssey Wave 1a через `/bmad-auto-dev` (без оркестратора)"). Real-wave acceptance covered by manual user run when those preconditions complete: `bmad-orchestrator multi --projects antares,odyssey --wave 1a --parallel 10 --real`. CLI plumbing fully wired (S8 `cli.main::multi` + `_subprocess_runner`). S9 closed code-level pipeline acceptance via 8 real-OS-subprocess tests in `tests/test_initiative3c_validation_pilot.py` exercising the same `asyncio.create_subprocess_exec` plumbing. Autoloop promotes S9 → Completed and continues to S10 (Phase 4A code review).
 
+- **[2026-05-18 UTC] manual_merge_pending — initiative complete on integration/parallelism_initiatives; user must merge manually**
+  Auto merge: false (per Metadata). 21 commits since S10 tracker pin (e260b79) ready for review on `integration/parallelism_initiatives`. Suite 1426/1426 PASS, ruff clean, mypy 1 pre-existing baseline error (unchanged from main). R3 reviewer PASS, R3 security-auditor PASS-WITH-MINORS (deferred items recorded above).
+  Merge command:
+    `git checkout main && git merge --no-ff integration/parallelism_initiatives -m "merge parallelism_initiatives S1..S11"`
+  Verification before push:
+    1. `git log --oneline main..integration/parallelism_initiatives` → 21 commits expected
+    2. `.venv/bin/python -m pytest -x -q` → 1426 PASS
+    3. `ruff check src/ tests/` → All checks passed
+    4. `git diff main..integration/parallelism_initiatives -- '*.py' | wc -l` → ~1411+59 LOC
+  Rollback if needed: `bash .claude/scripts/rollback-to-backup.sh backup/parallelism_initiatives-pre-2026-05-18`
+  **resolution:** PENDING (user action)
+
 ## Decisions Log
 
 - **date:** 2026-05-18T05:00 UTC
@@ -212,16 +199,28 @@
   **impact:** initiative cannot complete without PASS verdict from both reviewers; S11 may halt + escalate user if 2 retry exhausted.
 
 - **date:** 2026-05-18 UTC
+  **session:** S11
+  **decision:** Three review rounds run iteratively, each scoped narrowly to that round's new commits
+  **rationale:** Spec acceptance "PASS verdict от обоих reviewer'ов + security-auditor pass". R1 found new HIGH security findings introduced as side-effects of P1/H fixes (H-A blackout list incomplete; H-B CLI inputs unvalidated) — those needed fixing regardless of spec scope (post-S10) because they were now part of the integration diff. R2 found 2 MED + 3 HIGH (1 functional regression where the H-A blackout broke worker commits; 1 missed orchestrator state dir; 1 unworkable docker.sock blackout — bwrap+mount cannot shadow a unix socket). R3 confirmed PASS clean from reviewer and PASS-WITH-MINORS from security-auditor (remaining items operator-flag traversal + bwrap socket-shadow + LOW fragility — all defence-in-depth deferred). Iterative narrow-scope re-review let each round converge cheaply (3-5 min wall-clock per round) instead of one expensive 20-min full re-audit.
+  **impact:** 8 R1 fix commits + 5 R2 fix commits + 3 R3 fix commits + 6 baseline P1/H fix commits = 21 commits total on integration branch. No safety gate triggered; no retry exhaustion; final verdict PASS with documented deferred backlog.
+
+- **date:** 2026-05-18 UTC
+  **session:** S11
+  **decision:** Auto merge=false honoured — no autonomous main merge; manual_merge_pending blocker written for user
+  **rationale:** Per /auto-loop-spec SKILL.md §8.A, `Auto merge: false` paths SKIP autonomous main merge and write a PENDING blocker on the last session. User reviews integration branch then runs `git merge --no-ff` manually. This is the bootstrap-time decision honoured all the way through the initiative — 11 sessions on integration branch, single human-gated merge at end.
+  **impact:** Wrapper exits cleanly after S11 promote; Final Report populated; user gets PushNotification-equivalent journal entry with merge command + verification checklist.
+
+- **date:** 2026-05-18 UTC
   **session:** S8
   **decision:** Shared budget = single `BudgetGuard` + `SharedSpendTracker` (asyncio-lock accumulator) — NOT per-project private guards
   **rationale:** Spec acceptance "shared budget guard" + "no memory cross-pollination" needed exactly one source of truth for aggregate daily spend. Per-project guards would let each project independently fit under the cap while their sum breaches it (the failure mode the test demonstrates). In-process asyncio + lock-fronted increment is sufficient because run_multi orchestrates with `asyncio.gather` — there's no multi-process race to coordinate. When the CLI command spawns subprocess children, each child runs its own per-process `BudgetGuard` for local soft cap, but the parent's `SharedSpendTracker` is the hard cap (children must report spend back, currently via subprocess returncode + stderr; tighter wiring deferred to S9 pilot wave where the actual spend telemetry materialises).
-  **impact:** S9 pilot will surface whether the subprocess parent/child cost-reporting handshake is granular enough. If a child outruns its `--max-spend-usd` soft cap mid-flight, the parent's tracker doesn't see it until the child exits — acceptable for daily-cap enforcement (subprocess naturally bounded), but a future refactor could thread the tracker over a unix socket if needed.   **[2026-05-18 S10 review: gap escalated to P1-A — production `_subprocess_runner` never feeds spend back, making shared cap inert in real `multi --real` runs. S11 will fix via `spend.json` file-handoff pattern.]**
+  **impact:** S9 pilot will surface whether the subprocess parent/child cost-reporting handshake is granular enough. If a child outruns its `--max-spend-usd` soft cap mid-flight, the parent's tracker doesn't see it until the child exits — acceptable for daily-cap enforcement (subprocess naturally bounded), but a future refactor could thread the tracker over a unix socket if needed.   **[2026-05-18 S10 review: gap escalated to P1-A — production `_subprocess_runner` never feeds spend back, making shared cap inert in real `multi --real` runs. S11 will fix via `spend.json` file-handoff pattern. RESOLVED in S11 commit f54a8a1 — handoff via spend.json file + spend_carry mutable holder.]**
 
 - **date:** 2026-05-18 UTC
   **session:** S8
   **decision:** L1 isolation gate at input boundary (`validate_project_isolation` over `FORBIDDEN_PROJECT_PATHS`) instead of inside the sandbox bind builder
   **rationale:** Spec §Safety gates §1.3 says "прод CRM mounts НЕ должен оказаться в worker'е bind list" — the most reliable place to enforce this is at the registration boundary, not deep inside the sandbox where a forgotten path branch could miss it. Single-line check via `resolved.relative_to(forbidden_resolved)` catches both exact match and subpath, defeats symlinks (resolve() canonicalises). Future forbidden paths (additional prod mounts, encrypted volumes) extend the tuple in one place. Test pins `Path("/home/server/crm")` into the constant so a future refactor that drops it fails loudly.
-  **impact:** any future multi-project consumer (watchdog, Telegram bot, CI runner) that imports `validate_project_isolation` gets the gate for free. Sandbox builder remains a plain bind-list constructor without policy.   **[2026-05-18 S10 review: gate only enforced in `run_multi` — `register_project` and single-project `run` bypass it. Escalated to P1-E; S11 must add calls at top of `register_project` and at top of real single-project pilot.]**
+  **impact:** any future multi-project consumer (watchdog, Telegram bot, CI runner) that imports `validate_project_isolation` gets the gate for free. Sandbox builder remains a plain bind-list constructor without policy.   **[2026-05-18 S10 review: gate only enforced in `run_multi` — `register_project` and single-project `run` bypass it. Escalated to P1-E; S11 must add calls at top of `register_project` and at top of real single-project pilot. RESOLVED in S11 commit bb5529d — gate at register_project + run_orchestrator + run_multi (three-layer defence-in-depth).]**
 
 - **date:** 2026-05-18 UTC
   **session:** S8
@@ -274,8 +273,110 @@
 [2026-05-18 UTC] S10 plan: spawn paired Opus reviewers in parallel — code-reviewer (correctness/security/architecture/readability) + code-auditor (sandbox/concurrency/dependency/bug-hunt) on integration/parallelism_initiatives diff vs main (67 files / +14553 / -353 LOC). Read-only review session — no source edits; no safety-gate concerns. Acceptance: both reviewers spawn, findings list with severity tags, report written to .claude/checkpoints/parallelism_initiatives-review-S10.md.
 [2026-05-18 UTC] S10 execution: paired reviewers spawned via Agent tool. code-reviewer agent_id=a6303fe4d5fb8c8a2 (53,886 tokens / 411s / 50 tool uses) → FAIL verdict, 4 P1 + 4 High + 6 Medium + 3 Low. code-auditor agent_id=a862b3f41a03e9a90 (50,064 tokens / 511s / 53 tool uses) → FAIL verdict, 4 P1 + 4 High + 6 Medium + 6 Low. Strong overlap on 2 P1 (SharedSpendTracker never receives production spend; stdout PIPE OOM) + 1 High (validate_decomposition disjointness gap). Consolidated report written to .claude/checkpoints/parallelism_initiatives-review-S10.md (233 lines) — 6 P1 unique + 6 High unique + 11 Medium + 8 Low. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration.
 [2026-05-18 UTC] S10 completed, S11 promoted to Current (surface=backend-python, Phase 4B auto-fix P0/P1/High + re-review + security-auditor + final report). S11 findings_to_fix: see .claude/checkpoints/parallelism_initiatives-review-S10.md §P1 and §High (12 items: P1-A through P1-F + H-1 through H-7).
+[2026-05-18 UTC] S11 baseline fix wave (12 P1/H findings → 13 commits): f54a8a1 P1-A spend.json handoff; 671fba1 P1-B per-child timeout; 20bb6ff P1-C bounded stderr; 36b18b2 P1-D env allowlist; bb5529d P1-E isolation gate at 3 layers; debed52 P1-F worktree reset on auto-split fallback; 4ca2b7e H-1 sandbox blackouts; e95b37a H-2 stale snapshot cleanup; 2ffdf32 H-3 exact --project match; 6c82648 H-4+H-5 decomposition gates + AC cap; 299fc87 H-6 fail-loud on missing story id; 03c6528 H-7 symlink resolution test; b6df8ee H-2 stdlib logging printf + H-3 test cmdline mock follow-up corrections.
+[2026-05-18 UTC] S11 R1 re-review (3 reviewers in parallel): code-reviewer PASS-WITH-NITS + 2 MED follow-ups (N-1 + N-2); code-auditor PASS-WITH-FINDINGS + 2 MED (N-1 auditor + N-2 auditor); security-auditor FAIL → 2 new HIGH security findings (H-A sandbox blackouts incomplete; H-B CLI inputs unvalidated).
+[2026-05-18 UTC] S11 R1 fix wave (5 follow-ups, 5 commits): 6b46b77 N-1 reviewer auto_split.py parent_touches_files; cb90d81 N-1 auditor spend_carry mutable holder; 9a1efc8 N-2 auditor cleanup default 86400s; 412d97a H-A sandbox blackouts expansion r1; d70a0a3 H-B CLI input validation r1.
+[2026-05-18 UTC] S11 R2 re-review (3 reviewers in parallel): code-reviewer PASS-WITH-NITS + 1 MED (positional `project` args bypass); security-auditor PASS-WITH-MINORS + 2 MED (positional + git-config blackout breaks worker commits); code-auditor PASS-WITH-FINDINGS + 3 HIGH (orchestrator state dir readable, HOME fragility, missing credential stores).
+[2026-05-18 UTC] S11 R2 fix wave (2 commits): 298c1d4 sandbox r2 (un-shadowed gitconfig, added orchestrator state dir via Path(__file__).parents[3], added 12 missing credential stores, predicate fix for sockets); fc8477a CLI r2 (extended _validate_cli_token to positional project args in doctor/resume-project/policy-apply/policy-rollback + logs --worker).
+[2026-05-18 UTC] S11 R3 re-review (2 reviewers): code-reviewer PASS clean; security-auditor PASS-WITH-MINORS + 1 HIGH (docker.sock socket-shadow infeasibility under bwrap) + 1 HIGH (libsecret/keyring missed) + 1 MED (warn-on-skip log) + 1 MED (--lessons-dir traversal — deferred).
+[2026-05-18 UTC] S11 R3 fix wave (1 commit): f7948d1 sandbox r3 (removed unworkable /var/run/docker.sock blackout with explanatory comment for backlog; added .local/share/keyrings + /run/user/<uid>/keyring + /run/user/<uid>/gnupg; added log.warning on every skipped non-regular path so broken-symlink drift becomes observable).
+[2026-05-18 UTC] S11 final verification: pytest 1426/1426 PASS, ruff clean, mypy 1 pre-existing baseline error in main_merge_token.py:40 confirmed unchanged from main. Total S11 commits = 21 (13 baseline + 5 R2 follow-ups + 2 R3 follow-ups + 1 R3-final). Tracker promote: S11 → Completed; Pending empty.
+[2026-05-18 UTC] S11 promote: Auto merge=false → write manual_merge_pending blocker (resolution=PENDING) with merge command + verification checklist. Final Report populated. loop_wrapper runtime — exiting cleanly, wrapper handles next iteration. Initiative complete; user reviews integration/parallelism_initiatives and runs `git merge --no-ff` manually.
 ```
 
 ## Final Report (populated on last session completion)
 
-(empty — pending S11 completion)
+**Initiative:** parallelism_initiatives (Phase 0 + Initiative #1 + Initiative #2 + Initiative #3 + Phase 4 review)
+**Completed:** 2026-05-18 UTC
+**Integration branch:** `integration/parallelism_initiatives`
+**Backup branch:** `backup/parallelism_initiatives-pre-2026-05-18`
+**Sessions:** 11 (S1..S11) — all promoted to Completed
+**Auto merge:** false — MANUAL MERGE REQUIRED
+
+### Verification
+
+| Check | Result |
+|---|---|
+| pytest (full suite) | 1426/1426 PASS |
+| ruff (src + tests) | All checks passed |
+| mypy (src/bmad_orchestrator) | 1 pre-existing baseline error in main_merge_token.py:40 (unchanged from main; confirmed via `git show main:.../main_merge_token.py`) |
+| Total commits on integration branch since main | 21 (since S10 tracker pin e260b79) |
+| Diff stat | 13 files changed, +1411 / -59 LOC |
+| Three-round review verdict | R3 reviewer PASS + R3 security-auditor PASS-WITH-MINORS (deferred to backlog) |
+
+### Commit list (S11 only)
+
+```
+f7948d1 fix(parallelism): drop unworkable docker.sock + add libsecret + warn-on-skip [R3]
+fc8477a fix(parallelism): extend CLI validation to positional args + logs --worker [R2]
+298c1d4 fix(parallelism): un-shadow git config + add orchestrator state dir + 12 creds [R2]
+d70a0a3 fix(parallelism): H-B regex-validate CLI inputs at entry [R1]
+412d97a fix(parallelism): H-A expand _SANDBOX_BLACKOUT_PATHS [R1]
+9a1efc8 fix(parallelism): N-2 auditor cleanup default 86400s [R1]
+cb90d81 fix(parallelism): N-1 auditor spend_carry mutable holder [R1]
+6b46b77 fix(parallelism): N-1 reviewer auto_split parent_touches_files [R1]
+b6df8ee fix(parallelism): H-2 stdlib logging printf + H-3 test cmdline mock
+03c6528 test(parallelism): H-7 symlink resolution gate
+299fc87 fix(parallelism): H-6 fail-loud on missing story id
+6c82648 fix(parallelism): H-4 + H-5 decomposition disjointness + parent subset + AC cap
+2ffdf32 fix(parallelism): H-3 exact --project match in _kill_stale_orchestrators
+e95b37a fix(parallelism): H-2 startup cleanup of stale /tmp/bmad-worker-* snapshots
+4ca2b7e fix(parallelism): H-1 sandbox blackouts on sensitive host paths
+debed52 fix(parallelism): P1-F reset worktree to base_sha on auto-split fallback
+bb5529d fix(parallelism): P1-E enforce isolation gate at register + single-project run
+36b18b2 fix(parallelism): P1-D env allow-list for _subprocess_runner
+20bb6ff fix(parallelism): P1-C bound stderr / discard stdout in _subprocess_runner
+671fba1 fix(parallelism): P1-B per-child timeout in _subprocess_runner
+f54a8a1 fix(parallelism): P1-A feed real subprocess spend back to SharedSpendTracker
+```
+
+### Manual merge command
+
+```bash
+git checkout main && git merge --no-ff integration/parallelism_initiatives \
+  -m "merge parallelism_initiatives S1..S11"
+```
+
+### Verification before push (recommended)
+
+```bash
+# 1. Review commit list
+git log --oneline main..integration/parallelism_initiatives | head -25
+
+# 2. Run full suite on main after merge
+.venv/bin/python -m pytest -x -q
+
+# 3. Lint clean
+ruff check src/ tests/
+
+# 4. Diff stat sanity check
+git diff main..integration/parallelism_initiatives --stat | tail -3
+```
+
+### Rollback (nuclear option, only if needed)
+
+```bash
+bash .claude/scripts/rollback-to-backup.sh backup/parallelism_initiatives-pre-2026-05-18
+```
+
+### Deferred to backlog (`project_backlog_post_mvp.md` candidates)
+
+- **19 S10 Medium + Low findings** — out of S11 auto-fix scope (P0/P1/High only); track as `review-findings-followup`.
+- **R3 security-auditor minors**:
+  - Operator-trusted Path flags (`--lessons-dir`, `--skills-root`, `--orchestrator-home`) accept any Path without canonicalize+allowed-root check — operator can already read host content; principle-of-least-authority hardening rather than security boundary.
+  - `Path(__file__).parents[3]` fragility in unusual pip-install layouts — current dev/prod setup unaffected; belt-and-suspenders fix is to also read `settings.orchestrator_home` once import-cycle is broken.
+  - docker.sock blackout infeasibility — bwrap+mount cannot shadow a unix socket. Mitigation requires (a) dropping orchestrator UID from `docker` group at host level, OR (b) migrating sandbox to user namespace with explicit gid drop. Real fix lives in `project_backlog_sandbox_cgroup_migration` memory.
+- **R2 auditor LOWs**:
+  - `auto_split` parent-subset gate disabled silently when parent `touches_files` is empty — add `log.warning("auto_split_parent_subset_disabled", story_id=...)` so the fallback is observable.
+  - `cleanup_stale_worker_homes` default 86400s vs caller-supplied `per_project_timeout_sec` — refuse multi-run with `timeout > 12h` or auto-scale cleanup to `max(86400, timeout * 2)`.
+  - `spend_carry` carries `projected_daily` before `enforce_and_reserve_story` runs — small over-report on aborted stories; move mirror to after reservation gate or use realized values from `budget.recent_story_costs()`.
+  - Parametrized test iterating `_SANDBOX_BLACKOUT_PATHS` — current test covers only 2 entries; future drop of `~/.ssh` from tuple would slip through.
+  - Test covering spend-carry-on-exception path — monkeypatch `_run_real_pilot_body` to raise, assert `spend.json` populated with last carried value.
+- **HOME=unset / symlink resolve fragility** (auditor R2 HIGH but defence-in-depth) — Linux pwd-entry fallback covers empty-HOME; production env always sets HOME. Worth `Path.expanduser().resolve(strict=False)` belt-and-suspenders if a future host has symlinked credential paths.
+- **Architectural follow-ups from S10 audit**:
+  - In-process multi-run consolidation (eliminate `_subprocess_runner` heavyweight) — would also dissolve P1-A's spend-feedback gap structurally.
+  - End-to-end integration test exercising auto-split + multi-project + per-worker HOME together — currently each initiative has its own test file with stub injection.
+  - `set_decomposer(None)` global mutable → thread-local for pytest-xdist safety.
+  - Separate spec proposal after parallelism_initiatives merges.
+- **Real-wave validation pilot** (deferred from S9) — Antares Wave 1a + Odyssey Wave 1a real 5/5-worker pilot via `bmad-orchestrator multi --projects antares,odyssey --wave 1a --parallel 10 --real`. Requires Antares stories 1.2/1.3/1.5/3.1 to exist + Odyssey Wave 1a to be piloted manually first.
+
