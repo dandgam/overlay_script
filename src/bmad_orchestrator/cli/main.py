@@ -459,6 +459,14 @@ def stop(graceful: bool = typer.Option(True, "--graceful/--hard")) -> None:
 
 
 @app.command()
+def menu() -> None:
+    """Запустить интерактивное меню (стрелки/Enter — без CLI-флагов)."""
+    from bmad_orchestrator.cli.menu import launch_menu
+
+    launch_menu(app)
+
+
+@app.command()
 def budget(wave: str | None = typer.Option(None, "--wave")) -> None:
     """Показать текущий бюджет."""
     if wave is not None:
