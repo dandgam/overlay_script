@@ -14,8 +14,8 @@ from bmad_orchestrator.cli.menu.tree import CommandNode
 
 class ConfirmScreen(Screen[bool]):
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("enter", "confirm", "Confirm", priority=True),
-        Binding("escape", "go_back", "Cancel"),
+        Binding("enter", "confirm", "Подтвердить", priority=True),
+        Binding("escape", "go_back", "Отмена"),
     ]
 
     DEFAULT_CSS = """
@@ -57,14 +57,14 @@ class ConfirmScreen(Screen[bool]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield Static(
-            "[bold red]WARNING: This command is DESTRUCTIVE.[/bold red]\n"
-            "It may cause irreversible changes. Proceed only if you intend to run it.",
+            "[bold red]ВНИМАНИЕ: Команда ДЕСТРУКТИВНА.[/bold red]\n"
+            "Действие может быть необратимым. Продолжайте только если уверены.",
             id="warning-panel",
             markup=True,
         )
-        yield Label(f"Command: {self._preview()}", id="preview-label")
+        yield Label(f"Команда: {self._preview()}", id="preview-label")
         yield Label(
-            f"Type [bold]{self._leaf_name()}[/bold] to confirm:",
+            f"Введите [bold]{self._leaf_name()}[/bold] для подтверждения:",
             id="confirm-label",
             markup=True,
         )
@@ -73,14 +73,14 @@ class ConfirmScreen(Screen[bool]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "Confirm destructive command"
+        self.title = "Подтверждение деструктивной команды"
 
     def action_confirm(self) -> None:
         widget = self.query_one("#confirm-input", Input)
         typed = widget.value.strip()
         if typed != self._leaf_name():
             self.query_one("#match-error", Static).update(
-                f"[red]Expected '{self._leaf_name()}', got '{typed}'[/red]"
+                f"[red]Ожидалось '{self._leaf_name()}', получено '{typed}'[/red]"
             )
             return
         from bmad_orchestrator.cli.menu.execute_screen import ExecuteScreen

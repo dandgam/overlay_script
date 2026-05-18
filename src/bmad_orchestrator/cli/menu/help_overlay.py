@@ -10,22 +10,22 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 _HELP_TEXT = """\
-[bold]Key bindings[/bold]
+[bold]Горячие клавиши[/bold]
 
-  ↑ / k       Navigate up
-  ↓ / j       Navigate down
-  Enter       Select item (enter group / run command placeholder)
-  b / ←       Go back
-  /           Search (M2 — not yet implemented)
-  ?           Toggle this help
-  q           Quit
+  ↑ / k       Вверх
+  ↓ / j       Вниз
+  Enter       Выбрать (войти в группу / запустить команду)
+  b / ←       Назад
+  /           Поиск
+  ?           Открыть/закрыть справку
+  q           Выход
 """
 
 
 class HelpOverlay(ModalScreen[None]):
     BINDINGS: ClassVar[list[BindingType]] = [
-        ("escape", "dismiss", "Close"),
-        ("question_mark", "dismiss", "Close"),
+        ("escape", "dismiss", "Закрыть"),
+        ("question_mark", "dismiss", "Закрыть"),
     ]
 
     def compose(self) -> ComposeResult:

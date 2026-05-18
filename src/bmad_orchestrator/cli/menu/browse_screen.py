@@ -26,17 +26,17 @@ def filter_items(
 
 class BrowseScreen(Screen[None]):
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("up", "cursor_up", "Up"),
-        Binding("down", "cursor_down", "Down"),
-        Binding("k", "cursor_up", "Up"),
-        Binding("j", "cursor_down", "Down"),
-        Binding("enter", "select", "Select"),
-        Binding("b", "go_back", "Back"),
-        Binding("left", "go_back", "Back"),
-        Binding("escape", "escape_or_back", "Back"),
-        Binding("slash", "enter_search", "Search"),
-        Binding("question_mark", "show_help", "Help"),
-        Binding("q", "quit_app", "Quit"),
+        Binding("up", "cursor_up", "Вверх"),
+        Binding("down", "cursor_down", "Вниз"),
+        Binding("k", "cursor_up", "Вверх"),
+        Binding("j", "cursor_down", "Вниз"),
+        Binding("enter", "select", "Выбрать"),
+        Binding("b", "go_back", "Назад"),
+        Binding("left", "go_back", "Назад"),
+        Binding("escape", "escape_or_back", "Назад"),
+        Binding("slash", "enter_search", "Поиск"),
+        Binding("question_mark", "show_help", "Помощь"),
+        Binding("q", "quit_app", "Выход"),
     ]
 
     def __init__(self, node: GroupNode) -> None:
@@ -48,12 +48,12 @@ class BrowseScreen(Screen[None]):
 
     def _breadcrumb(self) -> str:
         if not self._node.full_path:
-            return "Virgil — main menu"
-        return "main → " + " → ".join(self._node.full_path)
+            return "Virgil — главное меню"
+        return "меню → " + " → ".join(self._node.full_path)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        yield Input(placeholder="/ search…", id="search-input", classes="hidden")
+        yield Input(placeholder="/ поиск…", id="search-input", classes="hidden")
         items: list[ListItem] = []
         for child in self._filtered:
             prefix = "▶ " if child.kind == "group" else "  "

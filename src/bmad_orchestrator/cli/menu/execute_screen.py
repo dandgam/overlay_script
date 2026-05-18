@@ -62,7 +62,7 @@ def _build_kwargs(node: CommandNode, values: dict[str, str]) -> dict[str, Any]:
 
 class ExecuteScreen(Screen[None]):
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("ctrl+c", "cancel_task", "Cancel", show=True),
+        Binding("ctrl+c", "cancel_task", "Отмена", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -89,14 +89,14 @@ class ExecuteScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        yield Static("Running…", id="status-bar")
+        yield Static("Выполняется…", id="status-bar")
         yield RichLog(id="output-log", wrap=True, markup=True)
         yield Static("", id="done-hint")
         yield Footer()
 
     def on_mount(self) -> None:
         cmd = " ".join(["bmad-orchestrator", *list(self._node.full_path)])
-        self.title = f"Execute: {cmd}"
+        self.title = f"Выполнение: {cmd}"
         self._task = asyncio.create_task(self._run_command())
         self.set_interval(0.1, self._flush_output)
 
@@ -132,10 +132,10 @@ class ExecuteScreen(Screen[None]):
         status = self.query_one("#status-bar", Static)
         hint = self.query_one("#done-hint", Static)
         if exit_code == 0:
-            status.update("[green]✅ exit 0 (done)[/green]")
+            status.update("[green]✅ exit 0 (готово)[/green]")
         else:
-            status.update(f"[red]❌ exit {exit_code} (failed)[/red]")
-        hint.update("[dim]Any key to return[/dim]")
+            status.update(f"[red]❌ exit {exit_code} (ошибка)[/red]")
+        hint.update("[dim]Любая клавиша для возврата[/dim]")
 
     def _flush_output(self) -> None:
         log = self.query_one("#output-log", RichLog)

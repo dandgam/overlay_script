@@ -45,10 +45,10 @@ def _param_widget_id(param: ParamSpec) -> str:
 
 class FormScreen(Screen[dict[str, str] | None]):
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("enter", "submit", "Run", priority=True),
-        Binding("b", "go_back", "Back"),
-        Binding("escape", "go_back", "Back"),
-        Binding("question_mark", "show_help", "Help"),
+        Binding("enter", "submit", "Запуск", priority=True),
+        Binding("b", "go_back", "Назад"),
+        Binding("escape", "go_back", "Назад"),
+        Binding("question_mark", "show_help", "Помощь"),
     ]
 
     DEFAULT_CSS = """
@@ -97,7 +97,7 @@ class FormScreen(Screen[dict[str, str] | None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        yield Static(f"Command: bmad-orchestrator {self._full_command()}", id="form-header")
+        yield Static(f"Команда: bmad-orchestrator {self._full_command()}", id="form-header")
         with ScrollableContainer(id="form-scroll"):
             for param in self._node.params:
                 required = param.required
@@ -116,14 +116,14 @@ class FormScreen(Screen[dict[str, str] | None]):
                 elif param.py_type == "int":
                     yield Input(
                         value=default_str,
-                        placeholder="integer (e.g. 3)",
+                        placeholder="целое число (напр. 3)",
                         type="integer",
                         id=widget_id,
                     )
                 elif param.is_path:
                     yield Input(
                         value=default_str,
-                        placeholder="path/to/file",
+                        placeholder="путь/к/файлу",
                         id=widget_id,
                     )
                 else:
@@ -176,12 +176,12 @@ class FormScreen(Screen[dict[str, str] | None]):
         for param in self._node.params:
             val = self._values.get(param.name, "")
             if param.required and not val:
-                return f"Required: {param.cli_flag}"
+                return f"Обязательное поле: {param.cli_flag}"
             if val and param.py_type == "int":
                 try:
                     int(val)
                 except ValueError:
-                    return f"Must be integer: {param.cli_flag}"
+                    return f"Должно быть целым числом: {param.cli_flag}"
         return None
 
     def action_submit(self) -> None:
