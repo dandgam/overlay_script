@@ -227,6 +227,30 @@
 - ⬜ **R5 (P3): Fail-closed cleanup policy** — не удалять worktree если `git status` вернул ошибку или есть unpushed commits (guard для R4). Ref: `utils/worktree.ts:1113`
 - 💡 Дополнительно: bundled skills которых нет у нас — `skillify` (command→skill конвертер), `stuck` (escape failure loop), `remember` (auto-memory → CLAUDE.md promotion)
 
+### Backlog — pilot findings (2026-05-19, Antares smoke runs 1-7)
+
+Источник: 7 прогонов real-пилота на Antares Epic 1 (stories 1.3/1.4/1.5). 2 настоящих
+бага Virgil уже зафикшены (D-Bus `0c0967d`, overlay `bb4fdf1`). Ниже — НЕзакрытые находки.
+
+- ⬜ **P1: mark-done ID-format mismatch** — `_run_real_pilot_body` помечает истории `done`
+  циклом `for sid in spawned: epic_block["stories"][sid] = "done"`, но `spawned` содержит
+  ID вида `1.3` (dotted), а ключи sprint-status — кебаб `1-3-fastapi-app-lifespan-health`.
+  Match не срабатывает → sprint-status НЕ обновляется. **Ломает resume**: прерванный
+  батч при продолжении повторно прогонит уже сделанные истории (видит их не-`done`).
+  Fix: нормализовать ID через `normalize_story_id` перед mark-done lookup. ~0.5 сессии
+  + тест. **Чинить ДО production-использования resume из меню Virgil.**
+- ⬜ **P2: subscription-mode budget auto-detect** — `cost_tracking_unavailable
+  reason=subscription_mode` детектится, но $-гейты (cap/daily/story-alarm) всё равно
+  халтят на синтетических оценках. Workaround `BMAD_DISABLE_BUDGET=1` существует, но
+  ставится руками. Fix: при subscription-режиме авто-выставлять `_budget_disabled`.
+- ⬜ **P2: pre-flight halt-state check** — runner отказывается работать если в worktree
+  есть `_bmad/auto-dev-state/halt-reason.txt`. Сейчас оркестратор спавнит всех воркеров
+  и они молча падают на Stage 0. Fix: pre-flight проверка halt-state ДО спавна (как
+  Patch BB orphan pre-flight) → внятная ошибка / авто-clear / `--resume`.
+- ⬜ **P3: `real_pilot_done stories=N` вводит в заблуждение** — счётчик считает
+  заспавненные истории, не успешные. Все упавшие воркеры всё равно дают `stories=3`.
+  Fix: разделить `spawned` / `succeeded` в финальном логе.
+
 ---
 
 ## 6. References
