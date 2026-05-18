@@ -1,7 +1,7 @@
 # CLAUDE.md — bmad-orchestrator
 
 > Автономный оркестратор BMad Phase 4 для проектов с `_bmad/` структурой.
-> Greenfield Python repo. Цель — pilot на `/home/server/odyssey-ux/` Wave 1a.
+> Greenfield Python repo. **Project-agnostic** — работает с любым target BMad-проектом через `--project-root`.
 
 ## Project Overview
 
@@ -20,7 +20,7 @@
 ## Critical Boundaries
 
 1. **Target проекты — read-only для metadata, write-only через worktree.** Оркестратор НЕ пишет напрямую в target's main-branch. Только через worktree → branch → merge gate → integration.
-2. **`/home/server/crm/` и `/home/server/odyssey-ux/main` — никогда напрямую.** Все правки через ветку.
+2. **Main-ветка target проекта — никогда напрямую.** Все правки через worktree → branch → merge gate → integration.
 3. **Cost budget hard-cap.** Оркестратор остановится при превышении дневного лимита токенов.
 4. **Никогда `--no-verify`, `git push --force`, `git reset --hard` без explicit human approval.**
 5. **Worker isolation — primary safety = OS-level sandbox** (`runtime/sandbox.py`, bwrap). `_scan_bash` (`agent/safety/hooks.py`) — **defence-in-depth, не primary**. Новые bash bypass'ы НЕ добавлять как patterns в scanner; fix в sandbox если bypass'ит изоляцию. Prod prerequisite: `apt install bubblewrap` (отсутствует → `NoSandbox` fallback + loud audit warning, primary safety теряется). См. `spec/spec_orchestrator_agent.md` §22.7.
@@ -69,17 +69,17 @@
 ## Status
 
 - ✅ Scaffold + spec готов (2026-05-15)
-- ⬜ Pilot run на Odyssey Wave 1a через `/bmad-auto-dev` (без оркестратора)
-- ⬜ Сбор policy data из pilot logs
-- ⬜ MVP оркестратора (DAG planner + sequential worker)
-- ⬜ Parallel worker pool
-- ⬜ Production run на Odyssey Wave 1b
+- ✅ MVP оркестратора (DAG planner + sequential worker)
+- ✅ Parallel worker pool (parallelism_initiatives merged `6e8a18e`)
+- ✅ Pilot 1/2 success (Stories 1.1 / 1.2 end-to-end + autofix loop)
+- 🟡 Eval suite — Step A done (5 synthetic mock 100% PASS), Step B = реальные BMad stories из любого target проекта
+- ⬜ Production run на любом target BMad-проекте
 
 ## Pointers to Read on Demand
 
 - Architecture spec: `spec/spec_master_orchestrator.md`
-- Target project (Odyssey) BMad artifacts: `/home/server/odyssey-ux/_bmad-output/planning-artifacts/`
-- Target project epics: `/home/server/odyssey-ux/_bmad-output/planning-artifacts/epics.md` (16 эпиков, 133 FR)
+- Target project BMad artifacts: `<project-root>/_bmad-output/planning-artifacts/` (путь = `--project-root` при запуске)
+- Target project epics: `<project-root>/_bmad-output/planning-artifacts/epics.md`
 - Существующий `bmad-auto-dev` skill: `~/.claude/skills/bmad-auto-dev/` (если установлен глобально) или в target `.claude/skills/`
 
 ## Memory Bank Protocol

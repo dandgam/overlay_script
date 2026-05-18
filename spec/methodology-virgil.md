@@ -56,7 +56,7 @@
 
 - ✅ Vision сформулирован (`project_vision_master_bmad_builder.md`, 7-step roadmap)
 - ✅ Architecture spec (`spec/spec_master_orchestrator.md` + 11 детальных spec'и по инициативам)
-- ✅ Use case определён (BMad Phase 4 для Odyssey, далее любой BMad-проект)
+- ✅ Use case определён (BMad Phase 4 для любого target BMad-проекта — project-agnostic)
 - ✅ Backlog ведётся (memory + progress.md)
 - ✅ **Success metrics зафиксированы** (2026-05-18) — таблица 7 порогов в разделе 1, Phase 3 acceptance criteria определены
 
@@ -68,8 +68,8 @@
 - ✅ Prompt chaining (P1) через embedded Stages
 - ✅ Routing (P2) — `RoleModels` (planner=Opus, reviewer=Opus, dev=Sonnet, routine=Sonnet) + `set_model` tool
 - ✅ **P5 Evaluator-Optimizer formalised** (2026-05-18) — `max_review_iterations` cap в `CodeReviewGates` + `_gate_iteration_cap` + `review_iteration` field в CODE_REVIEW_VERDICT payload (11 tests)
-- ✅ Pilot 1 success — Antares Story 1.1 (commit `9e84da6`)
-- ✅ Pilot 2 success — Antares Story 1.2 via autofix loop + 5 патчей Z/AA/BB/CC/DD (commits `5440614 → 585b8be`)
+- ✅ Pilot 1 success — Story 1.1 end-to-end (commit `9e84da6`)
+- ✅ Pilot 2 success — Story 1.2 via autofix loop + 5 патчей Z/AA/BB/CC/DD (commits `5440614 → 585b8be`)
 - ✅ **Регрессионные тесты для Z/AA/BB/CC/DD** (2026-05-18) — 10 guard tests в `tests/test_regression_pilot2_patches.py`
 - ✅ Embedded skills (vision step 2) — 14 BMad skills в `skills/upstream/` + `skill_update.py` (pin/diff/patches/conflict reports, 470 строк)
 - ✅ 12 встроенных sub-agent skills (cost-watchdog, dag-planner, elicitation-router, failure-analyst, intent-router, merge-gate, proactive-improver, reflexion-learner, retrospective-writer, story-splitter, wave-coordinator, worker-dispatcher) — wired в `agent/skills/__init__.py` по event types
@@ -83,14 +83,14 @@
 ### Фаза 3 — Test & Release ⬜ NOT STARTED
 
 - ⬜ **GAP:** Нет eval suite — benchmark из N stories с известным baseline
-- ⬜ **GAP:** Pilot Odyssey Wave 1a (production-mode end-to-end) не запущен
+- ⬜ **GAP:** Production-mode end-to-end pilot на реальном target BMad-проекте не запущен
 - 🟡 Red-team/security: lesson `code_review_pipeline_gaps` зафиксирован (4 gate'а identified, не встроены)
 - ⬜ R3 security-auditor minors: canonicalize+allowed-root для `--lessons-dir` / `--skills-root` / `--orchestrator-home`
 - ⬜ Acceptance criteria для exit из фазы не определены
 
 ### Фаза 4 — Deploy ⬜ NOT STARTED
 
-Зависит от закрытия Test & Release. Deploy = регулярные production runs на Odyssey, потом на других BMad-проектах.
+Зависит от закрытия Test & Release. Deploy = регулярные production runs на любых target BMad-проектах (configurable `--project-root`).
 
 ### Фаза 5 — Monitor & Improve ⬜ NOT STARTED
 
@@ -112,25 +112,21 @@
 - P5 formalised (max_review_iterations cap + gate + payload + 11 tests)
 - Success metrics зафиксированы
 
-### Открыть фазу 3 Test & Release
+### Фаза 3 Test & Release 🟡 IN PROGRESS
 
-1. **Eval suite** (1-2 сессии) — 5-10 stories разной сложности
-   - Текущий блокер: Antares не готов для production-pilot → используем synthetic stories или Odyssey backlog
-   - Метрики: pass rate, token cost, время, escalation rate, review_iteration_p95
-   - Этот же suite валидирует success metrics (см. раздел 1 таблица)
-2. **Auto-elicitation policy engine** (1-2 сессии) — превратить `elicitation-policy.example.yaml` + 8 policy YAML в LLM-driven decision maker
-   - `elicitation-router` skill уже wired (slot для `WORKER_ELICITATION` event)
-   - Нужно: prompt + few-shot для LLM-driven decisions поверх существующих policy YAML
-3. **R3 security minors** (0.3 сессии) — canonicalize+allowed-root для `--lessons-dir` / `--skills-root` / `--orchestrator-home`
-4. **4 security gates** из lesson `code_review_pipeline_gaps`
-5. **Wire worker → review_iteration** (0.5 сессии) — bmad-auto-dev runner.sh + bmad-code-review должны эмитить `review_iteration` в WORKER_COMPLETED payload (сейчас orchestrator принимает поле, но worker его пока не пишет — single-pass default работает)
+- ✅ **Step A: Eval harness + 5 synthetic cases** (2026-05-18) — `bmad_orchestrator.eval` module (metrics + runner) + CLI `bmad-orchestrator eval run` + 28 unit-тестов + 5 cases (2 easy + 2 medium + 1 hard) в `evals/cases/`. Mock-mode baseline: 5/5 PASS (100%)
+- ⬜ **Step B: Real BMad stories** — добавить 10+ реальных stories из target BMad-проекта (configurable `--project-root`, не привязано к конкретному проекту) в `evals/cases/`, прогнать в `--mode real`, baseline cost/latency
+- ⬜ **Auto-elicitation policy engine** (1-2 сессии) — `elicitation-router` skill wired, нужна LLM-driven логика поверх 8 policy YAML
+- ⬜ **R3 security minors** (0.3 сессии) — canonicalize+allowed-root для `--lessons-dir` / `--skills-root` / `--orchestrator-home`
+- ⬜ **4 security gates** из lesson `code_review_pipeline_gaps`
+- ⬜ **Wire worker → review_iteration** (0.5 сессии) — bmad-auto-dev runner.sh должен эмитить `review_iteration` в WORKER_COMPLETED payload (orchestrator принимает поле, worker его пока не пишет)
 
 ### Фаза 4 — Deploy (после закрытия Phase 3)
 
 9. **Supervisor LLM-loop + Terminal TUI** (3-4 сессии) — управление halts/elicitations без ручного оператора
    - Превращает агента в standalone — может работать без сидящего рядом человека
    - Зависимость: auto-elicitation engine (#6) должен быть готов
-10. **Odyssey Wave 1a production pilot** — реальный target проект
+10. **Production pilot на реальном target BMad-проекте** — выбор проекта остаётся на момент запуска (project-agnostic)
 
 ### Фаза 5 — Monitor & Improve
 
@@ -156,7 +152,7 @@
 - **Vision:** memory `project_vision_master_bmad_builder.md`
 - **Progress tracker:** `.claude/memory/progress.md`
 - **Project status:** memory `project_milestone_parallelism_initiatives_complete.md` (post `6e8a18e`)
-- **Current pilot artifact:** Antares Story 1.1 commit `9e84da6`
+- **Current pilot artifact:** Story 1.1 commit `9e84da6`
 - **Backlog memories:**
   - `project_backlog_orchestrator_project_agnostic.md`
   - `project_backlog_parallelism_presets.md`
@@ -169,6 +165,6 @@
 
 ---
 
-**Last updated:** 2026-05-18 (v3 — Phase 2 closed)
-**Status:** v3 — Phase 2 ✅ DONE. Метрики зафиксированы, P5 формализован (11 tests), регрессионные тесты для Pilot 2 патчей (10 tests), pytest stability hardened. Tests: 1447 PASS. Phase 3 entry: eval suite + auto-elicitation engine.
+**Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
+**Status:** v5 — project-agnostic. Phase 3 Step A ✅ (eval harness + 5 synthetic cases mock-mode 100% PASS, 28 new tests). Tests: 1475 PASS. Next: Step B (real BMad stories из любого target проекта) или Auto-elicitation engine.
 **Owner:** user + Claude orchestrator
