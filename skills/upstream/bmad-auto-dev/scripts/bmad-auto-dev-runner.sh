@@ -340,16 +340,25 @@ while (( iter < MAX_ITER )); do
   log "===== iteration $iter / $MAX_ITER ====="
 
   # Stage 1 — pick story ---------------------------------------------------
-  log "Stage 1 — selecting next ready story"
-  next_json="$(python3 "$DEP_ANALYZER" --next)"
-  echo "  $next_json"
-  story_id="$(echo "$next_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("story_id",""))')"
-  all_done="$(echo "$next_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("1" if d.get("all_done") else "")')"
-  if [[ -n "$all_done" ]]; then
-    log "Stage 1 — all stories done; nothing to do"
-    exit 0
+  # Patch Z 2026-05-18: respect ORCHESTRATOR_WORKER_STORY_ID when set by the
+  # orchestrator. The orchestrator's DAG planner already chose the story; the
+  # runner's independent select_next would otherwise override the choice (e.g.
+  # pick the next backlog story instead of the marked ready-for-dev spike).
+  if [[ -n "${ORCHESTRATOR_WORKER_STORY_ID:-}" ]]; then
+    story_id="$ORCHESTRATOR_WORKER_STORY_ID"
+    log "Stage 1 — story_id forced by orchestrator: $story_id"
+  else
+    log "Stage 1 — selecting next ready story"
+    next_json="$(python3 "$DEP_ANALYZER" --next)"
+    echo "  $next_json"
+    story_id="$(echo "$next_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("story_id",""))')"
+    all_done="$(echo "$next_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("1" if d.get("all_done") else "")')"
+    if [[ -n "$all_done" ]]; then
+      log "Stage 1 — all stories done; nothing to do"
+      exit 0
+    fi
+    [[ -n "$story_id" ]] || { warn "dependency_analyzer returned no story_id"; exit 4; }
   fi
-  [[ -n "$story_id" ]] || { warn "dependency_analyzer returned no story_id"; exit 4; }
 
   # Stage 2 — branch creation --------------------------------------------
   # Patch Y 2026-05-18: orchestrator-mode bypass. When invoked from
