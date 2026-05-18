@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -316,6 +317,76 @@ class TestP1BTimeout:
         assert outcome.per_project["fast"].completed is True
         assert outcome.per_project["slow"].completed is False
         assert "timeout" in (outcome.per_project["slow"].error or "")
+
+
+# ── P1-F: auto-split fallback resets worktree ──────────────────────────────
+
+
+class TestP1FAutoSplitReset:
+    """``_reset_worktree_to_base`` restores worktree HEAD to ``base_sha``."""
+
+    def test_reset_drops_extra_commits(self, tmp_path: Path) -> None:
+        from bmad_orchestrator.agent.run import _reset_worktree_to_base
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        }
+
+        def run(*args: str) -> str:
+            r = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env,
+            )
+            return r.stdout.strip()
+
+        run("init", "-q")
+        run("config", "commit.gpgsign", "false")
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        run("add", "a.txt")
+        run("commit", "-q", "-m", "base")
+        base_sha = run("rev-parse", "HEAD")
+
+        # Simulate partial sub-story commits landed by auto_split.
+        for i in range(2):
+            (repo / f"sub{i}.txt").write_text(f"sub{i}\n", encoding="utf-8")
+            run("add", f"sub{i}.txt")
+            run("commit", "-q", "-m", f"sub story {i}")
+        assert run("rev-parse", "HEAD") != base_sha
+        assert (repo / "sub0.txt").exists()
+
+        _reset_worktree_to_base(repo, base_sha)
+
+        assert run("rev-parse", "HEAD") == base_sha
+        assert not (repo / "sub0.txt").exists()
+        assert not (repo / "sub1.txt").exists()
+
+    def test_reset_handles_missing_base_sha(self, tmp_path: Path) -> None:
+        from bmad_orchestrator.agent.run import _reset_worktree_to_base
+
+        # Empty base_sha must no-op (logged warning, not raise).
+        _reset_worktree_to_base(tmp_path, "")
+
+    def test_reset_handles_invalid_sha(self, tmp_path: Path) -> None:
+        from bmad_orchestrator.agent.run import _reset_worktree_to_base
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(
+            ["git", "-C", str(repo), "init", "-q"],
+            check=True,
+            capture_output=True,
+        )
+        # Bogus sha — helper must log + return, not raise.
+        _reset_worktree_to_base(repo, "deadbeef" * 5)
 
 
 __all__: list[str] = []

@@ -1066,6 +1066,14 @@ async def _run_real_pilot_body(
                         error=f"{type(exc).__name__}: {exc}",
                     )
                     auto_split_outcome = None
+                    # Review finding P1-F — auto_split_and_execute may have
+                    # already committed K of N sub-stories to ``branch_name``
+                    # before raising. Without a hard reset to ``base_sha`` the
+                    # legacy spawn below would land its commits on top of a
+                    # partial sub-story history — frankencommit that the
+                    # merge-gate may rubber-stamp. Reset to the original DAG
+                    # batch base so the legacy worker sees a clean slate.
+                    _reset_worktree_to_base(wt, base_sha)
                 if auto_split_outcome is not None and auto_split_outcome.succeeded:
                     squashed_sha = (
                         auto_split_outcome.squash.squashed_sha
@@ -1245,6 +1253,61 @@ def _persist_project_memory_snapshot(
         }
     )
     return save_project_memory(fresh, orchestrator_home=orchestrator_home)
+
+
+def _reset_worktree_to_base(worktree: Path, base_sha: str) -> None:
+    """Hard-reset ``worktree`` HEAD back to ``base_sha``.
+
+    Used by review finding P1-F's auto-split fallback path: if
+    ``auto_split_and_execute`` committed K of N sub-stories before raising,
+    the branch is left with partial history. Resetting before the legacy
+    spawn lands its commits ensures the merge-gate never sees a
+    frankencommit of half-decomposition + legacy worker output.
+
+    Best-effort: a failure here is logged (not raised) because the legacy
+    fallback should still attempt — a poisoned branch is better surfaced as
+    a review gate rejection than as a pilot abort.
+    """
+    if not base_sha:
+        log.warning(
+            "auto_split_fallback_no_base_sha",
+            worktree=str(worktree),
+        )
+        return
+    git_bin = shutil.which("git")
+    if git_bin is None:
+        log.warning(
+            "auto_split_fallback_reset_no_git",
+            worktree=str(worktree),
+        )
+        return
+    try:
+        result = subprocess.run(  # noqa: S603
+            [git_bin, "-C", str(worktree), "reset", "--hard", base_sha],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            log.warning(
+                "auto_split_fallback_reset_failed",
+                worktree=str(worktree),
+                base_sha=base_sha,
+                stderr=result.stderr[:400],
+            )
+        else:
+            log.info(
+                "auto_split_fallback_reset_ok",
+                worktree=str(worktree),
+                base_sha=base_sha,
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        log.warning(
+            "auto_split_fallback_reset_error",
+            worktree=str(worktree),
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 async def _ensure_git_worktree(
