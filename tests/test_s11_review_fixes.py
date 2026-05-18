@@ -19,8 +19,10 @@ from pathlib import Path
 import pytest
 
 from bmad_orchestrator.cli.main import (
+    _SUBPROCESS_ENV_ALLOWLIST,
     _drain_capped,
     _read_spend_report,
+    _subprocess_env,
 )
 from bmad_orchestrator.runtime.multi_run import (
     MultiProjectPlan,
@@ -150,6 +152,60 @@ class TestP1CStreamCaps:
 
     async def test_drain_capped_handles_none(self) -> None:
         assert await _drain_capped(None, cap_bytes=64) == b""
+
+
+# ── P1-D: env allow-list ────────────────────────────────────────────────────
+
+
+class TestP1DEnvAllowlist:
+    """``_subprocess_env`` filters orchestrator-internal env from child."""
+
+    def test_bmad_disable_budget_not_propagated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("BMAD_DISABLE_BUDGET", "1")
+        monkeypatch.setenv("BMAD_AUTO_SPLIT", "1")
+        monkeypatch.setenv("BMAD_PROJECTS_REGISTRY", "/tmp/test.yaml")
+        monkeypatch.setenv("BMAD_REQUIRE_CGROUP", "1")
+        env = _subprocess_env(tmp_path / "slot", tmp_path / "spend.json")
+        assert "BMAD_DISABLE_BUDGET" not in env
+        assert "BMAD_AUTO_SPLIT" not in env
+        assert "BMAD_PROJECTS_REGISTRY" not in env
+        assert "BMAD_REQUIRE_CGROUP" not in env
+
+    def test_orchestrator_target_and_spend_report_set(
+        self, tmp_path: Path
+    ) -> None:
+        env = _subprocess_env(tmp_path / "p", tmp_path / "spend.json")
+        assert env["ORCHESTRATOR_TARGET_PROJECT"] == str(tmp_path / "p")
+        assert env["BMAD_MULTI_SPEND_REPORT"] == str(tmp_path / "spend.json")
+
+    def test_allowlist_keys_pass_through(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        monkeypatch.setenv("HOME", "/home/test")
+        monkeypatch.setenv("LANG", "en_US.UTF-8")
+        env = _subprocess_env(tmp_path, tmp_path / "s.json")
+        assert env["PATH"] == "/usr/bin:/bin"
+        assert env["HOME"] == "/home/test"
+        assert env["LANG"] == "en_US.UTF-8"
+
+    def test_anthropic_api_key_passthrough(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        env = _subprocess_env(tmp_path, tmp_path / "s.json")
+        assert env["ANTHROPIC_API_KEY"] == "sk-ant-test"
+
+    def test_allowlist_excludes_bmad_prefix(self) -> None:
+        for key in _SUBPROCESS_ENV_ALLOWLIST:
+            assert not key.startswith("BMAD_"), (
+                f"allowlist must not include BMAD_* keys (got {key!r})"
+            )
+        assert not any(
+            key.startswith("ORCHESTRATOR_") for key in _SUBPROCESS_ENV_ALLOWLIST
+        )
 
 
 # ── P1-B: per-child timeout ─────────────────────────────────────────────────

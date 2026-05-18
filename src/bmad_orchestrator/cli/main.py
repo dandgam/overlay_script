@@ -571,6 +571,52 @@ def resume_project(
 _SUBPROCESS_STDERR_CAP_BYTES = 64 * 1024
 
 
+# Review finding P1-D — env allow-list for child subprocess. Mirror of
+# ``runtime.sandbox._SANDBOX_DEFAULT_ENV_ALLOWLIST`` discipline: never inherit
+# orchestrator-internal env (``BMAD_DISABLE_BUDGET``, ``BMAD_AUTO_SPLIT``,
+# ``BMAD_PROJECTS_REGISTRY``, ``BMAD_REQUIRE_CGROUP``…) into a project worker
+# so a parent-shell flag cannot silently disable the very gates ``multi`` was
+# added to enforce. The only ``BMAD_*`` overrides allowed are the ones this
+# module *explicitly* sets per slot — see ``_subprocess_env``.
+_SUBPROCESS_ENV_ALLOWLIST: frozenset[str] = frozenset({
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TERM",
+    "SHELL",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
+    "XDG_RUNTIME_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "TMPDIR",
+})
+
+
+def _subprocess_env(slot_path: Path, spend_report: Path) -> dict[str, str]:
+    """Build the env for a per-project subprocess from a strict allow-list.
+
+    Per review finding P1-D: orchestrator-internal env (``BMAD_*``,
+    ``ORCHESTRATOR_*``) is *not* propagated. The two slot-scoped variables
+    the child genuinely needs (``ORCHESTRATOR_TARGET_PROJECT`` and
+    ``BMAD_MULTI_SPEND_REPORT``) are appended explicitly.
+    """
+    env: dict[str, str] = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _SUBPROCESS_ENV_ALLOWLIST
+    }
+    env["ORCHESTRATOR_TARGET_PROJECT"] = str(slot_path)
+    env["BMAD_MULTI_SPEND_REPORT"] = str(spend_report)
+    return env
+
+
 async def _drain_capped(
     stream: asyncio.StreamReader | None, cap_bytes: int
 ) -> bytes:
@@ -613,9 +659,7 @@ async def _subprocess_runner(
     spend_report = Path(
         tempfile.mkdtemp(prefix=f"bmad-multi-{slot.slug}-")
     ) / "spend.json"
-    env = dict(os.environ)
-    env["ORCHESTRATOR_TARGET_PROJECT"] = str(slot.path)
-    env["BMAD_MULTI_SPEND_REPORT"] = str(spend_report)
+    env = _subprocess_env(slot.path, spend_report)
     args = [
         sys.executable, "-m", "bmad_orchestrator.cli", "run",
         "--project", slot.slug,
