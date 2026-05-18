@@ -39,21 +39,6 @@
 
 ### Pending
 
-- **id:** S2
-  **title:** #2 verdict event runner ↔ orchestrator wiring
-  **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #2
-  **depends_on:** []
-  **acceptance:**
-    - Mock pilot → events.jsonl contains verdict=approve after WORKER_FINISHED
-    - integration branch creation triggered on approve via merge_to_integration_subscriber
-    - request_changes event on reject with parseable reason
-    - +9 tests in test_verdict_event_emission.py
-  **safety_gates:**
-    - Touches agent/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh — banned-phrase gate must NOT block legitimate verdict text
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S3
   **title:** #3 autofix routing policy + #8 subprocess timeout adaptive
   **surface:** backend-python
@@ -140,28 +125,40 @@
 
 ### Current
 
-- **id:** S1
-  **title:** #1 mark-done ID normalization + #9 spawned/succeeded counter split
+- **id:** S2
+  **title:** #2 verdict event runner ↔ orchestrator wiring
   **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §1 #1 + §3 #9
+  **spec_section:** spec/spec_pilot_findings_closure.md §1 #2
   **depends_on:** []
   **acceptance:**
-    - normalize_story_id utility available (new or existing)
-    - mark-done lookup uses normalized id; sprint-status entries flip to "done" on real kebab keys
-    - real_pilot_done log line shows `spawned=X succeeded=Y failed=Z`
-    - sprint-status correctly updated only on successful stories
-    - Resume after interrupted pilot does NOT re-spawn done-stories
-    - +7 + +4 = +11 tests
-  **safety_gates: []
+    - Mock pilot → events.jsonl contains verdict=approve after WORKER_FINISHED
+    - integration branch creation triggered on approve via merge_to_integration_subscriber
+    - request_changes event on reject with parseable reason
+    - +9 tests in test_verdict_event_emission.py
+  **safety_gates:**
+    - Touches agent/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh — banned-phrase gate must NOT block legitimate verdict text
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 (bootstrap)
+  **started:** 2026-05-18 22:13 UTC (auto-promoted after S1)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
-(none)
+
+- **id:** S1
+  **title:** #1 mark-done ID normalization + #9 spawned/succeeded counter split
+  **completed:** 2026-05-18 22:13 UTC
+  **commit:** 7edc9bb1c25b6efeb1e434c961e088be406c1331
+  **files_changed:** 4
+  **tests_passed:** 1883 (was 1860 baseline, +23 incl. +12 new spec tests; target +11)
+  **decisions_made:**
+    - Added `resolve_sprint_status_key` as a sibling to existing `normalize_story_id` in runtime/bmad_format.py (different semantics — sprint-key lookup vs. canonical dotted) instead of overloading the existing function.
+    - Changed `_tail_and_emit_completion` return type from `None` to `str` outcome tag (`completed|failed|halted|silent_failure`) — non-breaking since all existing callers ignore the return.
+    - Kept legacy `stories=` key in the `real_pilot_done` log line for backwards-compat alongside new `spawned/succeeded/failed` keys.
+    - Mock pilot mark-done loop left unchanged (out of spec scope).
+  **deferred_items:**
+    - (none)
 
 ## Safety Gates Triggered
 (none)
@@ -170,11 +167,14 @@
 (none)
 
 ## Decisions Log
-(none)
+
+[2026-05-18 22:13 UTC] S1 — resolver lives in `runtime/bmad_format.py` (not new `agent/story_id.py`) because the file already owns the kebab/dotted regex toolkit; adding `agent/story_id.py` would split related helpers across two modules.
 
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 8 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure, runtime=loop_wrapper, delay=300s, auto_merge=false.
+
+[2026-05-18 22:13 UTC] S1 done, runtime=loop_wrapper — wrapper handles next iteration. commit=7edc9bb, tests 1883 PASS, ruff+mypy clean. S2 promoted to Current.
 
 ## Final Report
 (empty)
