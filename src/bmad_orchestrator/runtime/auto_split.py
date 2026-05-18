@@ -287,7 +287,14 @@ async def auto_split_and_execute(
 
     try:
         parsed = _parse_decomposer_output(raw)
-        sub_stories = validate_decomposition(parsed, parent_id=parent_id)
+        # Pass parent_touches_files so the H-4 parent-subset gate
+        # actually fires; without it the union-⊆-parent check is dead code.
+        parent_files = list(story.get("touches_files") or []) or None
+        sub_stories = validate_decomposition(
+            parsed,
+            parent_id=parent_id,
+            parent_touches_files=parent_files,
+        )
     except DecompositionError as exc:
         log.warning(
             "auto_split_validation_failed",
