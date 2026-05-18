@@ -24,6 +24,7 @@ env/
 
 # Claude Code memory bank (per-worktree, не коммитим)
 .claude/memory/
+.claude/worktrees/
 
 # Auto-loop runtime logs (генерируются launcher.sh / watchdog.sh)
 .claude/auto-loop-*.log
