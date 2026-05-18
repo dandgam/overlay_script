@@ -93,7 +93,7 @@ async def test_run_eval_suite_smoke_one_case(tmp_path: Path) -> None:
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
 
-    results, agg = await run_eval_suite(
+    results, agg, _ = await run_eval_suite(
         evals_root=evals_root,
         worktree_root=worktree_root,
         mode="mock",
@@ -140,7 +140,7 @@ async def test_run_eval_suite_filter_by_case_id(tmp_path: Path) -> None:
 
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
-    results, _ = await run_eval_suite(
+    results, _, _extra = await run_eval_suite(
         evals_root=evals_root,
         worktree_root=worktree_root,
         case_filter="TC-002",
@@ -201,7 +201,7 @@ async def test_save_report_writes_json(tmp_path: Path) -> None:
     )
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
-    results, agg = await run_eval_suite(
+    results, agg, _ = await run_eval_suite(
         evals_root=evals_root,
         worktree_root=worktree_root,
         mode="mock",

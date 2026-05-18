@@ -108,6 +108,21 @@ def eval_run(
         "--fail-under",
         help="Exit non-zero if pass_rate falls below this threshold (default 0.85).",
     ),
+    repeat: int = typer.Option(
+        1,
+        "--repeat",
+        help="Run each case K times. When K > 1, reports pass@k and pass^k metrics.",
+        min=1,
+    ),
+    metric: str | None = typer.Option(
+        None,
+        "--metric",
+        help=(
+            "Metric selector for repeat-mode output. "
+            "'pass_caret_k' = production consistency (all k pass). "
+            "Default: print both pass@k and pass^k when --repeat > 1."
+        ),
+    ),
 ) -> None:
     """Run the eval suite, print a table, save JSON report, exit-code = gate."""
     import time as _time
@@ -123,17 +138,18 @@ def eval_run(
     worktree_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        results, aggregate = run_eval_suite_sync(
+        results, aggregate, extra_metrics = run_eval_suite_sync(
             evals_root=evals_root_path,
             worktree_root=worktree_root,
             case_filter=case,
             mode=mode,
+            repeat=repeat,
         )
     except (ValueError, FileNotFoundError) as exc:
         console.print(f"[red]eval failed: {exc}[/red]")
         raise typer.Exit(2) from exc
 
-    table = Table(title=f"Eval suite — {len(results)} cases ({mode} mode)")
+    table = Table(title=f"Eval suite — {len(results)} cases ({mode} mode, repeat={repeat})")
     table.add_column("id", style="bold")
     table.add_column("level")
     table.add_column("passed")
@@ -163,6 +179,19 @@ def eval_run(
     summary.add_row("cost_per_story_median", f"${aggregate.cost_per_story_median:.4f}")
     summary.add_row("cost_p95", f"${aggregate.cost_p95:.4f}")
     summary.add_row("latency_p95_ms", f"{aggregate.latency_p95_ms:.0f}")
+
+    # Phase 4 hardening #7 — pass^k metrics when --repeat > 1.
+    if extra_metrics and repeat > 1:
+        k = extra_metrics.get("k", repeat)
+        pak = extra_metrics.get("pass_at_k", 0.0)
+        pck = extra_metrics.get("pass_caret_k", 0.0)
+        show_pak = metric is None or metric == "pass_at_k"
+        show_pck = metric is None or metric == "pass_caret_k"
+        if show_pak:
+            summary.add_row(f"pass@{k}", f"{pak:.2%}")
+        if show_pck:
+            summary.add_row(f"pass^{k} (consistency)", f"{pck:.2%}")
+
     console.print(summary)
 
     # Persist JSON report.

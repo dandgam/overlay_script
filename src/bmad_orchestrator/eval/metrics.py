@@ -137,6 +137,56 @@ def case_passed(
     return (not reasons, reasons)
 
 
+def pass_at_k(results_per_case: dict[str, list[bool]], k: int) -> float:
+    """Compute pass@k: fraction of cases where at least 1 of k attempts passed.
+
+    Standard eval metric — measures whether the system *can* solve the case
+    (at least once out of k tries). Optimistic: rewards any success.
+
+    Args:
+        results_per_case: dict mapping case_id → list of pass/fail booleans.
+            Each list must have at least ``k`` entries; extra entries are ignored.
+        k: number of attempts to consider per case.
+
+    Returns:
+        Float in [0.0, 1.0]. Empty input → 0.0.
+    """
+    if not results_per_case or k <= 0:
+        return 0.0
+    passed = 0
+    for results in results_per_case.values():
+        attempts = results[:k] if len(results) >= k else results
+        if any(attempts):
+            passed += 1
+    return passed / len(results_per_case)
+
+
+def pass_consistency_at_k(results_per_case: dict[str, list[bool]], k: int) -> float:
+    """Compute pass^k: fraction of cases where ALL k attempts passed.
+
+    Stricter production-consistency metric — measures whether the system
+    *reliably* solves the case (every attempt of k tries). Punishes any failure.
+
+    pass^k ≤ pass@k always (math sanity invariant).
+
+    Args:
+        results_per_case: dict mapping case_id → list of pass/fail booleans.
+            Each list must have at least ``k`` entries; extra entries are ignored.
+        k: number of attempts to consider per case.
+
+    Returns:
+        Float in [0.0, 1.0]. Empty input → 0.0.
+    """
+    if not results_per_case or k <= 0:
+        return 0.0
+    passed = 0
+    for results in results_per_case.values():
+        attempts = results[:k] if len(results) >= k else results
+        if all(attempts):
+            passed += 1
+    return passed / len(results_per_case)
+
+
 def aggregate_results(results: list[CaseResult]) -> AggregateMetrics:
     """Roll up per-case outcomes into batch metrics."""
     total = len(results)

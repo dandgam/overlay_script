@@ -28,6 +28,8 @@ from bmad_orchestrator.eval.metrics import (
     CaseResult,
     aggregate_results,
     case_passed,
+    pass_at_k,
+    pass_consistency_at_k,
 )
 from bmad_orchestrator.runtime.worker_spawn import spawn_worker, tail_jsonl_events
 
@@ -132,8 +134,25 @@ async def run_eval_suite(
     worktree_root: Path,
     case_filter: str | None = None,
     mode: str = "mock",
-) -> tuple[list[CaseResult], AggregateMetrics]:
-    """Run every case in ``evals_root/cases.yaml``; aggregate; return both."""
+    repeat: int = 1,
+) -> tuple[list[CaseResult], AggregateMetrics, dict[str, Any]]:
+    """Run every case in ``evals_root/cases.yaml``; aggregate; return results + metrics.
+
+    Args:
+        repeat: number of times to run each case. When > 1, pass@k and pass^k
+            metrics are computed over all repetitions and included in the extra
+            metrics dict returned as the third element of the tuple.
+
+    Returns:
+        (results, aggregate, extra_metrics) where ``extra_metrics`` is empty when
+        ``repeat == 1`` and contains ``pass_at_k`` / ``pass_caret_k`` when
+        ``repeat > 1``.
+    """
+    import os
+
+    if repeat < 1:
+        raise ValueError(f"repeat must be >= 1, got {repeat}")
+
     manifest = evals_root / "cases.yaml"
     cases = load_cases(manifest)
     if case_filter:
@@ -143,22 +162,28 @@ async def run_eval_suite(
 
     # Reset target_project env so worker_jsonl_path lands inside the eval root.
     # Each case's worktree is its own jsonl namespace.
-    import os
-
     saved = os.environ.get("ORCHESTRATOR_TARGET_PROJECT")
     saved_wave = os.environ.get("BMAD_CURRENT_WAVE")
     os.environ["ORCHESTRATOR_TARGET_PROJECT"] = str(worktree_root)
     os.environ["BMAD_CURRENT_WAVE"] = "eval"
     try:
         results: list[CaseResult] = []
-        for case in cases:
-            res = await _run_one_case(
-                case,
-                evals_root=evals_root,
-                worktree_root=worktree_root,
-                mode=mode,
-            )
-            results.append(res)
+        # results_per_case tracks pass/fail for each repetition per case.
+        results_per_case: dict[str, list[bool]] = {}
+
+        for _repetition in range(repeat):
+            for case in cases:
+                case_id = str(case["id"])
+                res = await _run_one_case(
+                    case,
+                    evals_root=evals_root,
+                    worktree_root=worktree_root,
+                    mode=mode,
+                )
+                results.append(res)
+                if case_id not in results_per_case:
+                    results_per_case[case_id] = []
+                results_per_case[case_id].append(res.passed)
     finally:
         if saved is None:
             os.environ.pop("ORCHESTRATOR_TARGET_PROJECT", None)
@@ -170,7 +195,18 @@ async def run_eval_suite(
             os.environ["BMAD_CURRENT_WAVE"] = saved_wave
 
     aggregate = aggregate_results(results)
-    return results, aggregate
+
+    # Compute pass^k metrics when repeat > 1.
+    extra_metrics: dict[str, Any] = {}
+    if repeat > 1:
+        extra_metrics["pass_at_k"] = pass_at_k(results_per_case, k=repeat)
+        extra_metrics["pass_caret_k"] = pass_consistency_at_k(results_per_case, k=repeat)
+        extra_metrics["k"] = repeat
+        extra_metrics["results_per_case"] = {
+            cid: list(bools) for cid, bools in results_per_case.items()
+        }
+
+    return results, aggregate, extra_metrics
 
 
 def save_report(
@@ -198,13 +234,15 @@ def run_eval_suite_sync(
     worktree_root: Path,
     case_filter: str | None = None,
     mode: str = "mock",
-) -> tuple[list[CaseResult], AggregateMetrics]:
+    repeat: int = 1,
+) -> tuple[list[CaseResult], AggregateMetrics, dict[str, Any]]:
     return asyncio.run(
         run_eval_suite(
             evals_root=evals_root,
             worktree_root=worktree_root,
             case_filter=case_filter,
             mode=mode,
+            repeat=repeat,
         )
     )
 
