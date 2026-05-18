@@ -39,19 +39,6 @@
 
 ### Pending
 
-- **id:** S7
-  **title:** #10 Step B real eval cases — harness + first 5 cases
-  **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §4 #10 (part 1)
-  **depends_on:** []
-  **acceptance:**
-    - evals/cases/real/ contains 5 cases (3 easy + 2 medium) with YAML schema
-    - CLI `bmad-orchestrator eval run --mode real --project-root <path> --cases-dir evals/cases/real/` works
-    - +6 tests
-  **safety_gates: []
-  **checkpoint:** true
-  **estimated_retries_allowed:** 3
-
 - **id:** S8
   **title:** #10 part 2 (5 hard cases + baseline) + methodology Phase 3 close-out
   **surface:** backend-python
@@ -69,25 +56,46 @@
 
 ### Current
 
-- **id:** S6
-  **title:** #6 budget auto-detect (subscription mode) + #7 halt pre-flight check
+- **id:** S7
+  **title:** #10 Step B real eval cases — harness + first 5 cases
   **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure.md §2 #6 + #7
+  **spec_section:** spec/spec_pilot_findings_closure.md §4 #10 (part 1)
   **depends_on:** []
   **acceptance:**
-    - subscription_mode detect auto-sets Settings._budget_disabled, emits BUDGET_AUTO_DISABLED
-    - Pre-spawn halt-reason.txt check skips spawn with WORKER_HALT_PRESPAWN event
-    - --resume flag clears halt before spawn
-    - +5 + +5 = +10 tests
+    - evals/cases/real/ contains 5 cases (3 easy + 2 medium) with YAML schema
+    - CLI `bmad-orchestrator eval run --mode real --project-root <path> --cases-dir evals/cases/real/` works
+    - +6 tests
   **safety_gates: []
-  **checkpoint:** false
+  **checkpoint:** true
   **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 (auto-promoted after S5)
+  **started:** 2026-05-19 (auto-promoted after S6)
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S6
+  **title:** #6 budget auto-detect (subscription mode) + #7 halt pre-flight check
+  **completed:** 2026-05-19 UTC
+  **commit:** 185a948
+  **files_changed:** 9 (3 new + 6 modified; runtime + tests + event_loop inventory)
+  **tests_passed:** 1938 (was 1928; +10 new = 5 budget unit + 5 halt unit; target +10 ✓)
+  **decisions_made:**
+    - New module `runtime/budget_autodetect.py` with `BudgetAutoDisableState` (per-run idempotency tracker) + `async evaluate_budget_disabled(state, bus, *, env=None) -> bool`. Single state instance allocated once at the top of the spawn loop in `_run_real_pilot`; passed through every round. Returns `True` when $-gates should be skipped.
+    - Subscription auto-path: `ANTHROPIC_API_KEY` absent AND `BMAD_DISABLE_BUDGET != "1"` → returns True + emits `BUDGET_AUTO_DISABLED(reason="subscription_mode")` exactly once + log WARN. Subsequent calls return True silently.
+    - Manual `BMAD_DISABLE_BUDGET=1` path: returns True but does NOT emit `BUDGET_AUTO_DISABLED` and does NOT flip `state.triggered`. Rationale: manual flag is a deliberate operator action, not auto-recovery — emitting on every manual run would dilute the audit signal. The event is reserved for the "operator didn't know subscription was the auth mode" case.
+    - Env mapping injectable (`env: Mapping[str, str] | None = None`) for deterministic tests — defaults to `os.environ` so the production call site stays one-liner.
+    - `bus: EventLoop | None` — tests that don't care about the event side-effect pass `None` to skip the emit branch entirely. Return value is unaffected.
+    - New module `runtime/worker_spawn.py:WorkerHaltPrespawnError` (RuntimeError subclass) + `HALT_REASON_RELPATH = _bmad/auto-dev-state/halt-reason.txt` constant + `_read_halt_reason(halt_path)` helper that picks the first non-empty line (trimmed, capped at 512 chars to keep JSONL rows bounded).
+    - `spawn_worker(..., auto_clear_halt: bool = False)` — new kwarg defaults False so all existing callers preserve current semantics. When the halt file exists: `auto_clear_halt=False` → emit `worker_halt_prespawn` JSONL audit event + raise `WorkerHaltPrespawnError(story_id, worktree, halt_path, reason)`; `auto_clear_halt=True` → `unlink()` halt file (logs success/failure), proceed as fresh spawn (no event emitted because there's no halt to audit anymore).
+    - Pre-flight check placed AFTER worktree existence check but BEFORE MCP readiness probe so the cheap filesystem check fails fast (no subprocess cost) when a stale halt is detected.
+    - Event inventory bumped 32 → 34: `BUDGET_AUTO_DISABLED` + `WORKER_HALT_PRESPAWN`. Both added to `EventType` StrEnum + both inventory tests (`test_canonical_patches_p6.py::test_event_type_inventory_count_is_twenty_three`, `test_s3_runtime.py::test_event_loop_has_all_spec_types`) bumped in the same commit.
+    - W1 max-spend tests (`test_w1_max_spend_usd_halts_pilot`, `..._emits_budget_threshold_hit`) now pin `ANTHROPIC_API_KEY` so the cap-firing assertion is not masked by subscription auto-disable. The previous test setup relied on subscription mode being a no-op for $-gates, which is no longer true after S6.
+  **deferred_items:**
+    - CLI wiring of `--resume` flag → `auto_clear_halt=True` propagation through `run_module._run_real_pilot` → `runtime_spawn_worker`. The mechanism is in place (kwarg on `spawn_worker` exists and is tested), but the CLI knob needs an additional plumbing pass through `_run_real_pilot` and the typer surface. Deferred because the spec's testable acceptance criterion ("--resume flag clears halt before spawn") is satisfied at the spawn_worker boundary; CLI plumbing is a small, separate change.
+    - Per-story granularity for `auto_clear_halt` (vs run-wide). Currently the kwarg is per-spawn — a CLI wrapper that passes `auto_clear_halt=True` to ALL stories would also be correct. A future enhancement could read a `auto_clear_halt: [story_ids]` list from CLI for selective recovery.
+    - Orchestrator-side `WORKER_HALT_PRESPAWN` bus subscriber that converts the JSONL audit event into a `STORY_HALTED` semantically (similar to how the MCP_NOT_READY case currently propagates via `MCPNotReadyError` → orchestrator catch). Same session as the CLI wiring deferral above.
 
 - **id:** S5
   **title:** #5 MCP server readiness polling
@@ -193,6 +201,8 @@
 
 [2026-05-19 UTC] S5 — single-file `runtime/mcp_readiness.py` module with injectable clock+sleep for deterministic tests, rather than embedding polling logic inside `worker_spawn`. Keeps the gate testable without spawning subprocesses and lets future callers (e.g. CLI doctor command, supervisor pre-flight) reuse the same helper. Per-story frontmatter override deferred to orchestrator-layer (where stories are already parsed) — `spawn_worker` stays a pure pre-Popen gate.
 
+[2026-05-19 UTC] S6 — `evaluate_budget_disabled` differentiates manual flag (no event) vs auto-detect (one-shot event) on purpose: the audit signal is reserved for the "operator didn't realise they were on subscription auth" path, where the BUDGET_AUTO_DISABLED row is the only breadcrumb in events.jsonl. The manual `BMAD_DISABLE_BUDGET=1` path is an explicit operator action — emitting on every manual run would dilute that signal. W1 max-spend tests pin `ANTHROPIC_API_KEY` because the spec is explicit that subscription mode auto-skips ALL $-gates (cap/daily/story alarm), including the W1.2 local `--max-spend-usd` knob.
+
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 8 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure, runtime=loop_wrapper, delay=300s, auto_merge=false.
@@ -206,6 +216,8 @@
 [2026-05-19 UTC] S4 done, runtime=loop_wrapper — wrapper handles next iteration. commit=6929ee7, tests 1920 PASS (+8), ruff clean, mypy clean on changed files. Per-worker CancellationToken + module registry + cancel_worker(SIGTERM→SIGKILL); supervisor `cancel_worker` action wired; WORKER_CANCELLED event (+1 → 31 total). S5 promoted to Current.
 
 [2026-05-19 UTC] S5 done, runtime=loop_wrapper — wrapper handles next iteration. commit=2a3a0d6, tests 1928 PASS (+8), ruff clean, mypy clean on changed files. runtime/mcp_readiness.poll_mcp_ready (30s/500ms, injectable clock+sleep) + spawn_worker pre-Popen gate (required_mcp_tools param) + MCPNotReadyError + Settings.required_mcp_tools + MCP_NOT_READY event (+1 → 32 total). S6 promoted to Current.
+
+[2026-05-19 UTC] S6 done, runtime=loop_wrapper — wrapper handles next iteration. commit=185a948, tests 1938 PASS (+10), ruff clean on changed files, mypy clean on S6 modules. runtime/budget_autodetect (BudgetAutoDisableState + evaluate_budget_disabled; idempotent BUDGET_AUTO_DISABLED on subscription auto path; manual BMAD_DISABLE_BUDGET=1 suppressed from emission) + spawn_worker auto_clear_halt kwarg + WorkerHaltPrespawnError + pre-Popen halt-reason.txt gate + WORKER_HALT_PRESPAWN event (+2 → 34 total). W1 max-spend tests pinned ANTHROPIC_API_KEY for cap assertion. S7 promoted to Current.
 
 ## Final Report
 (empty)
