@@ -329,6 +329,16 @@ class BwrapSandbox:
         # ``~/.claude.json`` / ``~/.local/share/claude/`` (worker-required)
         # remain accessible while everything else under $HOME is invisible.
         _host_home = os.path.expanduser("~")
+        # Orchestrator's own state dir (this very repo's ``.claude/``) holds
+        # the ``main-merge-token.json`` single-gate that authorises a merge
+        # to ``main``. Without an explicit blackout the worker can ``cat``
+        # the token and forge a merge. Resolve via __file__ rather than the
+        # configured ``settings.orchestrator_home`` to avoid importing
+        # ``config`` (circular risk) and to cover dev installs that override
+        # ``orchestrator_home`` while still running from this source tree.
+        _orchestrator_state = (
+            Path(__file__).resolve().parents[3] / ".claude"
+        )
         _SANDBOX_BLACKOUT_PATHS = (
             # System / other-user secrets (S10 H-1 baseline).
             "/home/server/crm",
@@ -336,7 +346,10 @@ class BwrapSandbox:
             "/etc/gshadow",
             "/etc/sudoers",
             "/etc/sudoers.d",
+            "/etc/ssh",
             "/root",
+            # Docker socket — privesc to host (``docker run --privileged …``).
+            "/var/run/docker.sock",
             # SSH keys, known_hosts, agent socket directory.
             f"{_host_home}/.ssh",
             # Cloud / registry credential stores.
@@ -345,13 +358,30 @@ class BwrapSandbox:
             f"{_host_home}/.netrc",
             f"{_host_home}/.docker",
             f"{_host_home}/.kube",
+            # Git credential helpers (the actual token stores; we
+            # deliberately leave ``~/.gitconfig`` and ``~/.config/git``
+            # READABLE so worker commits still resolve user.email/name —
+            # see Phase 4B re-review HIGH "blackout shadows git identity").
+            f"{_host_home}/.git-credentials",
+            f"{_host_home}/.config/git/credentials",
             # CLI tool auth stores (github / gitlab / gcloud / azure).
             f"{_host_home}/.config/gh",
-            f"{_host_home}/.config/git",
             f"{_host_home}/.config/gcloud",
             f"{_host_home}/.config/azure",
-            f"{_host_home}/.gitconfig",
+            # Package / language ecosystem credential stores.
+            f"{_host_home}/.npmrc",
+            f"{_host_home}/.pypirc",
+            f"{_host_home}/.cargo/credentials.toml",
+            # Secret managers / infra credential stores.
+            f"{_host_home}/.vault-token",
+            f"{_host_home}/.config/op",
+            f"{_host_home}/.config/sops",
+            f"{_host_home}/.config/pulumi",
+            f"{_host_home}/.terraform.d/credentials.tfrc.json",
+            f"{_host_home}/.config/helm/registry/config.json",
+            f"{_host_home}/.password-store",
             # Orchestrator's own state (state.db, tokens, memory, runs).
+            str(_orchestrator_state),
             f"{_host_home}/.bmad-orchestrator",
             f"{_host_home}/.config/bmad-orchestrator",
         )
@@ -361,8 +391,13 @@ class BwrapSandbox:
                 continue
             if blackout_path.is_dir():
                 wrapped += ["--tmpfs", blackout]
-            else:
+            elif blackout_path.is_file():
                 wrapped += ["--ro-bind", "/dev/null", blackout]
+            # Sockets / devices / FIFOs (e.g. ``/var/run/docker.sock``): bwrap
+            # cannot create a regular-file mount point at a unix-socket path
+            # when the parent dir is itself a tmpfs symlink. Skip — the
+            # ``--ro-bind / /`` mount makes the socket read-only, which is
+            # enough to block ``docker run`` (needs write to the socket).
         wrapped += [
             "--unshare-pid",
             "--unshare-uts",
