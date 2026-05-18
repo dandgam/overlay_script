@@ -1,0 +1,20 @@
+# Self-learning consolidation loop — default config
+# See spec/spec_self_learning_loop.md §3.3
+# Conservative thresholds: err on the side of not auto-applying.
+version: 1
+enabled: true
+defaults:
+  min_pattern_occurrences: 3
+  auto_apply_max_risk: low
+  measure_window_waves: 2
+  regression_threshold_pct: 5.0
+  extractor_model: claude-sonnet-4-6
+# HARD GATE — these files are NEVER modified by the self-learning loop.
+# This list is the minimum safe set; append additional files if needed.
+excluded_policy_files:
+  - security-review.yaml
+  - deletion-safety.yaml
+# Policies bearing any of these tags are also excluded (compliance lock).
+excluded_compliance_tags:
+  - "152-ФЗ"
+  - "187-ФЗ"
