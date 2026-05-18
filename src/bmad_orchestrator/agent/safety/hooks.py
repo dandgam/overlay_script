@@ -44,6 +44,13 @@ from bmad_orchestrator.agent.safety.audit import record_audit
 from bmad_orchestrator.agent.safety.branch_isolation import validate_worker_write_path
 from bmad_orchestrator.agent.safety.main_merge_token import has_active_token
 from bmad_orchestrator.agent.tools._common import get_settings
+from bmad_orchestrator.runtime.sandbox import (
+    BashDenyList,
+    FsDenyList,
+    compile_deny_lists,
+    match_bash_deny,
+    match_fs_deny,
+)
 
 # Subshell / cmd-substitution literal substrings — checked on the raw command
 # string BEFORE shlex tokenization, since shlex with posix=True drops quotes
@@ -481,7 +488,47 @@ def _scan_bash(command: str) -> tuple[bool, str | None, str | None]:
         if denied:
             return True, pattern, reason
 
+    # Phase 4 hardening #4 — also check BashDenyList (third layer).
+    # Runs after token-based checks so known patterns are already caught; this
+    # catches additional patterns from the overridable YAML deny-list.
+    _, bash_deny = _get_deny_lists()
+    matched_pat = match_bash_deny(stripped, bash_deny)
+    if matched_pat is not None:
+        return True, "bash_deny_list", f"command matches deny-list pattern: {matched_pat}"
+
     return False, None, None
+
+
+# Phase 4 hardening #4 — cached deny-list instances.
+# Compiled once per process; this is safe because the patterns come from YAML
+# files that do not change at runtime (override via BMAD_DENY_LIST_PATH env).
+_FS_DENY_LIST: FsDenyList | None = None
+_BASH_DENY_LIST: BashDenyList | None = None
+
+
+def _get_deny_lists() -> tuple[FsDenyList, BashDenyList]:
+    """Return process-level cached deny-list instances, building if needed."""
+    global _FS_DENY_LIST, _BASH_DENY_LIST
+    if _FS_DENY_LIST is None or _BASH_DENY_LIST is None:
+        _FS_DENY_LIST, _BASH_DENY_LIST = compile_deny_lists()
+    return _FS_DENY_LIST, _BASH_DENY_LIST
+
+
+def _scan_fs_access(path_str: str) -> str | None:
+    """Check a file path against the FS deny-list.
+
+    Phase 4 hardening #4 — third layer of defence for Read/Glob/Grep tools.
+    Applies even when bwrap/NoSandbox fallback is active.
+
+    Returns a deny reason string, or ``None`` if the path is permitted.
+    """
+    if not path_str:
+        return None
+    fs_deny, _ = _get_deny_lists()
+    matched = match_fs_deny(path_str, fs_deny)
+    if matched is not None:
+        return f"fs_deny_list:{matched}"
+    return None
 
 
 def _agent_write_roots() -> tuple[Path, ...]:
@@ -576,6 +623,30 @@ async def security_check_hook(
 
     if not denied:
         denied, pattern, reason = _scan_filesystem_write(tool_name, tool_input)
+
+    # Phase 4 hardening #4 — FS deny-list for read-access tools.
+    # Covers Read/Glob/Grep + also re-checks write tools via the same deny-list
+    # (write tools already checked by _scan_filesystem_write for scope, but
+    # _scan_fs_access adds the deny-list layer independently of scope checks).
+    if not denied:
+        _FS_READ_TOOLS: frozenset[str] = frozenset({
+            "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "MultiEdit"
+        })
+        if tool_name in _FS_READ_TOOLS:
+            # Extract the file path from the tool input (each tool uses different key names).
+            _path_str = (
+                tool_input.get("file_path")
+                or tool_input.get("notebook_path")
+                or tool_input.get("path")
+                or tool_input.get("pattern")  # Glob uses "pattern"
+                or ""
+            )
+            if isinstance(_path_str, str) and _path_str:
+                _deny_reason = _scan_fs_access(_path_str)
+                if _deny_reason is not None:
+                    denied = True
+                    pattern = "fs_deny_list"
+                    reason = _deny_reason
 
     if denied:
         # FS7 — when the OS-level sandbox is active for worker subprocesses,

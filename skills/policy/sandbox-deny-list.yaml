@@ -1,0 +1,29 @@
+# Deny-list for worker FS access and Bash commands.
+#
+# Spec: spec_phase4_hardening §1.4
+#
+# Third layer of defence on top of bwrap (primary) + _scan_bash (secondary).
+# Applies even when NoSandbox fallback is active (bwrap not installed).
+#
+# Override via env BMAD_DENY_LIST_PATH=<path-to-yaml>. The override EXTENDS
+# (not replaces) this default list.
+#
+# fs: glob patterns matched against file paths for Read/Write/Edit/Glob/Grep.
+#     Matching uses fnmatch against the expanded path. "~" is expanded.
+#
+# bash: Python regex patterns matched against bash command strings.
+#       Patterns are case-insensitive. The raw command string is matched (not
+#       tokenized), so anchoring is important for precision.
+
+fs:
+  - "**/.env"
+  - "**/.env.*"
+  - "~/.ssh/**"
+  - "/etc/shadow"
+  - "**/credentials.json"
+  - "**/*.pem"
+
+bash:
+  - "curl.*\\|\\s*(bash|sh|python|python3)"
+  - "wget.*\\|\\s*(bash|sh|python|python3)"
+  - "rm\\s+-rf\\s+/(?!tmp/|home/.+/\\.claude/)"

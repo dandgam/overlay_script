@@ -22,12 +22,14 @@ scenarios).
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, NamedTuple, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
 
@@ -736,14 +738,201 @@ def detect_sandbox() -> Sandbox:
     return fallback
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 4 hardening #4 — Permission deny-list (third layer of defence)
+#
+# Spec: spec_phase4_hardening §1.4
+#
+# Applies even when bwrap is unavailable (NoSandbox fallback path). The deny-
+# list is checked in _scan_bash (extended) and in _scan_fs_access (new), both
+# called from agent/safety/hooks.py PreToolUse.
+#
+# Default patterns live in skills/policy/sandbox-deny-list.yaml.
+# Override via env BMAD_DENY_LIST_PATH=<yaml>. The override EXTENDS defaults.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DENY_LIST_ENV_VAR = "BMAD_DENY_LIST_PATH"
+
+# Default fs deny patterns (mirrors sandbox-deny-list.yaml).
+_DEFAULT_FS_PATTERNS: tuple[str, ...] = (
+    "**/.env",
+    "**/.env.*",
+    "~/.ssh/**",
+    "/etc/shadow",
+    "**/credentials.json",
+    "**/*.pem",
+)
+
+# Default bash deny regexes (compiled case-insensitive, mirrors YAML).
+_DEFAULT_BASH_PATTERNS: tuple[str, ...] = (
+    r"curl.*\|\s*(bash|sh|python|python3)",
+    r"wget.*\|\s*(bash|sh|python|python3)",
+    r"rm\s+-rf\s+/(?!tmp/|home/.+/\.claude/)",
+)
+
+
+class FsDenyList(NamedTuple):
+    """Compiled FS deny patterns for Read/Write/Edit/Glob/Grep tools."""
+
+    patterns: tuple[str, ...]
+
+
+class BashDenyList(NamedTuple):
+    """Compiled bash deny regexes."""
+
+    regexes: tuple[re.Pattern[str], ...]
+
+
+def _read_deny_yaml(path: Path) -> tuple[list[str], list[str]]:
+    """Read ``fs`` + ``bash`` lists from a YAML deny-list file.
+
+    Returns ``(fs_patterns, bash_patterns)``. On any error returns empty lists
+    so callers can safely union with defaults without failing open.
+    """
+    try:
+        import yaml as _yaml
+        raw = _yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("deny_list_yaml_read_failed path=%s error=%s", path, exc)
+        return [], []
+    if not isinstance(raw, dict):
+        return [], []
+    fs = raw.get("fs", [])
+    bash = raw.get("bash", [])
+    return (
+        [str(p) for p in fs if p] if isinstance(fs, list) else [],
+        [str(p) for p in bash if p] if isinstance(bash, list) else [],
+    )
+
+
+def compile_deny_lists(
+    *,
+    override_path: Path | None = None,
+) -> tuple[FsDenyList, BashDenyList]:
+    """Build ``FsDenyList`` + ``BashDenyList`` from defaults + optional override.
+
+    Resolution order:
+      1. Default policy from ``<orchestrator_home>/skills/policy/sandbox-deny-list.yaml``
+         (if present; otherwise falls back to hard-coded ``_DEFAULT_*`` tuples).
+      2. ``override_path`` (explicit caller arg) — extends defaults.
+      3. ``BMAD_DENY_LIST_PATH`` env var — extends (higher priority than
+         ``override_path`` when both provided, both are unioned).
+
+    The override EXTENDS the defaults (union), not replaces them.
+
+    Returns always-valid structures even if YAML loading fails (fail-closed:
+    defaults always included so the deny-list can never silently shrink).
+    """
+    fs_patterns: set[str] = set(_DEFAULT_FS_PATTERNS)
+    bash_patterns: set[str] = set(_DEFAULT_BASH_PATTERNS)
+
+    # Try to load the default policy YAML from orchestrator_home.
+    _default_yaml_loaded = False
+    try:
+        from bmad_orchestrator.config import load_settings as _load_settings
+        _settings = _load_settings()
+        default_yaml = _settings.orchestrator_home / "skills" / "policy" / "sandbox-deny-list.yaml"
+        if default_yaml.exists():
+            extra_fs, extra_bash = _read_deny_yaml(default_yaml)
+            # YAML overrides the hard-coded defaults (replace, then extend with overrides)
+            if extra_fs:
+                fs_patterns = set(extra_fs)
+                _default_yaml_loaded = True
+            if extra_bash:
+                bash_patterns = set(extra_bash) if _default_yaml_loaded else bash_patterns | set(extra_bash)
+    except Exception as exc:
+        log.warning("deny_list_default_yaml_load_failed error=%s", exc)
+
+    # Add any explicit override_path.
+    if override_path is not None and override_path.exists():
+        extra_fs, extra_bash = _read_deny_yaml(override_path)
+        fs_patterns = fs_patterns | set(extra_fs)
+        bash_patterns = bash_patterns | set(extra_bash)
+
+    # Add env-var override.
+    env_path_str = os.environ.get(_DENY_LIST_ENV_VAR, "").strip()
+    if env_path_str:
+        env_path = Path(env_path_str)
+        if env_path.exists():
+            extra_fs, extra_bash = _read_deny_yaml(env_path)
+            fs_patterns = fs_patterns | set(extra_fs)
+            bash_patterns = bash_patterns | set(extra_bash)
+        else:
+            log.warning("deny_list_env_path_not_found path=%s", env_path_str)
+
+    # Compile bash regexes (case-insensitive).
+    compiled: list[re.Pattern[str]] = []
+    for pat in sorted(bash_patterns):
+        try:
+            compiled.append(re.compile(pat, re.IGNORECASE))
+        except re.error as exc:
+            log.warning("deny_list_bash_regex_invalid pattern=%s error=%s", pat, exc)
+
+    return (
+        FsDenyList(patterns=tuple(sorted(fs_patterns))),
+        BashDenyList(regexes=tuple(compiled)),
+    )
+
+
+def match_fs_deny(path_str: str, deny_list: FsDenyList) -> str | None:
+    """Check ``path_str`` against ``FsDenyList``.
+
+    Expands ``~`` in patterns and in the path. Matches via ``fnmatch.fnmatch``
+    (glob-style). Returns the first matching pattern string, or ``None``.
+    """
+    # Expand tilde in input path for comparison.
+    expanded = os.path.expanduser(path_str)
+    for pattern in deny_list.patterns:
+        expanded_pattern = os.path.expanduser(pattern)
+        # Try direct fnmatch (handles ** as a single-segment glob).
+        if fnmatch.fnmatch(expanded, expanded_pattern):
+            return pattern
+        # Also try against just the filename for patterns without directory parts.
+        if "/" not in expanded_pattern and fnmatch.fnmatch(
+            os.path.basename(expanded), expanded_pattern
+        ):
+            return pattern
+        # For ** patterns, also check if any path segment sequence matches.
+        # fnmatch doesn't natively support **, so we do a suffix check:
+        # "**/.env" should match "/project/.env" and "/a/b/.env".
+        if "**" in expanded_pattern:
+            # Strip leading **/ and match against the path suffix.
+            suffix_pat = expanded_pattern.lstrip("*").lstrip("/")
+            if suffix_pat and fnmatch.fnmatch(os.path.basename(expanded), suffix_pat):
+                return pattern
+            # Also test if path ends with the non-** part.
+            parts = expanded_pattern.split("**/")
+            if len(parts) > 1 and parts[-1]:
+                tail = parts[-1]
+                if fnmatch.fnmatch(expanded, f"*{tail}") or expanded.endswith(f"/{tail}") or expanded == tail:
+                    return pattern
+    return None
+
+
+def match_bash_deny(command: str, deny_list: BashDenyList) -> str | None:
+    """Check ``command`` against ``BashDenyList``.
+
+    Returns the pattern string of the first matching regex, or ``None``.
+    """
+    for regex in deny_list.regexes:
+        if regex.search(command):
+            return regex.pattern
+    return None
+
+
 __all__ = [
     "DEFAULT_CGROUP_CPU_QUOTA",
     "DEFAULT_CGROUP_LIMITS",
     "DEFAULT_CGROUP_MEMORY_MAX",
     "DEFAULT_CGROUP_TASKS_MAX",
+    "BashDenyList",
     "BwrapSandbox",
+    "FsDenyList",
     "NetworkPolicy",
     "NoSandbox",
     "Sandbox",
+    "compile_deny_lists",
     "detect_sandbox",
+    "match_bash_deny",
+    "match_fs_deny",
 ]
