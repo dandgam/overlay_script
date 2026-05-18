@@ -1,0 +1,29 @@
+# Banned phrases for worker completion claims.
+#
+# Spec: spec_phase4_hardening §1.3
+#
+# If any phrase from this list appears (case-insensitive) in a worker's
+# completion summary, the gate trips and the verdict is forced to
+# request_changes. This blocks premature-completion claims that lack
+# concrete evidence (test names, file paths, actual command output).
+#
+# Override via Settings.banned_phrases_path to add project-specific phrases.
+# The override EXTENDS (not replaces) this default list.
+
+phrases:
+  # Hedging — uncertain completion
+  - "should work"
+  - "probably works"
+  - "seems to work"
+  - "appears to"
+  - "i think this"
+  - "this might"
+  # Exclamatory / low-information verdicts
+  - "great!"
+  - "done!"
+  - "perfect!"
+  # Blanket pass claims without evidence
+  - "all good"
+  - "everything works"
+  - "no issues"
+  - "looks good to me"

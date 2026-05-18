@@ -2450,6 +2450,86 @@ def _gate_test_coverage(metrics: ReviewMetrics, threshold: float) -> str | None:
     return "; ".join(reasons) if reasons else None
 
 
+# Phase 4 hardening #3 — banned-phrase linter.
+# Default set mirrors skills/policy/banned-phrases.yaml and is used when the
+# YAML file is absent or unreadable (defence-in-depth: gate must not fail open).
+BANNED_PHRASES: frozenset[str] = frozenset({
+    "should work", "probably works", "seems to work", "appears to",
+    "i think this", "this might", "great!", "done!", "perfect!",
+    "all good", "everything works", "no issues", "looks good to me",
+})
+
+
+def _load_banned_phrases(override_path: Path | None = None) -> frozenset[str]:
+    """Load banned phrases from YAML policy file.
+
+    Resolution order:
+      1. ``override_path`` — if provided and exists, load from there.
+      2. ``settings.orchestrator_home / skills/policy/banned-phrases.yaml``.
+      3. Fallback to hard-coded ``BANNED_PHRASES`` constant (YAML absent).
+
+    The override EXTENDS the defaults (union), not replaces them.
+    """
+    import yaml as _yaml
+
+    base = set(BANNED_PHRASES)
+
+    def _read_yaml(path: Path) -> set[str]:
+        try:
+            raw = _yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            return set()
+        if not isinstance(raw, dict):
+            return set()
+        phrases = raw.get("phrases", [])
+        if not isinstance(phrases, list):
+            return set()
+        return {str(p).lower() for p in phrases if p}
+
+    # Try the default policy file (sibling of other policy YAMLs).
+    try:
+        settings = load_settings()
+        default_path = settings.orchestrator_home / "skills" / "policy" / "banned-phrases.yaml"
+    except Exception:
+        default_path = None
+
+    if default_path is not None and default_path.exists():
+        base = _read_yaml(default_path)
+        if not base:
+            base = set(BANNED_PHRASES)
+
+    if override_path is not None and override_path.exists():
+        extra = _read_yaml(override_path)
+        base = base | extra
+
+    return frozenset(base)
+
+
+def _gate_banned_phrases(worker_summary: str, override_path: Path | None = None) -> str | None:
+    """Banned-phrase gate. Returns reason string when tripped, ``None`` otherwise.
+
+    Trips when ``worker_summary`` contains any phrase from the active
+    banned-phrase list (case-insensitive substring match). Designed to block
+    premature-completion claims that lack concrete evidence.
+
+    Args:
+        worker_summary: Text emitted by the worker as its completion summary.
+        override_path: Optional path to a project-specific YAML that EXTENDS
+            the default phrase list. Mirrors Settings.banned_phrases_path.
+
+    Returns:
+        A reason string of the form
+        ``banned_phrases_in_completion:<phrase1>,<phrase2>,...`` (up to 3
+        phrases shown) when the gate trips, or ``None`` when clean.
+    """
+    phrases = _load_banned_phrases(override_path)
+    lower = worker_summary.lower()
+    hits = sorted(p for p in phrases if p in lower)
+    if hits:
+        return f"banned_phrases_in_completion:{','.join(hits[:3])}"
+    return None
+
+
 def _load_review_gates(cfg: CodeReviewGateConfig | None) -> CodeReviewGates:
     """Resolve the active gate config: override → policy YAML → built-in defaults."""
     if cfg is not None and cfg.gates_override is not None:
@@ -2849,6 +2929,25 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
             review_iteration=review_iteration,
             cap=gates.max_review_iterations,
         )
+
+    # ── Phase 4 hardening #3 — banned-phrase gate.
+    # Fires only when verdict == "approve" (approve → request_changes flip).
+    # Catches premature-completion summaries that lack concrete evidence.
+    if verdict == "approve" and summary:
+        bp_override: Path | None = None
+        try:
+            _settings = load_settings()
+            bp_override = _settings.banned_phrases_path
+        except Exception as _exc:
+            log.warning("banned_phrase_gate_settings_load_failed", error=str(_exc))
+        bp_reason = _gate_banned_phrases(summary, override_path=bp_override)
+        if bp_reason is not None:
+            gate_reasons.append(bp_reason)
+            log.info(
+                "code_review_banned_phrase_gate_tripped",
+                story_id=story_id,
+                reason=bp_reason,
+            )
 
     # ── Patch Q (diff size) + Patch W (scope by File List allow-list).
     #    Even if metrics are missing (e.g. review emitted no structured block),

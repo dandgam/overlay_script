@@ -162,6 +162,12 @@ class Settings(BaseSettings):
     # `bmad-sprint-planning` skill для генерации. False → fail loudly.
     auto_init_sprint_status: bool = True
 
+    # Phase 4 hardening #3 — banned-phrase linter.
+    # None → fallback to skills/policy/banned-phrases.yaml (relative to
+    # orchestrator_home). Set to an absolute path to load a project-specific
+    # override that EXTENDS (not replaces) the default phrase list.
+    banned_phrases_path: Path | None = None
+
     locale: str = "ru"
 
 

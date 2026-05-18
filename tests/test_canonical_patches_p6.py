@@ -149,7 +149,7 @@ def _approve_jsonl(jsonl_path: Path) -> Path:
             {
                 "event_type": "claude_event",
                 "verdict": "approve",
-                "summary": "all good",
+                "summary": "42 tests pass. Coverage 91%. No lint errors.",
                 "metrics": {
                     "p0_found": 0,
                     "p0_fixed": 0,
