@@ -154,6 +154,20 @@
    - `skills/policy/sandbox-deny-list.yaml` — overridable через `BMAD_DENY_LIST_PATH`
    - Работает даже при NoSandbox fallback (bwrap недоступен)
    - **14 tests** (spec exact). Tests delta: +14
+10c. ✅ **Phase 4 hardening Session 2 — #1 SessionStart hook** (2026-05-19, commit `c00ff93`)
+   - spec_phase4_hardening §1.1 — Tier 1 pre-pilot hardening
+   - `agent/safety/session_start.py` — `build_session_start_block` + `inject_into_worker_env` + `_resolve_skill_slug`
+   - `agent/safety/policies/worker_session_policy.md` — 4 секции (no merge без gate, 3-attempt cap, evidence-based completion, sandbox boundaries)
+   - `runtime/worker_spawn.py` — wire в `_build_worker_env` перед subprocess.Popen
+   - Инжектирует `ORCHESTRATOR_SESSION_BOOTSTRAP` env-var в каждый worker subprocess
+   - **10 tests** (5 canonical skills + 3 inject + 2 integration). Tests delta: +10
+10d. ✅ **Phase 4 hardening Session 2 — #2 PreCompact + SessionStart memory persistence** (2026-05-19, commit `0ba9407`)
+   - spec_phase4_hardening §1.2 — Tier 1 pre-pilot hardening
+   - `agent/memory/levels.py` — `MemoryPersistor.dump_state` / `load_state` (stale guard, corruption guard)
+   - `runtime/event_loop.py` — +`WORKER_STATE_PERSISTED` event (26 events total)
+   - `runtime/worker_spawn.py` — `trigger_precompact_dump` + wire `load_state` в SessionStart block
+   - `agent/safety/session_start.py` — embed `load_state` output в block якщо state есть («Resumed from: retry=N, scope_drift=X»)
+   - **9 tests** (4 dump/load + 3 model-swap + 2 SessionStart block). Tests delta: +9
 11. ✅ **Interactive TUI menu — Session 2 (M2 forms + execute + polish)** (2026-05-18)
    - `cli/menu/form_screen.py` — FormScreen с typed widgets per ParamSpec: Select (Literal), Checkbox (bool), Input(integer) (int), Input (str/Path). Live CLI preview, inline validation, pre-filled defaults, required markers (`*`). Wires to ConfirmScreen (destructive) or ExecuteScreen (normal)
    - `cli/menu/confirm_screen.py` — ConfirmScreen для destructive commands: typed-name confirmation (как `terraform destroy`), exact match guard, preview CLI command
@@ -204,6 +218,6 @@
 
 ---
 
-**Last updated:** 2026-05-19 (v13.1 — Phase 4 hardening Session 1 (#3 + #4))
-**Status:** v13.1 — Phase 4 hardening Session 1 ✅ closed (#3 banned-phrase linter `85ee1ae` + #4 permission deny-list `8a6a78c`). Tier 1 pre-pilot hardening complete (2 of 4 items). Tests: **1812 PASS** (+24 vs v13 baseline 1788). mypy/ruff clean. Phase 4 remaining: #10 (production pilot) — Tier 1 (#1 SessionStart + #2 memory persistence) deferred to Session 2.
+**Last updated:** 2026-05-19 (v13.2 — Phase 4 hardening Session 2 (#1 + #2))
+**Status:** v13.2 — Phase 4 hardening Session 2 ✅ closed (#1 SessionStart hook `c00ff93` + #2 PreCompact memory persistence `0ba9407`). Tier 1 pre-pilot hardening complete (all 4 items: #3 #4 #1 #2). Tests: **1726 PASS** (+19 vs Session 2 start 1707 / +38 vs v13 baseline 1688). mypy/ruff clean on all new files. EventType count: 26. Phase 4 remaining: #10 (production pilot) — Tier 2 (#5 #6 #7) in Session 3.
 **Owner:** user + Claude orchestrator
