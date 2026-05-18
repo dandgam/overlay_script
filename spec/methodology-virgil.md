@@ -80,6 +80,12 @@
 - ✅ Cost tracking + budget hard-cap
 - ⬜ **Deferred:** 19 Medium + 8 Low S10 findings (review-findings-followup) — backlog cleanup, не блокирует Phase 3
 
+### Memory infrastructure ✅ DONE (Phase 2 retroactive discovery)
+
+- `agent/memory/` — 3-уровневая модель + schedule + gates + proposals
+- `agent/tools/memory.py` — vendor-agnostic `read_memory` / `write_memory` (custom SDK tools, work for Claude / OpenAI / Gemini equally)
+- `agent/memory/memory_tool.py` — Anthropic native tool definition (deferred wiring per `run.py:32-37`)
+
 ### Фаза 3 — Test & Release ⬜ NOT STARTED
 
 - ⬜ **GAP:** Нет eval suite — benchmark из N stories с известным baseline
@@ -131,9 +137,13 @@
 
 ### Фаза 5 — Monitor & Improve
 
-11. **Anthropic memory tool wiring** (1 сессия) — vision step 6 (foundation для self-learning)
-    - Cross-session knowledge accumulation
-    - Зависимость: pilot logs накоплены (нужно хотя бы 1 production run)
+11. ✅ **Memory foundation** (2026-05-18 — retroactive close): vendor-agnostic уже работает
+    - Custom SDK tools `read_memory` / `write_memory` (vendor-agnostic) в `agent/tools/memory.py`
+    - 3-уровневая модель (tactical/strategic/architectural) в `agent/memory/levels.py`
+    - Schedule + hard gates + proposals (`gates.py` / `schedule.py` / `proposals.py`)
+    - Native Anthropic `memory_20250818` намеренно пропущен (claude_agent_sdk не exposed server-managed tool block) — custom tools покрывают workflow; миграция на OpenAI/Gemini = native tool и не понадобится
+    - Tests: `test_e7_project_memory.py` + `test_s7_memory_retro.py`
+    - Vision step 6 foundation = ✅. Что осталось — self-learning loop (использовать накопленную память, separate initiative)
 12. **Observability dashboard** — cost / cache hit / escalations / pass rate per epic
 13. **TTS notifications** (backlog)
 14. **Vision steps 3-7** — embedding phase 3/2/1 skills, self-learning loop, multi-project skill sync
@@ -167,5 +177,5 @@
 ---
 
 **Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v9 — R3 security minors closed (path traversal/deny-list guard на 4 CLI callsites). Tests: 1538 PASS (+18). Phase 3 remaining: только Step B (real BMad stories) — нужен реальный pilot.
+**Status:** v10 — Memory foundation retroactively confirmed done (vendor-agnostic by design). Tests: 1538 PASS. Phase 3 remaining: только Step B (real pilot). Phase 5 foundation: done. Big next steps: Supervisor LLM-loop (Phase 4 #9) или self-learning consolidation loop (Phase 5 — использовать накопленную память).
 **Owner:** user + Claude orchestrator
