@@ -288,6 +288,17 @@
     frontmatter (12 AC = 60 мин, 6 AC = 30 мин, etc.)
   - Sync с orchestrator-level `BMAD_WORKER_TIMEOUT_SEC` (сейчас 24h, явно
     больше runner'овского cap → последний всегда выигрывает).
+- ⬜ **P3: backlog-writer subscriber (auto-capture dev findings)** — сейчас Virgil
+  авто-пишет только в `skills/policy/*.yaml` (operational tuning) + `retrospective.md`
+  (per-wave). Архитектурные находки (subprocess_timeout patterns, отсутствие
+  verdict event, recurring worker_silent_failure) попадают в dev backlog
+  (`methodology-virgil.md` §5) **только через ручной просмотр JSONL**.
+  Возможная мета-фича: subscriber на events.jsonl, который из паттернов
+  (≥N occurrences одного типа за W прогонов) генерит **черновики backlog-items**
+  (через 888 → gap-analysis или напрямую markdown-шаблоном). Не автокоммит —
+  draft → human-review → merge.
+  Связано с self-learning loop, но другой слой: тот тюнит цифры, этот ловит
+  АРХИТЕКТУРНЫЕ паттерны. После P1-3 (критический путь).
 
 ---
 
