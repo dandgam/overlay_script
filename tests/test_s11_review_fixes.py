@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from bmad_orchestrator.cli.main import (
+    _drain_capped,
     _read_spend_report,
 )
 from bmad_orchestrator.runtime.multi_run import (
@@ -123,6 +124,32 @@ class TestP1ASpendHandoff:
         outcome = await run_multi(plan, registry=registry, runner_fn=runner)
         assert outcome.total_spent_usd == pytest.approx(15.0)
         assert outcome.per_project["alpha"].spent_usd == pytest.approx(7.5)
+
+
+# ── P1-C: stdout DEVNULL / stderr capped ────────────────────────────────────
+
+
+class TestP1CStreamCaps:
+    """``_drain_capped`` returns first N bytes and drains rest of stream."""
+
+    async def test_drain_capped_truncates_to_cap(self) -> None:
+        reader = asyncio.StreamReader()
+        payload = b"x" * 200_000
+        reader.feed_data(payload)
+        reader.feed_eof()
+        out = await _drain_capped(reader, cap_bytes=1024)
+        assert len(out) == 1024
+        assert out == b"x" * 1024
+
+    async def test_drain_capped_returns_all_when_below_cap(self) -> None:
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"hello world\n")
+        reader.feed_eof()
+        out = await _drain_capped(reader, cap_bytes=1024)
+        assert out == b"hello world\n"
+
+    async def test_drain_capped_handles_none(self) -> None:
+        assert await _drain_capped(None, cap_bytes=64) == b""
 
 
 # ── P1-B: per-child timeout ─────────────────────────────────────────────────

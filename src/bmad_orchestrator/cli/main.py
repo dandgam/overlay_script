@@ -564,6 +564,34 @@ def resume_project(
 # ── multi-project run (Init #3 Task 3.3-3.4) ─────────────────────────────────
 
 
+# Review finding P1-C — bound child stderr in memory. Real wave can run for hours
+# and a chatty sub-agent can emit MBs of warnings; ``proc.communicate()`` keeps
+# every byte in RAM and we ship the tail to the result anyway. Cap = 64 KiB —
+# tail is what matters for error context.
+_SUBPROCESS_STDERR_CAP_BYTES = 64 * 1024
+
+
+async def _drain_capped(
+    stream: asyncio.StreamReader | None, cap_bytes: int
+) -> bytes:
+    """Drain ``stream`` to EOF, keeping only the first ``cap_bytes``.
+
+    Continues reading past the cap so the child's stderr PIPE never fills and
+    blocks ``proc.wait()``; the overflow is discarded. Returns the captured
+    head as bytes.
+    """
+    if stream is None:
+        return b""
+    buf = bytearray()
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            break
+        if len(buf) < cap_bytes:
+            buf.extend(chunk[: cap_bytes - len(buf)])
+    return bytes(buf)
+
+
 async def _subprocess_runner(
     slot: ProjectSlot,
     tracker: SharedSpendTracker,
@@ -602,7 +630,10 @@ async def _subprocess_runner(
         *args,
         env=env,
         stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
+        # Review finding P1-C — orchestrator stdout is chatty (per-story logs,
+        # cost ticks). Discard at OS level so PIPE never fills and we don't
+        # buffer MBs of text we won't use.
+        stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
     # Review finding P1-B — hard timeout. A hung child (auth prompt, network
@@ -610,14 +641,22 @@ async def _subprocess_runner(
     # forever. On expiry: SIGTERM → 30s grace → SIGKILL; surface as failed
     # ProjectRunResult so siblings continue.
     timed_out = False
+    stderr = b""
+
+    async def _wait_and_drain() -> bytes:
+        captured, _ = await asyncio.gather(
+            _drain_capped(proc.stderr, _SUBPROCESS_STDERR_CAP_BYTES),
+            proc.wait(),
+        )
+        return captured
+
     try:
-        _, stderr = await asyncio.wait_for(
-            proc.communicate(),
+        stderr = await asyncio.wait_for(
+            _wait_and_drain(),
             timeout=plan.per_project_timeout_sec,
         )
     except TimeoutError:
         timed_out = True
-        stderr = b""
         try:
             proc.terminate()
             try:
