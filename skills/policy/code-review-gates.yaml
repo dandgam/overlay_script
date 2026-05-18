@@ -15,3 +15,7 @@ compliance_tags:
   - "152-ФЗ"
   - "187-ФЗ"
 sweep_every_stories: 50
+# P5 Evaluator-Optimizer hard iteration cap (review→fix rounds inside
+# bmad-auto-dev). Beyond this count the gate trips and the verdict escalates
+# to a human even if all other gates pass — runaway-loop protection.
+max_review_iterations: 3

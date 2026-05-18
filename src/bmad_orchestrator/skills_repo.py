@@ -87,6 +87,12 @@ class CodeReviewGates(BaseModel):
     test_coverage_threshold: float = Field(0.5, ge=0.0, le=1.0)
     compliance_tags: list[str] = Field(default_factory=lambda: ["152-ФЗ", "187-ФЗ"])
     sweep_every_stories: int = Field(50, ge=1)
+    # P5 Evaluator-Optimizer hard iteration cap. Each review→fix round inside
+    # bmad-auto-dev increments ORCHESTRATOR_WORKER_REVIEW_ITERATION; the verdict
+    # event carries it back. When the count exceeds this cap, _gate_iteration_cap
+    # converts an otherwise-approve verdict into a human escalation — prevents
+    # runaway loops on stories the worker can't fix on its own.
+    max_review_iterations: int = Field(3, ge=1)
 
 
 class CostTuning(BaseModel):

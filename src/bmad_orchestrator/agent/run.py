@@ -2354,6 +2354,24 @@ def _gate_compliance(
     return None
 
 
+def _gate_iteration_cap(review_iteration: int, cap: int) -> str | None:
+    """P5 Evaluator-Optimizer hard cap gate.
+
+    Returns a reason string when ``review_iteration > cap`` — trip the verdict
+    into a human escalation regardless of other gate outcomes. ``cap <= 0``
+    disables the check (treat as «no formal cap»). ``review_iteration <= 0``
+    is also a no-op (worker didn't report — assume single-pass).
+    """
+    if cap <= 0 or review_iteration <= 0:
+        return None
+    if review_iteration > cap:
+        return (
+            f"review iteration {review_iteration} exceeds cap {cap} — "
+            f"runaway loop protection; escalating for human review"
+        )
+    return None
+
+
 def _gate_test_coverage(metrics: ReviewMetrics, threshold: float) -> str | None:
     """Test-coverage gate. Returns reason when ratio < threshold OR todo!() > 0.
 
@@ -2394,6 +2412,7 @@ async def _apply_live_tuning(
     gates: CodeReviewGates,
     metrics: ReviewMetrics,
     story_id: str,
+    review_iteration: int = 1,
 ) -> None:
     """Feed per-story samples into ``budget`` and persist tuned thresholds.
 
@@ -2422,7 +2441,7 @@ async def _apply_live_tuning(
         p0_fixed=metrics.p0_fixed,
         test_files_count=metrics.test_files_count,
         expected_n_tests=metrics.expected_n_tests,
-        iterations=1,
+        iterations=max(1, review_iteration),
     )
 
     proposals: list[TuningProposal] = []
@@ -2681,6 +2700,14 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         log.warning("code_review_skip_missing_fields", payload=payload)
         return
 
+    # P5 Evaluator-Optimizer — worker reports how many review→fix rounds
+    # bmad-auto-dev cycled through (env var ORCHESTRATOR_WORKER_REVIEW_ITERATION,
+    # surfaced into the WORKER_COMPLETED payload). Defaults to 1 (single-pass).
+    try:
+        review_iteration = max(1, int(payload.get("review_iteration", 1) or 1))
+    except (TypeError, ValueError):
+        review_iteration = 1
+
     cfg = _CODE_REVIEW_GATE
     wave = (cfg.wave if cfg is not None else None) or os.environ.get(
         "BMAD_CURRENT_WAVE", "default"
@@ -2756,6 +2783,17 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         if tc_reason is not None:
             gate_reasons.append(tc_reason)
 
+    # ── P5 iteration cap — fires regardless of verdict; runaway-loop guard.
+    iter_reason = _gate_iteration_cap(review_iteration, gates.max_review_iterations)
+    if iter_reason is not None:
+        gate_reasons.append(iter_reason)
+        log.info(
+            "code_review_iteration_cap_tripped",
+            story_id=story_id,
+            review_iteration=review_iteration,
+            cap=gates.max_review_iterations,
+        )
+
     # ── Patch Q (diff size) + Patch W (scope by File List allow-list).
     #    Even if metrics are missing (e.g. review emitted no structured block),
     #    the size + scope checks run purely on git so they catch runaway scope
@@ -2803,14 +2841,21 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
                 if diff_reason is not None:
                     gate_reasons.append(diff_reason)
 
-    if verdict == "approve" and gate_reasons:
-        verdict = "reject"
+    if gate_reasons:
+        # iteration-cap reason trips regardless of original verdict; the other
+        # gates only override when verdict was already "approve". When any
+        # reason is present and verdict was approve → force reject; when it was
+        # already non-approve, the reasons annotate the summary but the verdict
+        # stays as the worker reported.
+        if verdict == "approve":
+            verdict = "reject"
         prefix = "; ".join(gate_reasons)
         summary = f"{prefix}\n\n(original: {summary})" if summary else prefix
         log.info(
             "code_review_gate_override",
             story_id=story_id,
             reasons=gate_reasons,
+            review_iteration=review_iteration,
         )
 
     log.info(
@@ -2826,6 +2871,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         "summary": summary,
         "worktree": worktree,
         "review_jsonl": str(handle.jsonl_path),
+        "review_iteration": review_iteration,
     }
     if gate_reasons:
         emit_payload["gate_reasons"] = gate_reasons
@@ -2842,6 +2888,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
             gates=gates,
             metrics=metrics,
             story_id=story_id,
+            review_iteration=review_iteration,
         )
 
 

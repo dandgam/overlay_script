@@ -9,11 +9,19 @@
 - **Use case:** Автономный оркестратор BMad Phase 4 — читает `_bmad-output/planning-artifacts/` целевого проекта, строит DAG зависимостей stories, спавнит параллельные `claude -p` workers в git worktrees, мержит через quality gate в integration branch
 - **Target users:** Solo-оператор (1 человек) для управления крупными BMad-проектами без ручного запуска каждой story
 - **Long-term vision:** Master BMad builder — agent делает phases 1-5 end-to-end, embedded skills, self-learning (см. memory `project_vision_master_bmad_builder.md`)
-- **Success metrics** (TBD — формальных пока нет, надо определить):
-  - Pass rate ≥ 85% на 20 random stories из Odyssey backlog
-  - Cost ≤ $X per story (TBD baseline после pilot)
-  - Escalation rate ≤ 20% (4 из 5 решений автоматом)
-  - Cache hit rate ≥ 50% (требование Anthropic SDK best practice)
+- **Success metrics** (v2 — зафиксированы 2026-05-18 как Phase 3 gate):
+
+  | Метрика | Порог | Где измеряется | Статус baseline |
+  |---|---|---|---|
+  | `pass_rate` | ≥ 85% | eval suite (5-10 stories) — % stories с verdict==approve без human override | TBD после первого eval run |
+  | `escalation_rate` | ≤ 20% | % stories выходящих в HUMAN_QUERY (включая compliance, iteration cap, gate trips) | TBD |
+  | `review_iteration_p95` | ≤ 2 | 95-й перцентиль `recent_review_iterations` window (cap=3 в policy) | TBD |
+  | `cache_hit_rate` | ≥ 50% | Anthropic prompt cache hit rate из worker logs | TBD |
+  | `cost_per_story_median` | TBD | median(recent_story_costs) — baseline после первого eval run, дальше регрессия | TBD |
+  | `p0_auto_fix_coverage` | ≥ 80% | `_gate_p0_threshold` — fixed/found per story | Текущий policy default |
+  | `test_coverage_ratio` | ≥ 50% | `_gate_test_coverage` — actual/expected test count | Текущий policy default |
+
+  **Acceptance criteria для exit Phase 3:** все пороги достигнуты на eval suite из 5+ stories (или явное обоснование почему ниже — например cost_per_story_median baseline ещё не известен в первом запуске).
 
 ---
 
@@ -22,10 +30,10 @@
 | Паттерн | Применение в Virgil | Статус |
 |---|---|---|
 | **P1 Chaining** | Stages внутри `/bmad-auto-dev`: create-story → gauntlet → dev-story → code-review | ✅ Реализован |
-| **P2 Routing** | Model selection (Opus для architecture, Sonnet для impl, Haiku для mechanical); preset routing (parallelism presets) | 🟡 Частично — presets есть, model routing в backlog |
+| **P2 Routing** | `RoleModels` (planner=Opus, reviewer=Opus, dev=Sonnet, routine=Sonnet) + `set_model` tool для runtime swap; preset routing (parallelism presets) | ✅ Реализован (`config.py` + `agent/system_prompt.py` + tool) |
 | **P3 Parallelization** | DAG planner + worker pool (4-8 параллельных workers в worktrees); sectioning независимых stories | ✅ Merged `6e8a18e` (parallelism_initiatives S1..S11) |
 | **P4 Orchestrator-Workers** | **Основной паттерн** — central orchestrator делит эпик на stories, динамически спавнит workers с tool harness | ✅ Реализован (наш core loop) |
-| **P5 Evaluator-Optimizer** | bmad-code-review должен превратиться в loop (review → auto-fix → re-review) | ⬜ **Не реализован** — главный архитектурный gap |
+| **P5 Evaluator-Optimizer** | bmad-code-review → autofix loop (Pilot 2 прошёл «via autofix loop»). `max_review_iterations` cap в `CodeReviewGates` (default=3) + `_gate_iteration_cap` + `review_iteration` payload field. Runaway-loop guard escalates на HUMAN_QUERY за cap | ✅ Formalised 2026-05-18 |
 
 ---
 
@@ -44,28 +52,33 @@
 
 ## 4. Gap-analysis (по фазам ADLC)
 
-### Фаза 1 — Plan ✅ DONE (с оговоркой)
+### Фаза 1 — Plan ✅ DONE
 
 - ✅ Vision сформулирован (`project_vision_master_bmad_builder.md`, 7-step roadmap)
 - ✅ Architecture spec (`spec/spec_master_orchestrator.md` + 11 детальных spec'и по инициативам)
 - ✅ Use case определён (BMad Phase 4 для Odyssey, далее любой BMad-проект)
 - ✅ Backlog ведётся (memory + progress.md)
-- ⬜ **GAP:** формальные success metrics не зафиксированы (см. раздел 1 — TBD)
+- ✅ **Success metrics зафиксированы** (2026-05-18) — таблица 7 порогов в разделе 1, Phase 3 acceptance criteria определены
 
-### Фаза 2 — Build 🟡 IN PROGRESS
+### Фаза 2 — Build ✅ DONE (2026-05-18)
 
 - ✅ Scaffold (Python 3.11 + Anthropic SDK + Claude Agent SDK + networkx + pydantic + typer)
 - ✅ Orchestrator-Workers паттерн (P4)
 - ✅ Parallelization паттерн (P3) — parallelism_initiatives merged `6e8a18e`
 - ✅ Prompt chaining (P1) через embedded Stages
-- ✅ First pilot success — Antares Story 1.1 (commit `9e84da6`, проверка что core loop работает)
-- ✅ Tests: 1426 PASS (post S11)
+- ✅ Routing (P2) — `RoleModels` (planner=Opus, reviewer=Opus, dev=Sonnet, routine=Sonnet) + `set_model` tool
+- ✅ **P5 Evaluator-Optimizer formalised** (2026-05-18) — `max_review_iterations` cap в `CodeReviewGates` + `_gate_iteration_cap` + `review_iteration` field в CODE_REVIEW_VERDICT payload (11 tests)
+- ✅ Pilot 1 success — Antares Story 1.1 (commit `9e84da6`)
+- ✅ Pilot 2 success — Antares Story 1.2 via autofix loop + 5 патчей Z/AA/BB/CC/DD (commits `5440614 → 585b8be`)
+- ✅ **Регрессионные тесты для Z/AA/BB/CC/DD** (2026-05-18) — 10 guard tests в `tests/test_regression_pilot2_patches.py`
+- ✅ Embedded skills (vision step 2) — 14 BMad skills в `skills/upstream/` + `skill_update.py` (pin/diff/patches/conflict reports, 470 строк)
+- ✅ 12 встроенных sub-agent skills (cost-watchdog, dag-planner, elicitation-router, failure-analyst, intent-router, merge-gate, proactive-improver, reflexion-learner, retrospective-writer, story-splitter, wave-coordinator, worker-dispatcher) — wired в `agent/skills/__init__.py` по event types
+- ✅ 8 policy YAML (`skills/policy/`: build-check, code-review-gates, cost-tuning, deletion-safety, diff-size-gate, retry-policy, security-review, stage5-completeness)
+- ✅ Tests: **1447 PASS** (1426 base + 10 regression + 11 P5)
+- ✅ **Pytest stability hardened** (2026-05-18) — `pytest-timeout` + 120s/test cap в `pyproject.toml` (страховка от future hang)
 - ✅ Sandbox isolation (bubblewrap)
 - ✅ Cost tracking + budget hard-cap
-- 🟡 Routing паттерн (P2) — preset routing есть, model routing нет
-- ⬜ **GAP:** Evaluator-Optimizer (P5) — bmad-code-review = single-shot, не loop
-- ⬜ **GAP:** Embedded skills (vision step 2) — пока reads из `<project>/.claude/skills/bmad-*/`
-- ⬜ **GAP:** 19 Medium + 8 Low S10 findings (review-findings-followup) — backlog cleanup
+- ⬜ **Deferred:** 19 Medium + 8 Low S10 findings (review-findings-followup) — backlog cleanup, не блокирует Phase 3
 
 ### Фаза 3 — Test & Release ⬜ NOT STARTED
 
@@ -92,42 +105,47 @@
 
 Сортировано по фазам ADLC — закрываем фазы по порядку. Внутри фазы — по влиянию на закрытие gate'а.
 
-### Сейчас → закрыть фазу 2 Build
+### ✅ Фаза 2 closed (2026-05-18)
 
-1. **Real end-to-end pilot validation** — Antares Story 1.2 или 3.1 (auto-split) в production-mode
-   - Паттерны: P4 + P3
-   - Критерий: один полный story end-to-end без manual intervention
-   - **Это переходный шаг между Build и Test** — pilot валидирует Build, готовит Test
-2. **Define success metrics** (закрывает gap фазы 1)
-   - Зафиксировать в spec пороги: pass rate, cost, escalation rate, cache hit rate
-   - Без этого фаза 3 не имеет gate'а
-3. **Embedded skills** (vision step 2)
-   - Копии `bmad-auto-dev` + `bmad-code-review` в `bmad-orchestrator/skills/`
-   - Снимает зависимость от per-project skill drift
-   - Паттерн: — (рефакторинг storage)
+- Pytest stability hardened (pytest-timeout + 120s cap)
+- 10 регрессионных тестов для патчей Z/AA/BB/CC/DD
+- P5 formalised (max_review_iterations cap + gate + payload + 11 tests)
+- Success metrics зафиксированы
 
 ### Открыть фазу 3 Test & Release
 
-4. **Eval suite** — 5-10 stories разной сложности из Odyssey backlog
-   - Метрики: pass rate, токены, время, escalation rate
-   - «BMad-bench в миниатюре»
-5. **Evaluator-Optimizer loop** (паттерн P5) — bmad-code-review → итеративный gate
-   - Решает lesson: code-review pipeline gaps (auto-fix top 12, остальные defer)
-   - **Главный архитектурный gap фазы 2/3**
-6. **4 security gates** из lesson `code_review_pipeline_gaps`
+1. **Eval suite** (1-2 сессии) — 5-10 stories разной сложности
+   - Текущий блокер: Antares не готов для production-pilot → используем synthetic stories или Odyssey backlog
+   - Метрики: pass rate, token cost, время, escalation rate, review_iteration_p95
+   - Этот же suite валидирует success metrics (см. раздел 1 таблица)
+2. **Auto-elicitation policy engine** (1-2 сессии) — превратить `elicitation-policy.example.yaml` + 8 policy YAML в LLM-driven decision maker
+   - `elicitation-router` skill уже wired (slot для `WORKER_ELICITATION` event)
+   - Нужно: prompt + few-shot для LLM-driven decisions поверх существующих policy YAML
+3. **R3 security minors** (0.3 сессии) — canonicalize+allowed-root для `--lessons-dir` / `--skills-root` / `--orchestrator-home`
+4. **4 security gates** из lesson `code_review_pipeline_gaps`
+5. **Wire worker → review_iteration** (0.5 сессии) — bmad-auto-dev runner.sh + bmad-code-review должны эмитить `review_iteration` в WORKER_COMPLETED payload (сейчас orchestrator принимает поле, но worker его пока не пишет — single-pass default работает)
 
-### Фазы 4-5 (после закрытия 3)
+### Фаза 4 — Deploy (после закрытия Phase 3)
 
-7. **Multi-LLM routing** (паттерн P2) — Opus/Sonnet/Haiku/GPT-4o через LiteLLM
-8. **Observability dashboard** — cost, cache, escalations, quality
-9. **Vision steps 3-7** — embedding phase 3/2/1 skills, self-learning loop, multi-project skill sync
+9. **Supervisor LLM-loop + Terminal TUI** (3-4 сессии) — управление halts/elicitations без ручного оператора
+   - Превращает агента в standalone — может работать без сидящего рядом человека
+   - Зависимость: auto-elicitation engine (#6) должен быть готов
+10. **Odyssey Wave 1a production pilot** — реальный target проект
+
+### Фаза 5 — Monitor & Improve
+
+11. **Anthropic memory tool wiring** (1 сессия) — vision step 6 (foundation для self-learning)
+    - Cross-session knowledge accumulation
+    - Зависимость: pilot logs накоплены (нужно хотя бы 1 production run)
+12. **Observability dashboard** — cost / cache hit / escalations / pass rate per epic
+13. **TTS notifications** (backlog)
+14. **Vision steps 3-7** — embedding phase 3/2/1 skills, self-learning loop, multi-project skill sync
 
 ### Параллельно/между инициативами
 
 - Backlog cleanup (19 Medium + 8 Low S10 findings) — quick wins
-- R3 security minors (canonicalize paths)
 - Manual merge `integration/canonical_patches_port → main` — оргвопрос
-- TTS notifications
+- Doc-of-experiment Pilot 2 retrospective (опционально, memory уже captured)
 
 ---
 
@@ -151,6 +169,6 @@
 
 ---
 
-**Last updated:** 2026-05-18
-**Status:** v1 — created post parallelism_initiatives merge `6e8a18e`, before Odyssey Wave 1a pilot
+**Last updated:** 2026-05-18 (v3 — Phase 2 closed)
+**Status:** v3 — Phase 2 ✅ DONE. Метрики зафиксированы, P5 формализован (11 tests), регрессионные тесты для Pilot 2 патчей (10 tests), pytest stability hardened. Tests: 1447 PASS. Phase 3 entry: eval suite + auto-elicitation engine.
 **Owner:** user + Claude orchestrator
