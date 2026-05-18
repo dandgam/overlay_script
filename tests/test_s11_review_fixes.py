@@ -319,6 +319,57 @@ class TestP1BTimeout:
         assert "timeout" in (outcome.per_project["slow"].error or "")
 
 
+# ── H-2: stale worker home cleanup ─────────────────────────────────────────
+
+
+class TestH2StaleWorkerHomeCleanup:
+    """``cleanup_stale_worker_homes`` rms old ``bmad-worker-*`` dirs only."""
+
+    def test_old_dir_removed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tempfile as _tempfile
+        import time as _time
+
+        from bmad_orchestrator.runtime.worker_spawn import cleanup_stale_worker_homes
+
+        monkeypatch.setattr(_tempfile, "gettempdir", lambda: str(tmp_path))
+        stale = tmp_path / "bmad-worker-old-xxxx"
+        stale.mkdir()
+        (stale / ".claude.json").write_text("{}", encoding="utf-8")
+        old = _time.time() - 7200  # 2h ago
+        os.utime(stale, (old, old))
+        removed = cleanup_stale_worker_homes(max_age_seconds=3600)
+        assert removed >= 1
+        assert not stale.exists()
+
+    def test_fresh_dir_kept(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import tempfile as _tempfile
+
+        from bmad_orchestrator.runtime.worker_spawn import cleanup_stale_worker_homes
+
+        monkeypatch.setattr(_tempfile, "gettempdir", lambda: str(tmp_path))
+        fresh = tmp_path / "bmad-worker-active-yyyy"
+        fresh.mkdir()
+        removed = cleanup_stale_worker_homes(max_age_seconds=3600)
+        assert fresh.exists()
+        assert removed == 0
+
+    def test_non_prefixed_dir_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import tempfile as _tempfile
+        import time as _time
+
+        from bmad_orchestrator.runtime.worker_spawn import cleanup_stale_worker_homes
+
+        monkeypatch.setattr(_tempfile, "gettempdir", lambda: str(tmp_path))
+        other = tmp_path / "some-other-tmp"
+        other.mkdir()
+        old = _time.time() - 7200
+        os.utime(other, (old, old))
+        cleanup_stale_worker_homes(max_age_seconds=3600)
+        assert other.exists()
+
+
 # ── H-1: sandbox sensitive-path blackouts ──────────────────────────────────
 
 

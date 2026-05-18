@@ -27,6 +27,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -229,6 +230,67 @@ def _cleanup_isolated_home(overlay: Path | None) -> None:
             shutil.rmtree(overlay, ignore_errors=True)
     except OSError as exc:
         log.warning("isolated_home cleanup failed for %s: %s", overlay, exc)
+
+
+def cleanup_stale_worker_homes(max_age_seconds: float = 3600.0) -> int:
+    """Remove ``/tmp/bmad-worker-*`` snapshots older than ``max_age_seconds``.
+
+    Review finding H-2: ``_create_isolated_home`` copies live OAuth tokens
+    (``~/.claude.json``, ``~/.claude/``) into ``/tmp/bmad-worker-*``. A
+    SIGKILL/OOM on the parent skips ``_cleanup_isolated_home`` and the
+    snapshot lingers on disk with live credentials until reboot. Call this
+    at pilot startup so each new run garbage-collects orphans from prior
+    crashes that share the current UID.
+
+    Safety:
+    * Only paths whose basename starts with ``bmad-worker-`` (the
+      ``_create_isolated_home`` prefix) are considered.
+    * Only paths inside ``tempfile.gettempdir()`` are touched (so a
+      symlinked ``/tmp`` does not redirect deletion elsewhere).
+    * Only entries owned by the current UID are removed (so a multi-user
+      host cannot have one user clean another user's snapshots).
+    * Mtime check uses ``max_age_seconds`` so an in-flight sibling pilot
+      whose worker is < 1h old is never touched.
+
+    Returns the count of removed entries.
+    """
+    tmp_root = Path(tempfile.gettempdir())
+    if not tmp_root.is_dir():
+        return 0
+    now = time.time()
+    cutoff = now - max_age_seconds
+    uid = os.getuid()
+    removed = 0
+    for entry in tmp_root.glob("bmad-worker-*"):
+        if not entry.name.startswith("bmad-worker-"):
+            continue
+        try:
+            stat = entry.lstat()
+        except OSError:
+            continue
+        if stat.st_uid != uid:
+            continue
+        if stat.st_mtime > cutoff:
+            continue
+        try:
+            if entry.is_symlink() or entry.is_file():
+                entry.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+        except OSError as exc:
+            log.warning(
+                "stale_worker_home_cleanup_failed",
+                path=str(entry),
+                error=str(exc),
+            )
+    if removed:
+        log.info(
+            "stale_worker_homes_cleaned",
+            count=removed,
+            cutoff_age_seconds=max_age_seconds,
+        )
+    return removed
 
 
 def _resolve_claude_bin() -> str | None:

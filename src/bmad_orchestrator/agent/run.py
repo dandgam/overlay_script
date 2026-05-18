@@ -666,6 +666,15 @@ async def _run_real_pilot(
     settings = load_settings()
     _validate_project_path(settings.target_project)
 
+    # Review finding H-2 — sweep stale ``/tmp/bmad-worker-*`` snapshots from
+    # prior crashes that left live OAuth tokens on disk. Best-effort; never
+    # raises (cleanup helper returns a count, logs internally).
+    from bmad_orchestrator.runtime.worker_spawn import (
+        cleanup_stale_worker_homes,
+    )
+
+    cleanup_stale_worker_homes()
+
     # Phase 0 Task 0.1 — pre-cleanup of stale orchestrator processes from
     # prior failed runs. Excludes self + PPID to avoid suicide. See
     # spec_parallelism_initiatives §Phase 0 / Task 0.1.
