@@ -501,12 +501,20 @@ class BwrapSandbox:
         # private snapshot at the same destination path the claude binary
         # resolves via $HOME — so no env change required.
         home = Path(os.path.expanduser("~"))
-        claude_subpaths = (
+        # Per-worker overlay isolates ONLY mutable claude state (session files,
+        # creds, lock/SQLite stores). ``~/.local/share/claude`` holds the
+        # claude binary install (``versions/<v>/`` — the actual executable
+        # ``~/.local/bin/claude`` symlinks into). It is immutable + shared and
+        # MUST bind from the real host: an empty overlay copy would shadow the
+        # binary → ``bwrap: execvp .../claude: No such file or directory``.
+        overlay_claude_subpaths = (
             (".claude",),
             (".claude.json",),
+        )
+        host_only_claude_subpaths = (
             (".local", "share", "claude"),
         )
-        for parts in claude_subpaths:
+        for parts in overlay_claude_subpaths:
             host_path = home.joinpath(*parts)
             if overlay_abs is not None:
                 src = overlay_abs.joinpath(*parts)
@@ -516,6 +524,10 @@ class BwrapSandbox:
                 if src.exists():
                     wrapped += ["--bind", str(src), str(host_path)]
             elif host_path.exists():
+                wrapped += ["--bind", str(host_path), str(host_path)]
+        for parts in host_only_claude_subpaths:
+            host_path = home.joinpath(*parts)
+            if host_path.exists():
                 wrapped += ["--bind", str(host_path), str(host_path)]
 
         if network == "none":

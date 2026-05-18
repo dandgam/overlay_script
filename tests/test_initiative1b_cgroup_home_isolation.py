@@ -315,19 +315,22 @@ def test_create_isolated_home_copies_settings_skips_large_subdirs(
         # projects/ exists as placeholder but is empty (heavy data not copied).
         assert (overlay / ".claude" / "projects").is_dir()
         assert list((overlay / ".claude" / "projects").iterdir()) == []
-        # .local/share/claude target dir created for bwrap bind.
-        assert (overlay / ".local" / "share" / "claude").is_dir()
+        # ``.local/share/claude`` must NOT be in the overlay — it holds the
+        # immutable claude binary install and is bound from the real host
+        # (an empty overlay copy would shadow the binary; see 2026-05-19 fix).
+        assert not (overlay / ".local" / "share" / "claude").exists()
     finally:
         _cleanup_isolated_home(overlay)
 
 
 def test_create_isolated_home_when_host_missing(tmp_path: Path) -> None:
-    """Missing host .claude — overlay still created with empty placeholders."""
+    """Missing host .claude — overlay still created, no claude binary shadow."""
     overlay = _create_isolated_home(worker_label="empty", host_home=tmp_path / "x")
     try:
-        # No .claude or .claude.json copied (host had none) — overlay just
-        # has the .local/share/claude placeholder for bwrap bind.
-        assert (overlay / ".local" / "share" / "claude").is_dir()
+        # No .claude / .claude.json copied (host had none); crucially the
+        # overlay does NOT create an empty .local/share/claude that would
+        # shadow the host claude binary install.
+        assert not (overlay / ".local" / "share" / "claude").exists()
         assert not (overlay / ".claude.json").exists()
     finally:
         _cleanup_isolated_home(overlay)

@@ -221,11 +221,11 @@ def _create_isolated_home(
             except OSError as exc:
                 log.warning("isolated_home copy %s failed: %s", entry, exc)
 
-    # ~/.local/share/claude/ — create empty so bwrap bind has a target;
-    # claude will re-populate version state on first run.
-    dest_share = overlay / ".local" / "share" / "claude"
-    dest_share.mkdir(parents=True, exist_ok=True)
-
+    # NB: ``~/.local/share/claude`` is deliberately NOT snapshotted into the
+    # overlay — it holds the immutable claude binary install
+    # (``versions/<v>/``). The sandbox binds it from the real host (see
+    # sandbox.py::host_only_claude_subpaths). An empty overlay copy would
+    # shadow the binary → ``bwrap: execvp .../claude: No such file or directory``.
     return overlay
 
 
