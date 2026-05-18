@@ -250,6 +250,44 @@
 - ⬜ **P3: `real_pilot_done stories=N` вводит в заблуждение** — счётчик считает
   заспавненные истории, не успешные. Все упавшие воркеры всё равно дают `stories=3`.
   Fix: разделить `spawned` / `succeeded` в финальном логе.
+- ⬜ **P1: bmad-auto-dev → orchestrator verdict event disconnect** — воркеры
+  `claude -p /bmad-auto-dev` делают code-review/autofix **внутри** runner'а (Stage 6),
+  но НЕ эмитят `claude_event verdict=approve/reject` в worker JSONL. Orch-level
+  subscribers (`code_review_subscriber` → `security_review_subscriber` →
+  `merge_to_integration_subscriber`) реагируют именно на этот event. Без него **ни
+  одна история не мержится в `integration`** даже после успешного воркер-цикла.
+  В смоке Antares 1.4 прошла полный autofix → 2 коммита на `feature/1.4` → но
+  merge-gate не сработал → `integration` ветка не создана.
+  Fix: bmad-auto-dev-runner.sh Stage 6 → emit `claude_event verdict=...` в JSONL
+  (или orchestrator перестаёт ждать этот event и читает runner'овский verdict
+  напрямую через `_bmad/auto-dev-state/reviews/<story>-stage6-*.log`).
+  Без этого все 5 hardening-gates (Patch S/N/C/E5/W4/Q/X) — мёртвый код.
+- ⬜ **P1: Sonnet autofix LOC-300 cap → авто-эскалация** — bmad-auto-dev runner
+  откатит autofix Sonnet'а если diff > 300 LOC → halt → требуется ручной
+  override через subagent. На security-критичных эпиках (Epic 4 auth/ACL, Epic 5
+  audit) это бьёт постоянно — reviewer находит 7-15 findings × 50-150 LOC fix =
+  легко >300. Сейчас обходится руками. Архитектурный fix (2 рычага):
+  - **Routing:** policy-правило `if story.tags includes "security-critical"
+    OR review_iteration ≥ 2 → autofix_model = opus` (Opus меньше упирается в
+    LOC при качественных fix'ах, 4× дороже но реже override).
+  - **Auto-split:** жирные stories дробятся ДО спавна → меньший scope на
+    под-задачу → меньше findings → меньше LOC. Decomposer уже подключён
+    (commit `87a172c`), нужен только trigger.
+  - Связано с **P1 verdict disconnect** выше (без verdict event routing
+    rule не сможет различить «нужен ли autofix-эскейлет»).
+- ⬜ **P2: subprocess timeout adaptive / configurable per story** — bash в
+  bmad-auto-dev-runner.sh имеет жёсткий `timeout --kill-after=10s 1800 claude
+  -p` (30 мин на одну claude-call). Stage 5 dev-story на тяжёлых stories
+  (12+ AC, security-critical) **легко уходит за 30 мин** → killed mid-flight,
+  status=failure, work partially committed. В смоке Antares 1.3 и 1.5
+  получили `subprocess_timeout` именно так.
+  Fix:
+  - Default поднять до 60 мин (`timeout 3600 claude -p`)
+  - ENV override `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` для подкрутки оператором
+  - Adaptive: timeout зависит от AC count / estimated_minutes из story
+    frontmatter (12 AC = 60 мин, 6 AC = 30 мин, etc.)
+  - Sync с orchestrator-level `BMAD_WORKER_TIMEOUT_SEC` (сейчас 24h, явно
+    больше runner'овского cap → последний всегда выигрывает).
 
 ---
 
