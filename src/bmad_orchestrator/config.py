@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     # examples/elicitation-policy.example.yaml at engine load time.
     elicitation_policy_path: Path | None = None
 
+    # Supervisor LLM-loop — path to YAML policy. None → fallback to
+    # config/supervisor-policy.yaml at engine load time.
+    supervisor_policy_path: Path | None = None
+
     locale: str = "ru"
 
 

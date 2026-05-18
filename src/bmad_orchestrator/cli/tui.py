@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -50,6 +50,11 @@ class DashboardSnapshot:
     done_recent: list[str] = field(default_factory=list)
     agent_thinking: str = ""
     events_tail: list[str] = field(default_factory=list)
+    # Supervisor LLM-loop activity feed (Phase 4 #9 — last N decisions).
+    # Each entry: {"ts", "event", "tier", "action", "confidence", "reason"}.
+    supervisor_recent: list[dict[str, Any]] = field(default_factory=list)
+    supervisor_judge_state: str = "idle"  # idle / waiting / error
+    supervisor_rate_capacity: str = ""  # e.g. "3/10 used in 60s"
 
 
 # ── palette per spec §14.2 ───────────────────────────────────────────────────
@@ -151,6 +156,56 @@ def _events_panel(snap: DashboardSnapshot) -> Panel:
     return Panel(body, title="events", border_style="blue")
 
 
+def _supervisor_panel(snap: DashboardSnapshot) -> Panel:
+    """Supervisor LLM-loop activity feed.
+
+    Shows last decisions (tier/action/confidence) + current judge state + rate
+    limit capacity. Empty list when supervisor hasn't decided anything yet.
+    """
+    if not snap.supervisor_recent:
+        body_text = Text(
+            f"(no decisions yet)  judge={snap.supervisor_judge_state}",
+            style="dim",
+        )
+        return Panel(body_text, title="supervisor", border_style="bright_blue")
+
+    table = Table.grid(padding=(0, 1))
+    table.add_column(style="dim")
+    table.add_column(style="cyan")
+    table.add_column(style="white")
+    table.add_column()
+    for entry in snap.supervisor_recent[-6:]:
+        tier = str(entry.get("tier", "?"))
+        action = str(entry.get("action", "?"))
+        conf = entry.get("confidence")
+        conf_text = f"{conf:.2f}" if isinstance(conf, int | float) else "-"
+        reason = str(entry.get("reason", ""))[:60]
+        # Color action by severity
+        action_text = Text(action)
+        if action == "abort_pipeline":
+            action_text.stylize("bold red")
+        elif action == "escalate_human":
+            action_text.stylize("yellow")
+        elif action == "auto_respond":
+            action_text.stylize("green")
+        elif action == "pause_workers":
+            action_text.stylize("bold yellow")
+        else:
+            action_text.stylize("dim")
+        table.add_row(f"T{tier}", action_text, conf_text, reason)
+
+    footer = Text(
+        f"  judge={snap.supervisor_judge_state}  "
+        f"rate={snap.supervisor_rate_capacity or '0/?'}",
+        style="dim",
+    )
+    return Panel(
+        Group(table, footer),
+        title="supervisor",
+        border_style="bright_blue",
+    )
+
+
 def _hotkeys_panel() -> Panel:
     """Footer per spec §14.2 — `[q]uit [p]ause [r]etro [l]ogs [d]ag [b]udget [/?]`."""
     body = Text(
@@ -178,6 +233,7 @@ def build_layout(snap: DashboardSnapshot) -> Layout:
     )
     root["body"]["right"].split_column(
         Layout(_agent_panel(snap), name="agent"),
+        Layout(_supervisor_panel(snap), name="supervisor"),
         Layout(_events_panel(snap), name="events"),
     )
     return root

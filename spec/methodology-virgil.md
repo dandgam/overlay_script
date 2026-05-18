@@ -33,7 +33,7 @@
 | **P2 Routing** | `RoleModels` (planner=Opus, reviewer=Opus, dev=Sonnet, routine=Sonnet) + `set_model` tool для runtime swap; preset routing; **auto-elicitation engine** (Tier 0/1/2) для WORKER_ELICITATION → auto_resolve/escalate | ✅ Реализован (`config.py` + `agent/system_prompt.py` + `elicitation/`) |
 | **P3 Parallelization** | DAG planner + worker pool (4-8 параллельных workers в worktrees); sectioning независимых stories | ✅ Merged `6e8a18e` (parallelism_initiatives S1..S11) |
 | **P4 Orchestrator-Workers** | **Основной паттерн** — central orchestrator делит эпик на stories, динамически спавнит workers с tool harness | ✅ Реализован (наш core loop) |
-| **P5 Evaluator-Optimizer** | bmad-code-review → autofix loop (Pilot 2 прошёл «via autofix loop»). `max_review_iterations` cap в `CodeReviewGates` (default=3) + `_gate_iteration_cap` + `review_iteration` payload field. Runaway-loop guard escalates на HUMAN_QUERY за cap | ✅ Formalised 2026-05-18 |
+| **P5 Evaluator-Optimizer** | bmad-code-review → autofix loop (Pilot 2 прошёл «via autofix loop»). `max_review_iterations` cap в `CodeReviewGates` (default=3) + `_gate_iteration_cap` + `review_iteration` payload field. Runaway-loop guard escalates на HUMAN_QUERY за cap. **Supervisor circuit breaker** добавил вторую защиту (max_consecutive_escalations) | ✅ Formalised 2026-05-18 |
 
 ---
 
@@ -130,9 +130,15 @@
 
 ### Фаза 4 — Deploy (после закрытия Phase 3)
 
-9. **Supervisor LLM-loop + Terminal TUI** (3-4 сессии) — управление halts/elicitations без ручного оператора
-   - Превращает агента в standalone — может работать без сидящего рядом человека
-   - Зависимость: auto-elicitation engine (#6) должен быть готов
+9. ✅ **Supervisor LLM-loop + Terminal TUI** (2026-05-18) — P4 Orchestrator-Workers + P2 Routing двухтировая
+   - `supervisor/` модуль (policy + engine + actions + audit + llm_judge stub) — ~720 строк
+   - `runtime/supervisor_subscriber.py` подписан на 5 event типов (HUMAN_QUERY, WORKER_HALT_FILE, BUDGET_THRESHOLD_HIT, WORKER_SILENT_FAILURE, COMPLIANCE_SWEEP_NEEDED)
+   - Tier 0 hard rules (`config/supervisor-policy.yaml` 3 default rules) → Tier 1 LLM-judge (StubJudge, real Sonnet behind future flag) → Tier 2 fail-safe escalate
+   - Rate limiter (10/min default) + circuit breaker (3 consecutive escalations → abort)
+   - Anti-loop: skip events с `payload.source=supervisor`
+   - TUI: `_supervisor_panel` показывает последние N решений + judge state + rate capacity
+   - **50 unit-тестов** в 6 файлах. Tests: 1588 PASS. mypy/ruff clean
+   - Settings.supervisor_policy_path через `--supervisor-policy` (CLI флаг отложен до прод-pilot'а)
 10. **Production pilot на реальном target BMad-проекте** — выбор проекта остаётся на момент запуска (project-agnostic)
 
 ### Фаза 5 — Monitor & Improve
@@ -177,5 +183,5 @@
 ---
 
 **Last updated:** 2026-05-18 (v4 — Phase 3 Step A landed)
-**Status:** v10 — Memory foundation retroactively confirmed done (vendor-agnostic by design). Tests: 1538 PASS. Phase 3 remaining: только Step B (real pilot). Phase 5 foundation: done. Big next steps: Supervisor LLM-loop (Phase 4 #9) или self-learning consolidation loop (Phase 5 — использовать накопленную память).
+**Status:** v11 — Supervisor LLM-loop + TUI ✅ closed (Phase 4 #9). Virgil становится standalone: Tier 0/1/2 routing для 5 orchestrator-level event типов, rate limit + circuit breaker, anti-loop, audit inline в `control.events.jsonl`. Tests: 1588 PASS (+50). Phase 4 remaining: только #10 (production pilot — нужен реальный run). Phase 5 next: self-learning consolidation loop.
 **Owner:** user + Claude orchestrator

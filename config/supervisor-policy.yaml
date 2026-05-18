@@ -1,0 +1,57 @@
+# Supervisor LLM-loop default policy.
+#
+# Loaded by `runtime/supervisor_subscriber.py` at orchestrator startup.
+# Override via `--supervisor-policy <path>` CLI flag or
+# `Settings.supervisor_policy_path`. See spec/spec_supervisor_llm_loop.md.
+#
+# Schema: src/bmad_orchestrator/supervisor/policy.py::SupervisorPolicy
+
+version: 1
+
+defaults:
+  confidence_auto_threshold: 0.85   # Tier 1 LLM-judge auto-action floor
+  confidence_escalate_floor: 0.60   # below this — escalate без suggestion
+  max_actions_per_minute: 10        # global rate limit (Q3 — global, not per-type)
+  max_consecutive_escalations: 3    # after 3 in a row → abort pipeline (signal noise)
+  fail_safe_on_judge_error: true    # LLM timeout/error → escalate human (Q5)
+
+judge:
+  model: claude-sonnet-4-6
+  timeout_seconds: 5.0
+  system_prompt: |
+    You are an autonomous pipeline supervisor for a BMad orchestrator.
+    On each incoming event you must classify it into one of:
+      * auto_respond     — execute tool calls without human intervention
+      * pause_workers    — SIGSTOP all active workers (reversible)
+      * abort_pipeline   — stop orchestrator cleanly (manual restart required)
+      * escalate_human   — notify operator + wait
+      * no_op            — event handled by another subscriber, do nothing
+
+    Output strict JSON: {action, confidence, reason, tool_calls?}.
+    confidence must be in [0.0, 1.0]; below 0.6 → escalate_human regardless.
+    For destructive ops (delete, drop, force-push) — escalate_human always.
+
+hard_rules:
+  # Tier 0 — deterministic shortcuts. First-match wins.
+
+  - id: budget-hard-cap
+    when:
+      event: BUDGET_THRESHOLD_HIT
+      ratio_gte: 1.0
+    action: pause_workers
+    reason: "Hard budget cap hit — pause до подтверждения оператором"
+
+  - id: compliance-sweep-routine
+    when:
+      event: COMPLIANCE_SWEEP_NEEDED
+    action: auto_respond
+    tool_calls:
+      - name: trigger_compliance_sweep
+        args: {}
+    reason: "Routine sweep — выполнить автоматом без эскалации"
+
+  - id: silent-failure-always-escalate
+    when:
+      event: WORKER_SILENT_FAILURE
+    action: escalate_human
+    reason: "Silent failure требует diagnostic — automated path небезопасен"

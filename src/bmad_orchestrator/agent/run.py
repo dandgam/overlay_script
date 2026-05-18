@@ -97,6 +97,12 @@ from bmad_orchestrator.runtime.elicitation_routing import (
     make_elicitation_subscriber,
 )
 from bmad_orchestrator.runtime.event_loop import Event, EventCallback, EventLoop, EventType
+from bmad_orchestrator.runtime.supervisor_subscriber import (
+    load_supervisor_engine as _load_supervisor_engine,
+)
+from bmad_orchestrator.runtime.supervisor_subscriber import (
+    make_supervisor_subscriber,
+)
 from bmad_orchestrator.runtime.file_list_parser import (
     collect_allow_list,
     has_explicit_file_list,
@@ -962,6 +968,16 @@ async def _run_real_pilot_body(
     elicitation_policy_path = getattr(settings, "elicitation_policy_path", None)
     elicitation_engine = _load_elicitation_engine(elicitation_policy_path)
     bus.on(cast(EventCallback, partial(make_elicitation_subscriber(elicitation_engine), bus=bus)))
+
+    # Supervisor LLM-loop (Phase 4 #9 — P4 Orchestrator-Workers + P2 Routing).
+    # Listens on 5 high-level event types (HUMAN_QUERY, WORKER_HALT_FILE,
+    # BUDGET_THRESHOLD_HIT, WORKER_SILENT_FAILURE, COMPLIANCE_SWEEP_NEEDED),
+    # routes them through Tier 0 hard rules → Tier 1 LLM judge (stub by
+    # default; real Sonnet behind future flag) → Tier 2 fail-safe escalate.
+    # Filters out events with payload['source']='supervisor' to avoid loops.
+    supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
+    supervisor_engine = _load_supervisor_engine(supervisor_policy_path)
+    bus.on(cast(EventCallback, partial(make_supervisor_subscriber(supervisor_engine), bus=bus)))
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []

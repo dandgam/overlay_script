@@ -169,9 +169,9 @@ async def test_p0_1_real_pilot_wires_three_subscribers(
     finally:
         await bus.stop()
 
-    # 7 canonical + 1 elicitation_subscriber (Phase 3 Auto-elicitation engine).
-    assert len(bus._subs) == 8, (
-        f"Expected 8 subscribers wired after _run_real_pilot, "
+    # 7 canonical + elicitation_subscriber (Phase 3) + supervisor_subscriber (Phase 4).
+    assert len(bus._subs) == 9, (
+        f"Expected 9 subscribers wired after _run_real_pilot, "
         f"got {len(bus._subs)}"
     )
 
