@@ -722,6 +722,41 @@ async def _run_real_pilot(
         _emit_spend_report(spend_carry[0])
 
 
+def _detect_orphan_stories(story_ids: list[str]) -> list[str]:
+    """Return story_ids that don't appear in target project's epics.md.
+
+    Patch BB 2026-05-18: orphan-spike detection. A story is "orphan" when its
+    standalone ``stories/<id>.md`` exists (so DAG sees it) but the heading
+    ``#### Story <N.M>:`` is missing from ``epics.md`` (so the Gauntlet's
+    text-extraction loses its primary source). The Gauntlet's Patch-AA
+    fallback handles execution; this detector just surfaces the gap so the
+    operator can backfill epics.md when convenient.
+
+    Returns ``[]`` when epics.md is unreadable (degrades gracefully — the
+    pre-flight check should never block a real run).
+    """
+    import re as _re
+
+    from bmad_orchestrator.agent.tools._common import stories_dir
+
+    epics_md = stories_dir().parent / "epics.md"
+    try:
+        text = epics_md.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return []
+    heading_re = _re.compile(
+        r"^#{4,5}\s+Story\s+(\d+(?:\.\d+[a-z]?))\s*:", _re.MULTILINE
+    )
+    present_dotted = {m.group(1) for m in heading_re.finditer(text)}
+    orphans: list[str] = []
+    for sid in story_ids:
+        m = _re.match(r"^(\d+)-(\d+[a-z]?)(?:-.*)?$", sid)
+        dotted = f"{m.group(1)}.{m.group(2)}" if m else sid
+        if dotted not in present_dotted and sid not in present_dotted:
+            orphans.append(sid)
+    return orphans
+
+
 def _cmdline_matches_project(pid: int, project: str) -> bool:
     """Return True iff ``/proc/<pid>/cmdline`` has ``--project <project>`` exactly.
 
@@ -941,6 +976,22 @@ async def _run_real_pilot_body(
             ids=[s["id"] for s in manual_stories],
             dag_planner_bypassed=True,
         )
+        # Patch BB 2026-05-18: orphan-story pre-flight warning. A story file may
+        # exist on disk without a matching Epic-section breakdown in epics.md
+        # (Phase-3.5 spikes are common offenders). The Gauntlet's Patch-AA
+        # fallback handles this gracefully, but operator should know that the
+        # canonical artifact chain is incomplete.
+        orphan_ids = _detect_orphan_stories(story_filter)
+        if orphan_ids:
+            log.warning(
+                "story_orphan_in_epics_md",
+                story_ids=orphan_ids,
+                note=(
+                    "stories not found in epics.md — gauntlet will fall back "
+                    "to standalone story files (Patch AA). Consider backfilling "
+                    "epics.md for canonical BMad chain."
+                ),
+            )
 
     daily_limit_override = os.environ.get("BMAD_DAILY_LIMIT_USD")
     if daily_limit_override:

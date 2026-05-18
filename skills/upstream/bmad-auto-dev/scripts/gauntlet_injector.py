@@ -73,8 +73,9 @@ DEFAULT_DEEP_TAGS = [
 
 
 def extract_epic_id(story_id: str) -> str:
-    """'1.3' -> 'epic-1'; '13.2a' -> 'epic-13'; 'foo' -> 'epic-foo' (defensive)."""
-    head = story_id.split(".", 1)[0]
+    """'1.3' -> 'epic-1'; '13.2a' -> 'epic-13'; '4-8-foo' -> 'epic-4'."""
+    # Patch AA 2026-05-18: tolerate kebab form (4-8-foo) the same as dotted (4.8).
+    head = re.split(r"[.-]", story_id, maxsplit=1)[0]
     return f"epic-{head}"
 
 
@@ -133,16 +134,51 @@ def load_config(customize_path: Path) -> dict:
     }
 
 
-def extract_story_text(epics_path: Path, story_id: str) -> str:
-    """Slice the story block from epics.md by heading id."""
+def _kebab_to_dotted(story_id: str) -> str:
+    """Convert kebab-form story_id (1-2-foo-bar) → dotted (1.2).
+
+    Returns input unchanged if already dotted or unrecognized shape.
+    """
+    m = re.match(r"^(\d+)-(\d+[a-z]?)(?:-.*)?$", story_id)
+    return f"{m.group(1)}.{m.group(2)}" if m else story_id
+
+
+def extract_story_text(
+    epics_path: Path,
+    story_id: str,
+    stories_dir: Path | None = None,
+) -> str:
+    """Slice the story block from epics.md by heading id.
+
+    Patch AA 2026-05-18: accept both kebab (``1-2-docker-compose-dev-stack``)
+    and dotted (``1.2``) story_id. Fall back to a standalone story file in
+    ``stories_dir/<id>.md`` when the story is not present in epics.md
+    (orphan-spike scenario — Phase 3 didn't back-integrate it).
+    """
+    dotted = _kebab_to_dotted(story_id)
     text = epics_path.read_text(encoding="utf-8")
     matches = list(STORY_HEADING_RE.finditer(text))
     for i, m in enumerate(matches):
-        if m.group("id") == story_id:
+        if m.group("id") in (story_id, dotted):
             start = m.start()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
             return text[start:end].rstrip()
-    raise KeyError(f"Story {story_id!r} not found in {epics_path}")
+    # Patch AA fallback — orphan story scenario.
+    if stories_dir is not None:
+        for candidate in (
+            stories_dir / f"{story_id}.md",
+            stories_dir / f"{dotted}.md",
+        ):
+            if candidate.exists():
+                sys.stderr.write(
+                    f"[gauntlet] note: {story_id!r} not in {epics_path}; "
+                    f"falling back to {candidate} (orphan-spike)\n"
+                )
+                return candidate.read_text(encoding="utf-8").rstrip()
+    raise KeyError(
+        f"Story {story_id!r} not found in {epics_path} "
+        f"and no standalone file at {stories_dir}/{story_id}.md"
+    )
 
 
 def build_prompts(
@@ -253,6 +289,14 @@ def main() -> None:
     )
     p.add_argument("--epics", type=Path, default=DEFAULT_EPICS, help="path to epics.md")
     p.add_argument(
+        "--stories-dir",
+        type=Path,
+        default=Path(
+            os.environ.get("BMAD_STORIES_DIR") or "_bmad/output/planning/stories"
+        ),
+        help="path to stories/ dir (fallback for orphan stories not in epics.md)",
+    )
+    p.add_argument(
         "--templates",
         type=Path,
         default=DEFAULT_TEMPLATES,
@@ -278,7 +322,7 @@ def main() -> None:
     args = p.parse_args()
 
     config = load_config(args.customize)
-    story_text = extract_story_text(args.epics, args.story)
+    story_text = extract_story_text(args.epics, args.story, args.stories_dir)
     epic_id = extract_epic_id(args.story)
 
     mode = (
