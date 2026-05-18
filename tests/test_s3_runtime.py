@@ -93,10 +93,12 @@ def test_event_loop_has_all_spec_types() -> None:
         "forensic_investigation_needed",
         # 2026-05-19 Phase 4 hardening #2 — PreCompact memory persistence.
         "worker_state_persisted",
+        # 2026-05-19 Phase 4 hardening #5 — Two-stage merge gate split.
+        "merge_gate_stage_completed",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 26
+    assert len(ALL_EVENT_TYPES) == 27
 
 
 @pytest.mark.asyncio

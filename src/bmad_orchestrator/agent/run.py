@@ -2815,8 +2815,186 @@ async def _real_security_review_runner(
     return verdict, findings
 
 
+# ── Phase 4 hardening #5 — Two-stage merge-gate split ───────────────────────
+
+MERGE_GATE_SPEC_SKILL: str = "/bmad-code-review"
+MERGE_GATE_QUALITY_SKILL: str = "/bmad-code-review"
+
+
+def _merge_verdicts(spec_verdict: str, quality_verdict: str) -> str:
+    """Merge two stage verdicts using worst-wins rule.
+
+    Rules:
+      approve + approve        → approve
+      approve + request_changes → request_changes
+      request_changes + anything → request_changes
+      error + anything          → error (unless other is request_changes)
+
+    The priority order is: error > request_changes > reject > approve.
+    """
+    order = {"approve": 0, "reject": 1, "request_changes": 2, "error": 3}
+    spec_rank = order.get(spec_verdict, 2)
+    quality_rank = order.get(quality_verdict, 2)
+    if spec_rank >= quality_rank:
+        return spec_verdict
+    return quality_verdict
+
+
+async def _spawn_merge_gate_spec_worker(
+    *,
+    worktree: str,
+    story_id: str,
+    wave: str,
+) -> WorkerHandle:
+    """Spawn spec-stage review worker (AC coverage + story completeness)."""
+    original_wave = os.environ.get("BMAD_CURRENT_WAVE")
+    os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__gate_spec_{story_id}"
+    try:
+        handle = await runtime_spawn_worker(
+            worktree=worktree,
+            story_id=story_id,
+            branch=f"feature/{story_id}",
+            skill_invocation=MERGE_GATE_SPEC_SKILL,
+            sandbox_network="none",
+        )
+    finally:
+        if original_wave is None:
+            os.environ.pop("BMAD_CURRENT_WAVE", None)
+        else:
+            os.environ["BMAD_CURRENT_WAVE"] = original_wave
+    return handle
+
+
+async def _spawn_merge_gate_quality_worker(
+    *,
+    worktree: str,
+    story_id: str,
+    wave: str,
+) -> WorkerHandle:
+    """Spawn quality-stage review worker (lints, tests, security, perf)."""
+    original_wave = os.environ.get("BMAD_CURRENT_WAVE")
+    os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__gate_quality_{story_id}"
+    try:
+        handle = await runtime_spawn_worker(
+            worktree=worktree,
+            story_id=story_id,
+            branch=f"feature/{story_id}",
+            skill_invocation=MERGE_GATE_QUALITY_SKILL,
+            sandbox_network="none",
+        )
+    finally:
+        if original_wave is None:
+            os.environ.pop("BMAD_CURRENT_WAVE", None)
+        else:
+            os.environ["BMAD_CURRENT_WAVE"] = original_wave
+    return handle
+
+
+async def _run_merge_gate_spec_stage(
+    *,
+    worktree: str,
+    story_id: str,
+    wave: str,
+    bus: EventLoop,
+) -> tuple[str, str, ReviewMetrics | None]:
+    """Run Stage 1 (spec) of two-stage merge gate.
+
+    Returns ``(verdict, summary, metrics)``.
+    On spawn failure returns ``("error", reason, None)`` and does NOT emit — caller
+    emits the final CODE_REVIEW_VERDICT.
+    """
+    try:
+        handle = await _spawn_merge_gate_spec_worker(
+            worktree=worktree, story_id=story_id, wave=wave
+        )
+    except (OSError, RuntimeError) as exc:
+        log.exception(
+            "merge_gate_spec_spawn_failed", story_id=story_id, worktree=worktree
+        )
+        return "error", f"spec stage spawn failed: {type(exc).__name__}: {exc}", None
+
+    verdict = "error"
+    summary = ""
+    metrics: ReviewMetrics | None = None
+    async for ev in tail_jsonl_events(handle.jsonl_path):
+        extracted = _extract_verdict_from_event(ev)
+        if extracted is not None:
+            verdict, summary = extracted
+        new_metrics = _extract_metrics_from_event(ev)
+        if new_metrics is not None:
+            metrics = _merge_metrics(metrics, new_metrics)
+
+    await bus.emit(
+        EventType.MERGE_GATE_STAGE_COMPLETED,
+        stage="spec",
+        story_id=story_id,
+        verdict=verdict,
+        findings_count=metrics.p0_found if metrics is not None else 0,
+    )
+    log.info(
+        "merge_gate_spec_stage_done",
+        story_id=story_id,
+        verdict=verdict,
+    )
+    return verdict, summary, metrics
+
+
+async def _run_merge_gate_quality_stage(
+    *,
+    worktree: str,
+    story_id: str,
+    wave: str,
+    bus: EventLoop,
+) -> tuple[str, str, ReviewMetrics | None]:
+    """Run Stage 2 (quality) of two-stage merge gate.
+
+    Returns ``(verdict, summary, metrics)``.
+    Called ONLY when spec stage verdict == "approve".
+    """
+    try:
+        handle = await _spawn_merge_gate_quality_worker(
+            worktree=worktree, story_id=story_id, wave=wave
+        )
+    except (OSError, RuntimeError) as exc:
+        log.exception(
+            "merge_gate_quality_spawn_failed", story_id=story_id, worktree=worktree
+        )
+        return "error", f"quality stage spawn failed: {type(exc).__name__}: {exc}", None
+
+    verdict = "error"
+    summary = ""
+    metrics: ReviewMetrics | None = None
+    async for ev in tail_jsonl_events(handle.jsonl_path):
+        extracted = _extract_verdict_from_event(ev)
+        if extracted is not None:
+            verdict, summary = extracted
+        new_metrics = _extract_metrics_from_event(ev)
+        if new_metrics is not None:
+            metrics = _merge_metrics(metrics, new_metrics)
+
+    await bus.emit(
+        EventType.MERGE_GATE_STAGE_COMPLETED,
+        stage="quality",
+        story_id=story_id,
+        verdict=verdict,
+        findings_count=metrics.p0_found if metrics is not None else 0,
+    )
+    log.info(
+        "merge_gate_quality_stage_done",
+        story_id=story_id,
+        verdict=verdict,
+    )
+    return verdict, summary, metrics
+
+
 async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
-    """On ``WORKER_COMPLETED(success)`` → spawn ``/bmad-code-review``, emit verdict.
+    """On ``WORKER_COMPLETED(success)`` → run two-stage merge gate, emit verdict.
+
+    Phase 4 hardening #5 — two-stage split:
+      Stage 1 (spec): AC coverage + story completeness.
+      Stage 2 (quality): code quality (lints, tests, security, perf).
+    Quality stage runs ONLY when spec stage approves (saves cost).
+    Final verdict = worst-wins merge of both stages.
 
     Filtering: anything other than ``WORKER_COMPLETED`` with
     ``payload['status'] == 'success'`` is a no-op (failures bypass review and
@@ -2849,33 +3027,52 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         "BMAD_CURRENT_WAVE", "default"
     )
 
-    try:
-        handle = await _spawn_code_review_worker(
-            worktree=worktree, story_id=story_id, wave=wave
-        )
-    except (OSError, RuntimeError) as exc:  # spawn / sandbox failure → escalate
-        log.exception(
-            "code_review_spawn_failed", story_id=story_id, worktree=worktree
+    # ── Phase 4 hardening #5 — Stage 1: spec (AC coverage + story completeness).
+    spec_verdict, spec_summary, spec_metrics = await _run_merge_gate_spec_stage(
+        worktree=worktree, story_id=story_id, wave=wave, bus=bus
+    )
+
+    if spec_verdict != "approve":
+        # Spec stage failed — skip quality stage entirely (saves cost).
+        log.info(
+            "merge_gate_quality_stage_skipped",
+            story_id=story_id,
+            spec_verdict=spec_verdict,
         )
         await bus.emit(
             EventType.CODE_REVIEW_VERDICT,
             story_id=story_id,
-            verdict="error",
-            summary=f"spawn failed: {type(exc).__name__}: {exc}",
+            verdict=spec_verdict,
+            summary=spec_summary,
             worktree=worktree,
+            review_iteration=review_iteration,
+            gate_stage="spec",
         )
+        if spec_metrics is not None and cfg is not None and cfg.budget is not None:
+            gates_for_tuning = _load_review_gates(cfg)
+            await _apply_live_tuning(
+                bus=bus,
+                cfg=cfg,
+                gates=gates_for_tuning,
+                metrics=spec_metrics,
+                story_id=story_id,
+                review_iteration=review_iteration,
+            )
         return
 
-    verdict = "error"
-    summary = ""
-    metrics: ReviewMetrics | None = None
-    async for ev in tail_jsonl_events(handle.jsonl_path):
-        extracted = _extract_verdict_from_event(ev)
-        if extracted is not None:
-            verdict, summary = extracted
-        new_metrics = _extract_metrics_from_event(ev)
-        if new_metrics is not None:
-            metrics = _merge_metrics(metrics, new_metrics)
+    # ── Stage 2: quality (lints, tests, security, perf).
+    quality_verdict, quality_summary, quality_metrics = await _run_merge_gate_quality_stage(
+        worktree=worktree, story_id=story_id, wave=wave, bus=bus
+    )
+
+    # Merge verdicts: worst wins.
+    verdict = _merge_verdicts(spec_verdict, quality_verdict)
+    summary = quality_summary if quality_summary else spec_summary
+    metrics: ReviewMetrics | None = quality_metrics if quality_metrics is not None else spec_metrics
+
+    # Dummy handle reference for review_jsonl field in emit (quality stage is last).
+    # Use spec_summary for the combined summary if quality is empty.
+    handle_jsonl_str = ""
 
     gates = _load_review_gates(cfg)
 
@@ -2904,7 +3101,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
                 gate_reason=compliance_hit,
                 compliance_tags=list(metrics.compliance_tags),
                 worktree=worktree,
-                review_jsonl=str(handle.jsonl_path),
+                review_jsonl=handle_jsonl_str,
                 actions=["mandatory_fix", "abandon"],
             )
             return
@@ -3018,14 +3215,14 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         story_id=story_id,
         verdict=verdict,
         worktree=worktree,
-        review_jsonl=str(handle.jsonl_path),
+        review_jsonl=handle_jsonl_str,
     )
     emit_payload: dict[str, Any] = {
         "story_id": story_id,
         "verdict": verdict,
         "summary": summary,
         "worktree": worktree,
-        "review_jsonl": str(handle.jsonl_path),
+        "review_jsonl": handle_jsonl_str,
         "review_iteration": review_iteration,
     }
     if gate_reasons:

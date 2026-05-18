@@ -1,46 +1,21 @@
 ---
 name: merge-gate
-description: Run bmad-code-review and (conditionally) security-review on a worktree, decide merge / reject / escalate. Activates when worker completes successfully.
+description: DEPRECATED. Split into merge-gate-spec (AC coverage) and merge-gate-quality (code quality). See Phase 4 hardening #5.
 ---
 
-# merge-gate skill
+# merge-gate skill (DEPRECATED)
 
-## Когда активируется
+> **WARNING:** This skill has been split into two separate skills per Phase 4 hardening #5.
+> Do NOT use this skill directly. The orchestrator now invokes the two-stage pipeline.
 
-- Event `worker_completed` со status=ok
-- Worker'у нечего commit'ить → пропуск
-- В chat-mode: «давай мерджить 1.8a»
+## Replacement skills
 
-## Pipeline (spec §11)
+- `agent/skills/merge-gate-spec/SKILL.md` — Stage 1: AC coverage + story completeness
+- `agent/skills/merge-gate-quality/SKILL.md` — Stage 2: code quality (lints, tests, security)
 
-```
-1. run_code_review(worktree)
-   ├─ PASS → continue
-   ├─ FAIL → spawn_fixer OR escalate (per finding budget)
-   └─ TIMEOUT → escalate
-2. IF security_critical (per story frontmatter):
-   run_security_review(worktree)
-   ├─ PASS → continue
-   └─ FAIL → ALWAYS escalate (security findings нельзя auto-fix)
-3. git_merge(worktree, target=integration/<wave>)
-   ├─ MERGED → cleanup_worktree + emit wave_progress_event
-   └─ CONFLICT → escalate (rare, mutex должен был предотвратить)
-```
+## Two-stage pipeline
 
-## Decision matrix
+Stage 1 (spec) runs first. Stage 2 (quality) runs only if Stage 1 approves.
+Final verdict = worst of both stages (approve+approve=approve, approve+request_changes=request_changes).
 
-| code-review | security-review | Action |
-|-------------|-----------------|--------|
-| PASS | PASS / N/A | merge |
-| FAIL (≤5 findings) | — | spawn_fixer, retry 1×, then escalate |
-| FAIL (>5 findings) | — | escalate immediately |
-| — | FAIL | escalate immediately (no auto-fix) |
-
-## Tools
-
-- `run_code_review`, `run_security_review`, `git_merge`, `spawn_fixer`, `cleanup_worktree`, `update_sprint_status`
-
-## Failure modes
-
-- Reviewer subagent crashes → retry 1×, then mark story FAILED
-- Merge conflict from concurrent worker → check mutex was respected, escalate if bug
+See `agent/run.py::code_review_subscriber` for the implementation.

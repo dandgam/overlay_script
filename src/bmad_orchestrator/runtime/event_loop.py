@@ -33,7 +33,7 @@ BACKSTOP_INTERVAL_SECONDS_DEFAULT = 300
 
 
 class EventType(StrEnum):
-    """Spec §4 — все 13 типов + FS4 HUMAN_QUERY. Phase 4 hardening adds up to 26 total."""
+    """Spec §4 — все 13 типов + FS4 HUMAN_QUERY. Phase 4 hardening adds up to 27 total."""
 
     WORKER_COMPLETED = "worker_completed"
     WORKER_HALT_FILE = "worker_halt_file"
@@ -63,6 +63,9 @@ class EventType(StrEnum):
     FORENSIC_INVESTIGATION_NEEDED = "forensic_investigation_needed"
     # Phase 4 hardening #2 — PreCompact memory persistence observability.
     WORKER_STATE_PERSISTED = "worker_state_persisted"
+    # Phase 4 hardening #5 — Two-stage merge gate split.
+    # Payload: {stage: "spec"|"quality", verdict: str, findings_count: int}
+    MERGE_GATE_STAGE_COMPLETED = "merge_gate_stage_completed"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)

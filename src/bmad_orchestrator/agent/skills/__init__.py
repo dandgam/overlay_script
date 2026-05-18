@@ -42,7 +42,7 @@ FIELD_RE = re.compile(r"^(?P<key>[a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*(?P<val>.*?)\s*$
 # Метаданные считаются «short» если ≤ MAX_METADATA_TOKENS_PER_SKILL токенов.
 # Эвристика: 1 токен ≈ 4 символа. Spec §19: ~100 tokens / skill, ~1.5K на 12.
 MAX_METADATA_TOKENS_PER_SKILL = 120
-MAX_METADATA_TOKENS_TOTAL = 1500
+MAX_METADATA_TOKENS_TOTAL = 1800
 
 # Skill name → событие(я) которые её активируют (spec §19, разделы
 # «Когда активируется» в SKILL.md). Static map (а не парсинг markdown) —
@@ -52,7 +52,11 @@ TRIGGER_MAP: dict[str, frozenset[EventType]] = {
         {EventType.WAVE_BOUNDARY_REACHED, EventType.EPIC_BOUNDARY_REACHED}
     ),
     "worker-dispatcher": frozenset({EventType.SCHEDULED_WAKEUP}),
+    # merge-gate is deprecated; kept in map so existing refs stay valid.
     "merge-gate": frozenset({EventType.WORKER_COMPLETED}),
+    # Phase 4 hardening #5 — two-stage split.
+    "merge-gate-spec": frozenset({EventType.WORKER_COMPLETED}),
+    "merge-gate-quality": frozenset({EventType.MERGE_GATE_STAGE_COMPLETED}),
     "elicitation-router": frozenset({EventType.WORKER_ELICITATION}),
     "retrospective-writer": frozenset(
         {
@@ -174,7 +178,7 @@ def metadata_block() -> str:
     если превышен (защита от skill bloat).
     """
     metas = iter_metadata()
-    lines = ["# Skill catalog (12 specialized internal skills, spec §19)"]
+    lines = ["# Skill catalog (14 specialized internal skills, spec §19)"]
     total_tokens = sum(m.estimated_tokens for m in metas)
     if total_tokens > MAX_METADATA_TOKENS_TOTAL:
         raise SkillError(

@@ -69,14 +69,18 @@ def _write_jsonl(path: Path, events: list[dict[str, Any]]) -> None:
 
 
 def _collect_emitted(bus: EventLoop) -> list[Event]:
-    """Drain all events from the bus queue (non-blocking)."""
+    """Drain all events from the bus queue (non-blocking).
+
+    Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED observability events;
+    filter them so pre-split assertions remain valid.
+    """
     out: list[Event] = []
     while True:
         try:
             out.append(bus.queue.get_nowait())
         except asyncio.QueueEmpty:
             break
-    return out
+    return [e for e in out if e.type != EventType.MERGE_GATE_STAGE_COMPLETED]
 
 
 @pytest.fixture
@@ -256,7 +260,8 @@ async def test_w4_code_review_emits_approve_verdict(
         captured["wave"] = wave
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(target_project=tmp_path, wave="1a")
     bus = EventLoop()
@@ -293,7 +298,8 @@ async def test_w4_code_review_emits_request_changes_verdict(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(target_project=tmp_path, wave="1a")
     bus = EventLoop()
@@ -324,7 +330,8 @@ async def test_w4_code_review_emits_reject_verdict(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(target_project=tmp_path, wave="1a")
     bus = EventLoop()
@@ -349,7 +356,7 @@ async def test_w4_code_review_spawn_failure_emits_error_verdict(
     async def boom(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         raise RuntimeError("sandbox unavailable")
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", boom)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", boom)
 
     configure_code_review_gate(target_project=tmp_path, wave="1a")
     bus = EventLoop()

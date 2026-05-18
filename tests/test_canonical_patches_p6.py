@@ -411,8 +411,9 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     # 2026-05-19 BMad Phase 4 gap-closure adds SPRINT_SCOPE_CHANGE_DETECTED
     # and FORENSIC_INVESTIGATION_NEEDED → 23 + 2 = 25.
     # 2026-05-19 Phase 4 hardening #2 adds WORKER_STATE_PERSISTED → 25 + 1 = 26.
-    assert len(ALL_EVENT_TYPES) == 26, (
-        f"Expected 26 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # 2026-05-19 Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED → 26 + 1 = 27.
+    assert len(ALL_EVENT_TYPES) == 27, (
+        f"Expected 27 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 
@@ -503,7 +504,10 @@ async def test_e2e_chain_security_critical_emits_passed_audit_and_merges(
         return "deadbeef"
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", _fake_review_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", _fake_review_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", _fake_review_spawn
     )
     monkeypatch.setattr(
         "bmad_orchestrator.agent.run._ff_merge_to_integration", _fake_ff_merge
@@ -579,7 +583,10 @@ async def test_e2e_chain_non_security_emits_passed_audit_not_critical(
         return "deadbeef"
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", _fake_review_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", _fake_review_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", _fake_review_spawn
     )
     monkeypatch.setattr(
         "bmad_orchestrator.agent.run._ff_merge_to_integration", _fake_ff_merge
@@ -644,7 +651,7 @@ async def test_e2e_chain_build_check_failure_halts_before_code_review(
         )
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker",
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker",
         _explosive_review_spawn,
     )
     configure_code_review_gate(target_project=target, wave="w")
@@ -696,7 +703,7 @@ async def test_e2e_chain_unsafe_deletion_halts_before_code_review(
         )
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker",
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker",
         _explosive_review_spawn,
     )
     configure_code_review_gate(target_project=target, wave="w")
@@ -751,7 +758,7 @@ async def test_e2e_chain_code_review_reject_emits_human_query_no_merge(
         raise AssertionError("ff-merge must not run on verdict=reject")
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", _fake_review_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", _fake_review_spawn
     )
     monkeypatch.setattr(
         "bmad_orchestrator.agent.run._ff_merge_to_integration", _explosive_ff_merge
@@ -819,7 +826,10 @@ async def test_e2e_chain_security_review_block_mutates_verdict_no_merge(
         raise AssertionError("ff-merge must not run after security BLOCK")
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", _fake_review_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", _fake_review_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", _fake_review_spawn
     )
     monkeypatch.setattr(
         "bmad_orchestrator.agent.run._ff_merge_to_integration", _explosive_ff_merge

@@ -97,7 +97,9 @@ def _drain(bus: EventLoop) -> list[Event]:
             out.append(bus.queue.get_nowait())
         except asyncio.QueueEmpty:
             break
-    return out
+    # Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED observability events;
+    # filter them so pre-split assertions remain valid.
+    return [e for e in out if e.type != EventType.MERGE_GATE_STAGE_COMPLETED]
 
 
 # ── 1. subscribe_one_correlation — basic resolution ─────────────────────────
@@ -397,7 +399,10 @@ async def test_w5_e2e_synthetic_wave(
         return _make_handle(worktree, story_id, review_jsonl)
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     configure_code_review_gate(target_project=repo, wave="1a")
@@ -415,7 +420,14 @@ async def test_w5_e2e_synthetic_wave(
     await code_review_subscriber(worker_completed, bus)
 
     # 2. Pull verdict off bus, run merge subscriber.
-    verdict_event = await bus.next(timeout=1.0)
+    # Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED before CODE_REVIEW_VERDICT;
+    # skip infrastructure events to get to the outcome event.
+    verdict_event = None
+    for _ in range(10):
+        ev = await bus.next(timeout=1.0)
+        if ev is not None and ev.type is EventType.CODE_REVIEW_VERDICT:
+            verdict_event = ev
+            break
     assert verdict_event is not None
     assert verdict_event.type is EventType.CODE_REVIEW_VERDICT
     assert verdict_event.payload["verdict"] == "approve"

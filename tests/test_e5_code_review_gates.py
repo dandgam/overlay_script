@@ -74,6 +74,19 @@ def _collect_emitted(bus: EventLoop) -> list[Event]:
     return out
 
 
+def _collect_verdict_events(bus: EventLoop) -> list[Event]:
+    """Collect emitted events, excluding MERGE_GATE_STAGE_COMPLETED observability events.
+
+    Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED events alongside the final
+    CODE_REVIEW_VERDICT/HUMAN_QUERY. Tests that predate the split check for exactly 1
+    outcome event — filter out the instrumentation events so they still pass.
+    """
+    return [
+        e for e in _collect_emitted(bus)
+        if e.type != EventType.MERGE_GATE_STAGE_COMPLETED
+    ]
+
+
 @pytest.fixture
 def reset_gate_config() -> Iterator[None]:
     configure_code_review_gate(target_project=None, wave=None)
@@ -343,7 +356,8 @@ async def test_e5_subscriber_no_metrics_keeps_original_verdict(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(
         target_project=tmp_path,
@@ -354,7 +368,7 @@ async def test_e5_subscriber_no_metrics_keeps_original_verdict(
     await code_review_subscriber(_success_event("s1", tmp_path / "wt"), bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     assert len(emitted) == 1
     assert emitted[0].type == EventType.CODE_REVIEW_VERDICT
     assert emitted[0].payload["verdict"] == "approve"
@@ -382,7 +396,8 @@ async def test_e5_subscriber_compliance_gate_emits_human_query_no_verdict(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(
         target_project=tmp_path,
@@ -394,7 +409,7 @@ async def test_e5_subscriber_compliance_gate_emits_human_query_no_verdict(
     await code_review_subscriber(_success_event("s1", tmp_path / "wt"), bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     assert len(emitted) == 1
     assert emitted[0].type == EventType.HUMAN_QUERY
     payload = emitted[0].payload
@@ -425,7 +440,8 @@ async def test_e5_subscriber_p0_gate_overrides_approve_to_reject(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(
         target_project=tmp_path,
@@ -436,7 +452,7 @@ async def test_e5_subscriber_p0_gate_overrides_approve_to_reject(
     await code_review_subscriber(_success_event("s1", tmp_path / "wt"), bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     assert len(emitted) == 1
     assert emitted[0].type == EventType.CODE_REVIEW_VERDICT
     assert emitted[0].payload["verdict"] == "reject"
@@ -467,7 +483,8 @@ async def test_e5_subscriber_test_coverage_gate_overrides_approve_to_reject(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(
         target_project=tmp_path,
@@ -478,7 +495,7 @@ async def test_e5_subscriber_test_coverage_gate_overrides_approve_to_reject(
     await code_review_subscriber(_success_event("s1", tmp_path / "wt"), bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     assert emitted[0].payload["verdict"] == "reject"
     assert any("coverage" in r for r in emitted[0].payload["gate_reasons"])
 
@@ -504,7 +521,8 @@ async def test_e5_subscriber_gates_skip_when_verdict_not_approve(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(
         target_project=tmp_path,
@@ -515,7 +533,7 @@ async def test_e5_subscriber_gates_skip_when_verdict_not_approve(
     await code_review_subscriber(_success_event("s1", tmp_path / "wt"), bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     assert emitted[0].payload["verdict"] == "request_changes"
     # Verdict not overridden → no gate_reasons attached.
     assert "gate_reasons" not in emitted[0].payload
@@ -547,7 +565,8 @@ async def test_e5_subscriber_gates_combined_in_summary(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(
         target_project=tmp_path,
@@ -558,7 +577,7 @@ async def test_e5_subscriber_gates_combined_in_summary(
     await code_review_subscriber(_success_event("s1", tmp_path / "wt"), bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     payload = emitted[0].payload
     assert payload["verdict"] == "reject"
     assert len(payload["gate_reasons"]) == 2
@@ -586,7 +605,8 @@ async def test_e5_subscriber_gate_reasons_in_payload(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(
         target_project=tmp_path,
@@ -597,7 +617,7 @@ async def test_e5_subscriber_gate_reasons_in_payload(
     await code_review_subscriber(_success_event("s1", tmp_path / "wt"), bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     assert isinstance(emitted[0].payload["gate_reasons"], list)
     assert len(emitted[0].payload["gate_reasons"]) == 1
 
@@ -620,7 +640,8 @@ async def test_e5_subscriber_compliance_actions_list_mandatory_fix(
     async def fake_spawn(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         return _make_handle(worktree, story_id, review_jsonl)
 
-    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn)
+    monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn)
 
     configure_code_review_gate(
         target_project=tmp_path,
@@ -631,7 +652,7 @@ async def test_e5_subscriber_compliance_actions_list_mandatory_fix(
     await code_review_subscriber(_success_event("s1", tmp_path / "wt"), bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     actions = emitted[0].payload["actions"]
     assert "approve_override" not in actions  # defer запрещён
     assert "mandatory_fix" in actions
@@ -660,7 +681,7 @@ async def test_e5_quarterly_sweep_emits_at_modulo_zero(
     await quarterly_sweep_subscriber(ev, bus)
     await bus.stop()
 
-    emitted = _collect_emitted(bus)
+    emitted = _collect_verdict_events(bus)
     assert len(emitted) == 1
     assert emitted[0].type == EventType.COMPLIANCE_SWEEP_NEEDED
     assert emitted[0].payload["wave"] == "1a"

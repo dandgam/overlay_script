@@ -82,7 +82,9 @@ def _collect_emitted(bus: EventLoop) -> list[Event]:
             out.append(bus.queue.get_nowait())
         except asyncio.QueueEmpty:
             break
-    return out
+    # Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED observability events;
+    # filter them so pre-split assertions remain valid.
+    return [e for e in out if e.type != EventType.MERGE_GATE_STAGE_COMPLETED]
 
 
 @pytest.fixture
@@ -446,7 +448,10 @@ def test_e6_subscriber_records_metrics_into_budget_guard(
         return handle
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     bus = EventLoop()
@@ -499,7 +504,10 @@ def test_e6_subscriber_persists_yaml_after_min_samples(
         return handle
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     bus = EventLoop()
@@ -551,7 +559,10 @@ def test_e6_subscriber_escalates_human_query_on_bounds_breach(
         return handle
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     bus = EventLoop()
@@ -602,7 +613,10 @@ def test_e6_subscriber_skips_tuning_when_budget_unconfigured(
         return handle
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     bus = EventLoop()
@@ -647,7 +661,10 @@ def test_e6_subscriber_holds_threshold_when_below_min_samples(
         return handle
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     bus = EventLoop()

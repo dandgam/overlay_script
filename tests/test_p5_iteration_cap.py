@@ -57,7 +57,9 @@ def _collect_emitted(bus: EventLoop) -> list[Event]:
             out.append(bus.queue.get_nowait())
         except asyncio.QueueEmpty:
             break
-    return out
+    # Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED observability events;
+    # filter them so pre-split assertions remain valid.
+    return [e for e in out if e.type != EventType.MERGE_GATE_STAGE_COMPLETED]
 
 
 def _success_event(
@@ -149,7 +151,10 @@ async def test_subscriber_default_single_pass_preserves_verdict(
         return _make_handle(worktree, story_id, review_jsonl)
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     configure_code_review_gate(
@@ -186,7 +191,10 @@ async def test_subscriber_propagates_review_iteration_into_verdict(
         return _make_handle(worktree, story_id, review_jsonl)
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     configure_code_review_gate(
@@ -224,7 +232,10 @@ async def test_subscriber_iteration_cap_trips_force_reject(
         return _make_handle(worktree, story_id, review_jsonl)
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     # Tight cap so iteration=2 trips it.
@@ -269,7 +280,10 @@ async def test_subscriber_handles_malformed_review_iteration(
         return _make_handle(worktree, story_id, review_jsonl)
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     configure_code_review_gate(

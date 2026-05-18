@@ -1,4 +1,4 @@
-"""S5 acceptance tests — 12 specialized internal skills (spec §19).
+"""S5 acceptance tests — 14 specialized internal skills (spec §19).
 
 Coverage:
 - All 12 expected skills present with valid frontmatter (name + description).
@@ -34,11 +34,12 @@ from bmad_orchestrator.agent.skills import (
 from bmad_orchestrator.runtime.event_loop import EventType
 
 
-def test_all_12_skills_present() -> None:
+def test_all_14_skills_present() -> None:
+    # Phase 4 hardening #5 added merge-gate-spec + merge-gate-quality (14 total).
     metas = iter_metadata()
     names = {m.name for m in metas}
     assert names == EXPECTED_SKILL_NAMES
-    assert len(metas) == 12
+    assert len(metas) == 14
 
 
 def test_each_skill_has_valid_frontmatter() -> None:
@@ -74,7 +75,9 @@ def test_metadata_block_renderable() -> None:
 
 def test_dispatch_worker_completed_routes_to_merge_gate_and_failure_analyst() -> None:
     names = dispatch(EventType.WORKER_COMPLETED)
+    # merge-gate (deprecated) + merge-gate-spec both subscribe to WORKER_COMPLETED.
     assert "merge-gate" in names
+    assert "merge-gate-spec" in names
     assert "failure-analyst" in names
 
 
@@ -130,11 +133,16 @@ def test_dispatch_voice_message_routes_to_intent_router() -> None:
 
 
 def test_load_body_returns_full_skill_md_without_frontmatter() -> None:
+    # merge-gate is now a deprecated stub per Phase 4 hardening #5.
     body = load_body("merge-gate")
-    assert "Когда активируется" in body
     assert body.startswith("# merge-gate skill") or body.startswith("# ")
     # Frontmatter delimiters not present in body
     assert not body.startswith("---")
+    # New skills carry full content
+    spec_body = load_body("merge-gate-spec")
+    assert "Когда активируется" in spec_body
+    quality_body = load_body("merge-gate-quality")
+    assert "Когда активируется" in quality_body
 
 
 def test_load_body_unknown_raises() -> None:

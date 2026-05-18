@@ -153,7 +153,9 @@ def _drain(bus: EventLoop) -> list[Event]:
             out.append(bus.queue.get_nowait())
         except asyncio.QueueEmpty:
             break
-    return out
+    # Phase 4 hardening #5 adds MERGE_GATE_STAGE_COMPLETED observability events;
+    # filter them so pre-split assertions remain valid.
+    return [e for e in out if e.type != EventType.MERGE_GATE_STAGE_COMPLETED]
 
 
 def _approve_event(
@@ -286,7 +288,10 @@ async def test_e9_full_pipeline_synthetic_project_to_policy_proposal_chain(
         return _make_handle(str(wt), "s1", review_jsonl)
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
 
     configure_code_review_gate(
@@ -399,7 +404,10 @@ async def test_e9_full_pipeline_p0_gate_overrides_approve_to_reject(
         return _make_handle(str(tmp_path / "wt"), "s2", review_jsonl)
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
     configure_code_review_gate(
         target_project=tmp_path,
@@ -460,7 +468,10 @@ async def test_e9_full_pipeline_compliance_violation_short_circuits_to_human_que
         return _make_handle(str(tmp_path / "wt"), "s3", review_jsonl)
 
     monkeypatch.setattr(
-        "bmad_orchestrator.agent.run._spawn_code_review_worker", fake_spawn
+        "bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", fake_spawn
+    )
+    monkeypatch.setattr(
+        "bmad_orchestrator.agent.run._spawn_merge_gate_quality_worker", fake_spawn
     )
     configure_code_review_gate(
         target_project=tmp_path,
