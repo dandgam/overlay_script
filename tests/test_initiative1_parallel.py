@@ -203,10 +203,11 @@ def test_find_conflicts_first_owner_wins() -> None:
     assert conflicts == [("a", "c", "src/x.py"), ("b", "c", "src/y.py")]
 
 
-def test_find_conflicts_skips_idless_story() -> None:
-    """Story without an id is ignored (defensive — mocks should still have ids)."""
+def test_find_conflicts_raises_on_idless_story() -> None:
+    """Review finding H-6 — missing id is upstream bug, must surface loudly."""
     stories = [{"touches_files": ["src/x.py"]}, _story("b", ["src/x.py"])]
-    assert find_conflicts(stories) == []
+    with pytest.raises(ValueError, match="story missing id"):
+        find_conflicts(stories)
 
 
 # ── Task 1.2 — split_batch ───────────────────────────────────────────────────

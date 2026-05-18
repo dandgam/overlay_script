@@ -50,9 +50,15 @@ def find_conflicts(stories: list[Story]) -> list[Conflict]:
     seen: dict[str, str] = {}
     conflicts: list[Conflict] = []
     for s in stories:
-        sid = str(s.get("id", ""))
+        sid_raw = s.get("id")
+        sid = str(sid_raw) if sid_raw is not None else ""
         if not sid:
-            continue
+            # Review finding H-6 — silent skip used to hide upstream parser
+            # bugs (story dict without ``id``). A missing id means the
+            # DagPlanner emitted a malformed entry and the operator must
+            # see it, not have conflict-detection silently treat the story
+            # as harmless.
+            raise ValueError(f"story missing id: {s!r}")
         for f in sorted(_touches(s)):
             owner = seen.get(f)
             if owner is None:
