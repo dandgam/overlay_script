@@ -37,13 +37,16 @@
 ## Sessions
 
 ### Pending
+(none — S3 promoted to Current)
+
+### Current
 - **id:** S3
   **title:** P2 NEW-4 — inner exit code parsing + optional Layer C + finalize
   **surface:** backend-python
   **spec_section:** 156-210
   **depends_on:** [S2]
   **acceptance:**
-    - `runtime/worker_spawn.py::_tail_and_emit_completion` scans last ~50 stdout lines for `^Exit code: (\d+)$` (or `❯ Exit code: …`); when inner != 0 and outer == 0 → emit `worker_completed status=failure inner_exit_code=N outer_exit_code=0`.
+    - `_tail_and_emit_completion` (lives in `agent/run.py`, NOT `runtime/worker_spawn.py` — spec anchor stale) scans last ~50 stdout lines for `^Exit code: (\d+)$` (or `❯ Exit code: …`); when inner != 0 and outer == 0 → emit `worker_completed status=failure inner_exit_code=N outer_exit_code=0`.
     - No regression on success path (inner=0 → status=success).
     - +4 tests minimum (3 unit + 1 integration).
     - Optional Layer C (pre-spawn refresh / `--force-new-worktree`): only attempted if S1+S2 came in under budget; otherwise deferred.
@@ -55,32 +58,26 @@
     - L1 deny-list.
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-
-### Current
-- **id:** S2
-  **title:** P1 NEW-2 — runner Stage 7 graceful (Layer A) + orchestrator detector (Layer B)
-  **surface:** backend-python
-  **spec_section:** 78-130
-  **depends_on:** [S1]
-  **acceptance:**
-    - `agent/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh` Stage 7 checks `git worktree list` for branch checkout before `git branch -D`; skips cleanup gracefully on reused worktree.
-    - Synthetic `verdict=approve commits=N` event emitted when feature branch has unmerged commits past base_sha and Stage 7 had to skip.
-    - `runtime/worker_silent_failure.py` (or equivalent) recognises `cannot delete branch .* used by worktree` regex in stdout_lines.
-    - New `RUNNER_CLEANUP_FAILED_REUSED_WORKTREE` event registered in `runtime/event_loop.py` (event count 29 → 30).
-    - On detect with commits present → synthetic `CODE_REVIEW_VERDICT verdict=approve source=runner_cleanup_recovery commits=N`; with no commits → preserve halt behaviour.
-    - +11 tests total (5 runner-side unit + 4 detector unit + 2 e2e mock).
-    - mypy/ruff clean. Tests ≥ baseline +21 cumulative.
-  **safety_gates:**
-    - L3 branch check — work only on `integration/pilot_findings_closure_v2`.
-    - L1 deny-list — `git push --force`, `--no-verify`, `git reset --hard` blocked.
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 05:44 UTC
+  **started:** 2026-05-19 05:59 UTC
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+- **id:** S2
+  **title:** P1 NEW-2 — runner Stage 7 graceful (Layer A) + orchestrator detector (Layer B)
+  **completed:** 2026-05-19 05:59 UTC
+  **commit:** 0e4e6d0 (S2 range 5f890ad..0e4e6d0)
+  **files_changed:** 9 (bmad-auto-dev-runner.sh, agent/run.py, runtime/event_loop.py, runtime/worker_silent_failure.py [new], test_canonical_patches_p6.py, test_s3_runtime.py + 3 new test files)
+  **tests_passed:** 2002 PASS (+12 new: 5 runner-side + 5 detector + 2 e2e); ruff clean; mypy 0 new errors (4 pre-existing run.py errors out-of-scope, unchanged)
+  **decisions_made:**
+    - Layer A: runner branch deletion actually lives in Stage 6.pass (`git branch -d "$feature_branch"`, was line 764) — spec's "Stage 7" naming is loose. New `stage7_cleanup_feature_branch()` helper wraps it: worktree-hold check via `git worktree list --porcelain`, structured `stage7_skipped` log, synthetic `verdict=approve` claude_event JSON to stdout when `git rev-list base..branch` > 0, `BMAD_RUNNER_SKIP_STAGE7=1` override. Always returns 0 so cleanup never crashes the runner.
+    - Layer B: detector lives in `agent/run.py::_tail_and_emit_completion` (spec anchor `runtime/worker_silent_failure.py` was the *new module name*, not the wire-in site). New pure module `runtime/worker_silent_failure.py` holds `detect_reused_worktree_cleanup_failure` + `decide_cleanup_recovery` (no I/O, unit-testable); `_tail_and_emit_completion` accumulates a bounded 300-line stdout tail and runs the detector on `worker_completed`.
+    - Recovery flow: detect → emit `RUNNER_CLEANUP_FAILED_REUSED_WORKTREE`; commits>0 → synthetic `CODE_REVIEW_VERDICT verdict=approve source=runner_cleanup_recovery` + `WORKER_COMPLETED status=success` → return "completed"; commits==0 → fall through to existing silent_failure/halt path.
+    - EventType #35 `RUNNER_CLEANUP_FAILED_REUSED_WORKTREE` (tracker scope said #30; actual enum count was 34 → 35). Inventory tests test_canonical_patches_p6 + test_s3_runtime updated in same commit.
+  **deferred_items:**
+    - 4 pre-existing mypy errors in `agent/run.py` (`bus` kwarg + tuple/list) — pre-date this initiative, out of S2 scope (same as S1).
+
 - **id:** S1
   **title:** P1 NEW-1 — `--project` flag overrides env + P2 NEW-3 — kebab+slug composite resolver
   **completed:** 2026-05-19 05:44 UTC
@@ -120,10 +117,18 @@
   **rationale:** Registry resolution + `ProjectNotFoundError` live in the CLI layer; passing pre-resolved Settings down keeps `agent/run.py` free of a `cli/main.py` import (circular). `None` default preserves every existing caller/test.
   **impact:** S2/S3 — any new code paths needing the resolved target should read `settings.target_project`, not env.
 
+- **date:** 2026-05-19 05:59 UTC
+  **session:** S2
+  **decision:** Layer B detector implemented as a standalone pure module `runtime/worker_silent_failure.py` (regex + decision function, no I/O); wired into `agent/run.py::_tail_and_emit_completion`.
+  **rationale:** Spec named `runtime/worker_silent_failure.py` but no such file existed and the live detection point is `_tail_and_emit_completion` in `agent/run.py`. Splitting pure helpers into the new module keeps them unit-testable in isolation and matches the spec's preferred filename.
+  **impact:** S3 NEW-4 (inner exit-code parsing) also targets `_tail_and_emit_completion` in `agent/run.py` — same function, NOT `runtime/worker_spawn.py` as the spec anchor claims.
+
 ## Journal
 [2026-05-19 UTC] bootstrap: tracker + integration branch `integration/pilot_findings_closure_v2` + backup `backup/pilot_findings_closure_v2-pre-2026-05-19` created via /auto-loop-spec-long, delay=120s, Auto merge=false, 3 sessions planned (S1 NEW-1+NEW-3 / S2 NEW-2 A+B / S3 NEW-4 + optional Layer C + finalize).
 [2026-05-19 05:44 UTC] S1 execution: NEW-1 — `--project` strict registry resolution, `ProjectNotFoundError`, `run_orchestrator` settings param; commit 64f07a9. NEW-3 — `resolve_sprint_status_key` deterministic tie-break + warning; commit 729650f. Regression fix test_w1_real_pilot; commit 0348b75. Full suite 1990 PASS, ruff clean.
 [2026-05-19 05:44 UTC] S1 completed, S2 promoted to Current. runtime=loop_wrapper — wrapper handles next iteration.
+[2026-05-19 05:59 UTC] S2 execution: NEW-2 Layer A — `stage7_cleanup_feature_branch()` graceful Stage 7 in bmad-auto-dev-runner.sh (worktree-hold skip + synthetic verdict + BMAD_RUNNER_SKIP_STAGE7 override). Layer B — new `runtime/worker_silent_failure.py` pure detector + wire-in to `_tail_and_emit_completion`, EventType #35 `RUNNER_CLEANUP_FAILED_REUSED_WORKTREE`. +12 tests (5 runner + 5 detector + 2 e2e), 2002 PASS, ruff clean, mypy 0 new. Commit 0e4e6d0.
+[2026-05-19 05:59 UTC] S2 completed, S3 promoted to Current. runtime=loop_wrapper — wrapper handles next iteration.
 
 ## Final Report (populated on last session completion)
 (empty)
