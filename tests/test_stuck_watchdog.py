@@ -271,3 +271,29 @@ async def test_watchdog_resets_on_new_commits(tmp_path: Path) -> None:
     while not bus.queue.empty():
         queued.append(bus.queue.get_nowait())
     assert not any(e.type == EventType.WORKER_STUCK_TIMEOUT for e in queued)
+
+
+# ── NEW-33.4 — wave-env propagation ────────────────────────────────────────
+
+
+def test_bmad_current_wave_in_worker_allowlist() -> None:
+    """NEW-33.4 — BMAD_CURRENT_WAVE must reach the worker subprocess."""
+    from bmad_orchestrator.runtime.worker_spawn import ALLOWED_WORKER_ENV
+
+    assert "BMAD_CURRENT_WAVE" in ALLOWED_WORKER_ENV
+
+
+def test_bmad_current_wave_in_sandbox_allowlist() -> None:
+    """NEW-33.4 — BMAD_CURRENT_WAVE must cross into the bwrap-sandboxed worker."""
+    from bmad_orchestrator.runtime.sandbox import _SANDBOX_DEFAULT_ENV_ALLOWLIST
+
+    assert "BMAD_CURRENT_WAVE" in _SANDBOX_DEFAULT_ENV_ALLOWLIST
+
+
+def test_build_worker_env_forwards_bmad_current_wave(monkeypatch) -> None:
+    """End-to-end: orchestrator env BMAD_CURRENT_WAVE → worker env."""
+    from bmad_orchestrator.runtime.worker_spawn import _build_worker_env
+
+    monkeypatch.setenv("BMAD_CURRENT_WAVE", "2b")
+    env = _build_worker_env(extra=None)
+    assert env.get("BMAD_CURRENT_WAVE") == "2b"

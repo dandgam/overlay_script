@@ -119,6 +119,14 @@ ALLOWED_WORKER_ENV: frozenset[str] = frozenset({
     # sandbox.py::BwrapSandbox.wrap_command) so the sandboxed ``claude -p``
     # still cannot reach the session bus — isolation is preserved.
     "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+    # NEW-33.4 — wave-env passthrough. ``runtime/worker_events.py`` resolves
+    # the per-wave runs/ directory from this env var; pilot 2b root cause:
+    # the var was set in the orchestrator process but not forwarded to the
+    # sandbox-wrapped worker, so events.jsonl wrote to runs/default/ instead
+    # of runs/2b/ and the terminal worker_completed never reached the
+    # orchestrator's tail loop. Worker is a sibling reader of the wave id;
+    # it never edits it, so passthrough is safe.
+    "BMAD_CURRENT_WAVE",
 })
 
 

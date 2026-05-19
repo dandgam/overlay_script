@@ -42,6 +42,12 @@ NetworkPolicy = Literal["none", "github_only", "full"]
 # from agent.tools, a circular risk).
 _SANDBOX_DEFAULT_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "PWD", "SHELL", "TERM",
+    # NEW-33.4 — wave-env passthrough into the bwrap-wrapped worker. Without
+    # this the sandboxed ``claude -p`` resolves runs/<wave>/ via
+    # worker_events.current_wave_dir() → defaults to ``runs/default/`` and
+    # the orchestrator's tail loop hangs waiting on a JSONL it doesn't watch.
+    # Pilot 2b root cause; mirror this in worker_spawn.ALLOWED_WORKER_ENV.
+    "BMAD_CURRENT_WAVE",
 })
 
 # Env vars that the OUTER ``systemd-run --user`` cgroup wrapper needs to reach
