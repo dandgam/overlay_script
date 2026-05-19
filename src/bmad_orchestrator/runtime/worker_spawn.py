@@ -374,6 +374,16 @@ _SYMLINK_CLAUDE_SUBPATHS: frozenset[tuple[str, ...]] = frozenset({
     (".local", "share", "claude"),
 })
 
+# NEW-27 S3 — subpaths replaced by an EMPTY placeholder dir in the overlay for
+# *isolation* (not size). ``~/.claude/skills/`` holds whatever skills the
+# operator installed on the host; copying them in lets a worker's ``claude``
+# resolve a foreign user-level skill. Virgil injects its own skills into the
+# worktree's project-level ``.claude/skills/`` (see embedded_skills.py), so the
+# overlay's user-level skills dir must be empty — never the host's.
+_ISOLATE_CLAUDE_SUBPATHS: frozenset[tuple[str, ...]] = frozenset({
+    (".claude", "skills"),
+})
+
 
 def _create_isolated_home(
     *, worker_label: str, host_home: Path | None = None
@@ -418,9 +428,11 @@ def _create_isolated_home(
             rel = (".claude", entry.name)
             dest = dest_claude / entry.name
             try:
-                if rel in _SYMLINK_CLAUDE_SUBPATHS:
-                    # Create empty placeholder dir so claude doesn't EROFS;
-                    # don't copy GB of project history.
+                if rel in _SYMLINK_CLAUDE_SUBPATHS or rel in _ISOLATE_CLAUDE_SUBPATHS:
+                    # Empty placeholder dir so claude doesn't EROFS. For
+                    # _SYMLINK_* this skips GB of project history; for
+                    # _ISOLATE_* (skills) it keeps the host's user-level skills
+                    # out of the worker (NEW-27 S3).
                     dest.mkdir(exist_ok=True)
                     continue
                 if entry.is_dir():
