@@ -24,6 +24,10 @@ SPLIT_FILE_COUNT_THRESHOLD = 10
 SPLIT_AC_THRESHOLD = 7
 SPLIT_MINUTES_THRESHOLD = 240
 SPLIT_LAYER_THRESHOLD = 3
+# NEW-30 — Tasks/Subtasks checkbox count. Real BMad stories express their true
+# implementation size as a long subtask list (Antares epic-1 stories carry
+# 50-96 subtasks); 40+ is an oversized story regardless of AC count.
+SPLIT_TASK_THRESHOLD = 40
 
 LAYER_PREFIXES: tuple[tuple[str, str], ...] = (
     ("src/", "backend"),
@@ -48,12 +52,14 @@ class SplitDecision:
     estimated_tokens: int
     touches_files_count: int
     layers: tuple[str, ...]
+    task_count: int = 0  # NEW-30 — Tasks/Subtasks checkbox count
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "decision": self.decision,
             "rationale": list(self.rules_hit),
             "ac_count": self.ac_count,
+            "task_count": self.task_count,
             "minutes": self.estimated_minutes,
             "tokens": self.estimated_tokens,
             "files_count": self.touches_files_count,
@@ -73,11 +79,15 @@ def classify_layers(files: Iterable[str]) -> set[str]:
 
 
 def count_acceptance_criteria(story_meta: dict[str, Any]) -> int:
-    """Count AC bullets from a story's ``_acceptance_text`` block.
+    """Return a story's acceptance-criteria count.
 
-    Bullets recognised: ``-``, ``*``, ``•``. Falls back to 0 when the field
-    is absent (story frontmatter parser did not populate AC text).
+    Prefers the explicit ``ac_count`` int that :func:`parse_story_md` derives
+    from ``AC<n>`` markdown headers (NEW-30). Falls back to counting bullets in
+    a legacy ``_acceptance_text`` block, then 0.
     """
+    explicit = story_meta.get("ac_count")
+    if isinstance(explicit, int) and explicit > 0:
+        return explicit
     text = story_meta.get("_acceptance_text") or ""
     if isinstance(text, str) and text:
         return sum(
@@ -105,11 +115,14 @@ def evaluate_split(story: dict[str, Any]) -> SplitDecision:
     minutes = _coerce_int(story.get("estimated_minutes"))
     tokens = _coerce_int(story.get("estimated_tokens"))
     ac_count = count_acceptance_criteria(story)
+    task_count = _coerce_int(story.get("task_count"))
     file_count = len(touches)
 
     rules: list[str] = []
     if ac_count >= SPLIT_AC_THRESHOLD:
         rules.append(f"ac>={SPLIT_AC_THRESHOLD} ({ac_count})")
+    if task_count >= SPLIT_TASK_THRESHOLD:
+        rules.append(f"tasks>={SPLIT_TASK_THRESHOLD} ({task_count})")
     if minutes >= SPLIT_MINUTES_THRESHOLD:
         rules.append(f"minutes>={SPLIT_MINUTES_THRESHOLD} ({minutes})")
     if tokens >= SPLIT_TOKEN_THRESHOLD:
@@ -127,6 +140,7 @@ def evaluate_split(story: dict[str, Any]) -> SplitDecision:
         estimated_tokens=tokens,
         touches_files_count=file_count,
         layers=tuple(sorted(layers)),
+        task_count=task_count,
     )
 
 

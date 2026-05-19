@@ -229,6 +229,14 @@ _PAREN_RE = re.compile(r"\([^()]*\)")
 # A story-id token: dotted ``3.1`` / ``1.17b`` or kebab ``3-1`` / ``3-1-slug``.
 _STORY_ID_TOKEN_RE = re.compile(r"\b\d+\.\d+[a-z]?\b|\b\d+-\d+(?:-[a-z0-9-]+)?\b")
 
+# NEW-30 — auto-split size signals. Real BMad stories carry no machine
+# ``- **estimated_tokens:**`` field; their size lives in the markdown body:
+#   * AC headers — ``**AC1 — …**`` / ``### AC 2`` / ``AC3:`` (line-leading).
+#   * a ``## Tasks / Subtasks`` checkbox list — ``- [ ] …`` / ``- [x] …``.
+# Without these the split heuristic sees an all-zero story and never splits.
+_AC_MARKER_RE = re.compile(r"(?im)^\s*[#*]*\s*AC[ \-]?(\d+)\b")
+_TASK_CHECKBOX_RE = re.compile(r"(?m)^\s*[-*]\s*\[[ xX]\]")
+
 
 def _extract_prose_story_ids(md_text: str, header_re: re.Pattern[str]) -> list[str]:
     """Pull story-id tokens from a prose dependency header (NEW-28).
@@ -310,6 +318,19 @@ def parse_story_md(md_text: str) -> dict[str, Any]:
         prose_blocks = _extract_prose_story_ids(md_text, _PROSE_BLOCKS_RE)
         if prose_blocks:
             out["blocks"] = prose_blocks
+
+    # NEW-30 — derive auto-split size signals from the markdown body when the
+    # canonical machine fields are absent (real BMad story files). AC count is
+    # the number of distinct ``AC<n>`` headers; task count is the size of the
+    # Tasks/Subtasks checkbox list. Canonical fields, when present, win.
+    if "ac_count" not in out:
+        ac_nums = {m.group(1) for m in _AC_MARKER_RE.finditer(md_text)}
+        if ac_nums:
+            out["ac_count"] = len(ac_nums)
+    if "task_count" not in out:
+        task_n = len(_TASK_CHECKBOX_RE.findall(md_text))
+        if task_n:
+            out["task_count"] = task_n
     return out
 
 
