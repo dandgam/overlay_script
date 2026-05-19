@@ -335,9 +335,9 @@ integration ветка не создана. Детали — memory [[project_pi
 
 - ✅ **NEW-1-completion validated** — worktrees в `/home/server/Antares` без env-override.
 - ✅ **NEW-8 validated** — `orchestrator_shutdown_complete elapsed_sec=0.0` (чистый выход).
-- ❌ **NEW-7 НЕ validated** — `_reconcile_success_verdicts` реконсилит только success
-  verdict'ы; все 3 story помечены `failed` → нечего мержить → ни integration ветки, ни
-  `INTEGRATION_MERGE_SKIPPED`. Merge-path так и не протестирован.
+- ✅ **NEW-7 validated в run #4** — на run #3 НЕ проверялся (`_reconcile_success_verdicts`
+  реконсилит только success verdict'ы; все 3 story `failed` → нечего мержить). Merge-path
+  провалидирован в pilot run #4 после merge v4 — см. секцию ниже.
 - ✅ **NEW-9 (P1, КОРЕНЬ)** — DONE 2026-05-19 (S1 `pilot_findings_closure_v4` `80dd56d`):
   `decide_worker_status(verdict, new_commits_count, inner_exit, outer_exit)` —
   `verdict=approve` + commits → `success` независимо от runner exit code; `request_changes`/
@@ -354,10 +354,38 @@ integration ветка не создана. Детали — memory [[project_pi
   skills (~73 файла) больше не считаются «грязью»; `_clean_dirty_worktree` использует
   `git clean -fd -e .claude` чтобы реальная грязь чистилась без сноса skills. +5 tests.
 
-**Recommended next initiative:** `pilot_findings_closure_v4` — приоритет **NEW-9** (verdict
-как source-of-truth — разблокирует NEW-7) + NEW-10 (observability) + перепроверка NEW-5.
-Без NEW-9 ни одна story не доходит до success → NEW-7 непроверяем → production pilot
-по-прежнему не доводит работу до integration.
+**Closed by initiative:** `pilot_findings_closure_v4` (S1..S2, NEW-9 + NEW-10 + NEW-5
+recheck), merged в main `48febc0`.
+
+### Backlog — pilot run #4 findings (Antares 1a после v4 merge `48febc0`, 2026-05-19)
+
+**ПЕРВЫЙ end-to-end production success Virgil.** Запуск 17:14 после merge v4,
+`BMAD_AUTO_SPLIT=1`. Результат `spawned=3 succeeded=2 failed=1`. **`integration/1a` ветка
+СОЗДАНА**, story 1.3 смержена end-to-end (dev `2f8b442` + autofix `6808712`,
+`story_merged sha=68087124`). Детали — memory [[project_milestone_first_integration_merge]].
+
+- ✅ **NEW-7 VALIDATED** — verdict→reconcile→merge pipeline работает:
+  `integration_reconcile_synthetic_verdict commits=2 → story_merged`. Pipeline замкнут
+  (worker → dev → review → verdict → reconcile → merge → integration). Раньше работа
+  «оседала» на feature-ветках — теперь доходит до integration автономно.
+- ✅ **NEW-9 validated** — story 1.3 с коммитами дошла до success, не отброшена по exit code.
+- ✅ **NEW-8 validated** — `orchestrator_shutdown_complete elapsed_sec=0.0`.
+
+Не дошли до integration (1.4/1.5) — fixable, pipeline не разорван:
+
+- ⬜ **NEW-11 (P2) · Тип: 🐛 Баг — ruff build_check_halt** — `build_check_halt command=ruff
+  exit_code=1` на 1.3 и 1.4. ruff в worktree падает — вероятно конфиг проекта или версия.
+- ⬜ **NEW-12 (P2) · Тип: 🐛 Баг — pre-commit config missing** — `stage5_recovery_failed:
+  No .pre-commit-config.yaml file` на 1.3/1.4. Worktree без pre-commit конфига → git commit
+  ругается. Fix: `PRE_COMMIT_ALLOW_NO_CONFIG=1` или прокидывать конфиг в worktree.
+- ⬜ **NEW-13 (P2) · Тип: 🐛 Баг — security_review error → circuit breaker abort** — story
+  1.4 ушла в security review, тот вернул `verdict=error` (не approve/reject), 3 escalations
+  подряд → `supervisor_abort_pipeline circuit breaker`. error-verdict не должен считаться
+  escalation'ом. 1.4 не смержена (есть на feature/1.4 `4b00212`).
+
+**Recommended next initiative:** `pilot_findings_closure_v5` — закрыть NEW-11/12/13 (все
+P2, fixable). После — replay, ожидаем 3/3 stories в integration. Pipeline уже замкнут
+(NEW-7 ✅), остались конкретные блокеры на пути 1.4/1.5.
 
 ---
 
@@ -381,6 +409,6 @@ integration ветка не создана. Детали — memory [[project_pi
 
 ---
 
-**Last updated:** 2026-05-19 (v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
-**Status:** v13.5 — **Phase 3 gate CLOSED** (Step A `28 tests` + Step B `10 real cases` + baseline scaffold `evals/baselines/phase3-step-b-baseline.json`). pilot_findings_closure initiative complete on integration branch (S1..S8, 5 P1 + 3 P2 + 1 P3 + R1 + R2): tests **1945 PASS** (+85 vs 1860 baseline; +5 expected after S8 merge), mypy/ruff clean, EventType count **34** (+5: STORY_AUTO_SPLIT, WORKER_CANCELLED, MCP_NOT_READY, BUDGET_AUTO_DISABLED, WORKER_HALT_PRESPAWN). **Awaits manual merge** `git checkout main && git merge --no-ff integration/pilot_findings_closure`. **#10 production pilot UNBLOCKED** post-merge.
+**Last updated:** 2026-05-19 (v13.10 — pilot run #4 findings: FIRST integration merge success (`integration/1a`, story 1.3), NEW-7 validated, new backlog NEW-11/12/13; v4 merged `48febc0`; v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Status:** v13.10 — **Phase 4 (Deploy) in progress.** `pilot_findings_closure_v4` merged в main `48febc0` (S1..S2: NEW-9 verdict source-of-truth + NEW-10 observability + NEW-5 recheck, tests 2038→2061, mypy/ruff clean). **FIRST end-to-end production success** — pilot run #4 (Antares 1a, `BMAD_AUTO_SPLIT=1`) создал ветку `integration/1a`, story 1.3 смержена автономно через verdict→reconcile→merge (NEW-7 pipeline VALIDATED). `spawned=3 succeeded=2 failed=1`. Stories 1.4/1.5 не дошли до integration — new backlog **NEW-11/12/13** (P2, fixable: ruff halt · pre-commit config missing · security_review error→circuit breaker) → next initiative `pilot_findings_closure_v5`.
 **Owner:** user + Claude orchestrator
