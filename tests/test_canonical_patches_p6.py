@@ -365,6 +365,7 @@ async def test_all_seven_canonical_subscribers_wired_in_correct_order(
             session_id=None,
             models=ModelConfig(),
             options={},
+            settings=load_settings(),
         )
     finally:
         await bus.stop()

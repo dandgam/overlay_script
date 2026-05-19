@@ -157,6 +157,7 @@ async def _run_pilot_and_stop(bus: EventLoop, **kwargs: Any) -> None:
         "session_id": None,
         "models": ModelConfig(),
         "options": {},
+        "settings": load_settings(),
     }
     defaults.update(kwargs)
     try:
@@ -314,7 +315,7 @@ async def test_w1_story_filter_missing_id_raises(
                 project="proj", wave="w",
                 max_parallel=1, max_stories=1, max_spend_usd=10.0,
                 budget=budget, state_db=None, session_id=None,
-                models=ModelConfig(), options={},
+                models=ModelConfig(), options={}, settings=load_settings(),
                 story_filter=("does-not-exist",),
             )
     finally:
@@ -348,6 +349,7 @@ async def test_w1_sandbox_guard_raises_when_require_set_and_no_bwrap(
             session_id=None,
             models=ModelConfig(),
             options={},
+            settings=load_settings(),
         )
 
 
@@ -380,6 +382,7 @@ async def test_w1_sandbox_guard_passes_when_require_unset(
             session_id=None,
             models=ModelConfig(),
             options={},
+            settings=load_settings(),
         )
     finally:
         await bus.stop()
@@ -416,6 +419,7 @@ async def test_w1_real_pilot_spawns_worker_and_bridges_completed(
         session_id=None,
         models=ModelConfig(),
         options={},
+        settings=load_settings(),
     )
 
     events = await _drain(bus)
@@ -459,7 +463,7 @@ async def test_w1_real_pilot_calls_spawn_with_mock_false(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=1, max_stories=1,
         max_spend_usd=50.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
     await bus.stop()
 
@@ -485,7 +489,7 @@ async def test_w1_real_pilot_emits_wave_boundary(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=1, max_stories=1,
         max_spend_usd=50.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
 
     events = await _drain(bus)
@@ -518,7 +522,7 @@ async def test_w1_real_pilot_starts_backstop(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=1, max_stories=1,
         max_spend_usd=50.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
     await bus.stop()
     assert called["backstop"] is True
@@ -550,7 +554,7 @@ async def test_w1_max_stories_caps_at_one(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=3, max_stories=1,
         max_spend_usd=100.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
     await bus.stop()
     assert spawn_count["n"] == 1
@@ -579,7 +583,7 @@ async def test_w1_max_stories_two(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=3, max_stories=2,
         max_spend_usd=100.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
     await bus.stop()
     assert spawn_count["n"] == 2
@@ -611,7 +615,7 @@ async def test_w1_max_stories_zero_no_spawns(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=3, max_stories=0,
         max_spend_usd=100.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
     await bus.stop()
     assert spawn_count["n"] == 0
@@ -653,7 +657,7 @@ async def test_w1_max_spend_usd_halts_pilot(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=3, max_stories=10,
         max_spend_usd=1.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
     await bus.stop()
     assert spawn_count["n"] == 0
@@ -679,7 +683,7 @@ async def test_w1_max_spend_usd_emits_budget_threshold_hit(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=1, max_stories=10,
         max_spend_usd=1.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
 
     events = await _drain(bus)
@@ -707,7 +711,7 @@ async def test_w1_max_spend_usd_default_50_allows_progress(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=2, max_stories=10,
         max_spend_usd=50.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
 
     events = await _drain(bus)

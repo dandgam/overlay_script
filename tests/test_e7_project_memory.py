@@ -384,7 +384,7 @@ def test_e7_agent_run_start_primes_from_memory(
     captured: dict[str, Any] = {}
 
     async def _capture_mock_pilot(
-        bus: Any, *, wave: str, max_parallel: int, budget: Any
+        bus: Any, *, wave: str, max_parallel: int, budget: Any, settings: Any
     ) -> None:
         captured["budget"] = budget
         captured["coverages"] = budget.recent_p0_coverages()
@@ -428,7 +428,7 @@ def test_e7_agent_run_start_tolerates_corrupt_memory(
     captured: dict[str, Any] = {}
 
     async def _capture_mock_pilot(
-        bus: Any, *, wave: str, max_parallel: int, budget: Any
+        bus: Any, *, wave: str, max_parallel: int, budget: Any, settings: Any
     ) -> None:
         captured["coverages"] = budget.recent_p0_coverages()
 

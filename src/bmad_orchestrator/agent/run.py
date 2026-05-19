@@ -75,7 +75,7 @@ from bmad_orchestrator.runtime.auto_split import (
     auto_split_and_execute,
     auto_split_enabled,
 )
-from bmad_orchestrator.runtime.bmad_format import resolve_sprint_status_key
+from bmad_orchestrator.runtime.bmad_format import mark_sprint_status_done
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
 from bmad_orchestrator.runtime.budget_autodetect import (
     BudgetAutoDisableState,
@@ -288,7 +288,9 @@ async def run_orchestrator(
         log.warning("project_memory_load_failed", project=project, error=str(exc))
 
     if mock:
-        await _run_mock_pilot(bus, wave=wave, max_parallel=max_parallel, budget=budget)
+        await _run_mock_pilot(
+            bus, wave=wave, max_parallel=max_parallel, budget=budget, settings=settings
+        )
         return bus
 
     # Real mode — FS4 B1: validate options shape against the SDK before any
@@ -313,6 +315,7 @@ async def run_orchestrator(
         models=models,
         options=options,
         story_filter=stories,
+        settings=settings,
     )
     return bus
 
@@ -527,18 +530,23 @@ async def _run_mock_pilot(
     wave: str,
     max_parallel: int,
     budget: BudgetGuard,
+    settings: Settings,
 ) -> None:
     """E2E pilot per spec §22: DAG → ready → spawn → JSONL → wave_boundary.
 
     Никаких сетевых вызовов. Использует ``runtime.worker_spawn(mock=True)`` —
     те же samples что и tests/test_s3_runtime.py mock pilot.
+
+    ``settings`` — NEW-1-completion: resolved Settings прокинуты из
+    ``run_orchestrator`` (registry-resolved ``--project``). НЕ перечитывать
+    config заново — иначе ``ORCHESTRATOR_TARGET_PROJECT`` из env снова
+    перебивает явный ``--project`` и worktrees уходят в чужой проект.
     """
     from bmad_orchestrator.agent.tools._common import (
         read_sprint_status_yaml,
         write_sprint_status_yaml,
     )
 
-    settings = load_settings()
     worktree_root = settings.target_project / ".worktrees"
     worktree_root.mkdir(parents=True, exist_ok=True)
 
@@ -680,6 +688,7 @@ async def _run_real_pilot(
     session_id: int | None,
     models: ModelConfig,
     options: dict[str, Any],
+    settings: Settings,
     story_filter: tuple[str, ...] | None = None,
 ) -> None:
     """Real-mode E2E pilot (W1).
@@ -700,7 +709,9 @@ async def _run_real_pilot(
     # ``register_project`` enforces this at registry insertion, but a stale
     # registry from a prior version (or test fixture) can still hold a
     # poisoned entry; refuse here before any subprocess spawns.
-    settings = load_settings()
+    # NEW-1-completion: ``settings`` arrive resolved from ``run_orchestrator``
+    # — никакого повторного чтения config здесь, иначе env перебивает
+    # явный ``--project``.
     _validate_project_path(settings.target_project)
 
     # Review finding H-2 — sweep stale ``/tmp/bmad-worker-*`` snapshots from
@@ -757,6 +768,7 @@ async def _run_real_pilot(
             story_filter=story_filter,
             spawned_handles=spawned_handles,
             spend_carry=spend_carry,
+            settings=settings,
         )
     finally:
         # Phase 0 Task 0.1 — kill child processes (claude -p, bwrap) if the
@@ -914,6 +926,7 @@ async def _run_real_pilot_body(
     story_filter: tuple[str, ...] | None,
     spawned_handles: list[WorkerHandle],
     spend_carry: list[float],
+    settings: Settings,
 ) -> None:
     """Body of ``_run_real_pilot`` — wrapped in try/finally for orphan cleanup.
 
@@ -922,6 +935,10 @@ async def _run_real_pilot_body(
     ``spend_carry[0]`` is mutated after each story-budget projection so the
     caller's finally block can emit a partial spend report even on a
     body-mid-pilot exception (P1-A follow-up).
+
+    ``settings`` — NEW-1-completion: resolved Settings прокинуты насквозь из
+    ``run_orchestrator``. Повторное чтение config здесь игнорировало бы
+    registry-resolved ``--project`` (env-override bug).
     """
 
     from bmad_orchestrator.agent.tools._common import (
@@ -930,7 +947,6 @@ async def _run_real_pilot_body(
         write_sprint_status_yaml,
     )
 
-    settings = load_settings()
     worktree_root = settings.target_project / ".worktrees"
     worktree_root.mkdir(parents=True, exist_ok=True)
 
@@ -1353,30 +1369,22 @@ async def _run_real_pilot_body(
                 else:
                     failed.append(h.story_id)
 
-        # Spec #1 — resolve dotted spawned ids ("1.3") to the kebab keys
-        # actually present in sprint-status ("1-3-fastapi-..."). Without
-        # resolve_sprint_status_key the mark-done lookup misses and resume
-        # re-spawns already-done stories.
+        # NEW-3-completion — flip each succeeded story to "done" in
+        # sprint-status. ``mark_sprint_status_done`` dispatches on layout:
+        # legacy ``epics:`` nested AND upstream BMad flat
+        # ``development_status:``. The previous inline loop only handled the
+        # nested shape, so on real BMad projects (Antares 1a, flat layout)
+        # every story fell through to ``pilot_mark_done_unresolved`` and
+        # resume re-spawned already-done stories.
         snap = read_sprint_status_yaml()
-        epics_block = snap.get("epics") or {}
         for sid in succeeded:
-            for epic_block in epics_block.values():
-                if not isinstance(epic_block, dict):
-                    continue
-                stories = epic_block.get("stories") or {}
-                if not isinstance(stories, dict):
-                    continue
-                resolved = resolve_sprint_status_key(sid, stories.keys())
-                if resolved is None:
-                    continue
-                stories[resolved] = "done"
+            resolved = mark_sprint_status_done(snap, sid)
+            if resolved is not None:
                 log.info(
                     "pilot_mark_done",
                     spawned_id=sid,
                     resolved_key=resolved,
-                    epic_keys_sample=list(stories.keys())[:3],
                 )
-                break
             else:
                 log.warning(
                     "pilot_mark_done_unresolved",

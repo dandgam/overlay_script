@@ -164,7 +164,7 @@ async def test_p0_1_real_pilot_wires_three_subscribers(
         await _run_real_pilot(
             bus, project="proj", wave="w", max_parallel=1, max_stories=1,
             max_spend_usd=10.0, budget=budget, state_db=None, session_id=None,
-            models=ModelConfig(), options={},
+            models=ModelConfig(), options={}, settings=load_settings(),
         )
     finally:
         await bus.stop()
@@ -196,7 +196,7 @@ async def test_p0_1_subscribers_are_callable_event_only(
         await _run_real_pilot(
             bus, project="proj", wave="w", max_parallel=1, max_stories=1,
             max_spend_usd=10.0, budget=budget, state_db=None, session_id=None,
-            models=ModelConfig(), options={},
+            models=ModelConfig(), options={}, settings=load_settings(),
         )
     finally:
         await bus.stop()
@@ -231,7 +231,7 @@ async def test_p0_1_quarterly_sweep_subscriber_wired_emits_on_wave_boundary(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=1, max_stories=1,
         max_spend_usd=10.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
 
     # Real pilot already emitted WAVE_BOUNDARY_REACHED with completed_stories=0
@@ -294,7 +294,7 @@ async def test_p0_2_real_pilot_wave_boundary_has_completed_stories(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=2, max_stories=10,
         max_spend_usd=100.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
 
     events = await _drain(bus)
@@ -324,7 +324,7 @@ async def test_p0_2_real_pilot_completed_stories_matches_spawned_count(
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=3, max_stories=10,
         max_spend_usd=100.0, budget=budget, state_db=None, session_id=None,
-        models=ModelConfig(), options={},
+        models=ModelConfig(), options={}, settings=load_settings(),
     )
 
     events = await _drain(bus)
@@ -349,7 +349,9 @@ async def test_p0_2_mock_pilot_wave_boundary_has_completed_stories(
 
     bus = EventLoop()
     budget = BudgetGuard(load_settings().budget, event_loop=bus)
-    await _run_mock_pilot(bus, wave="w", max_parallel=1, budget=budget)
+    await _run_mock_pilot(
+        bus, wave="w", max_parallel=1, budget=budget, settings=load_settings()
+    )
     events = await _drain(bus)
 
     boundaries = [e for e in events if e.type == EventType.WAVE_BOUNDARY_REACHED]

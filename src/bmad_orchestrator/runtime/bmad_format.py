@@ -146,6 +146,53 @@ def resolve_sprint_status_key(raw: str, sprint_keys: Any) -> str | None:
     return matches[0]
 
 
+def mark_sprint_status_done(snap: dict[str, Any], raw_id: str) -> str | None:
+    """Mark the story matching *raw_id* as ``"done"`` in a **raw** sprint-status
+    dict, mutating it in place. Returns the resolved key, or ``None`` on miss.
+
+    NEW-3-completion root cause: the real-pilot mark-done loop used to read the
+    raw YAML and look only under ``snap["epics"]`` (the legacy
+    orchestrator-scaffold nested layout). Real BMad projects (Antares 1a) write
+    the upstream flat layout — ``development_status: {1-4-...: done}`` — where
+    ``snap["epics"]`` is absent, so EVERY succeeded story fell through to
+    ``pilot_mark_done_unresolved`` and ``resolve_sprint_status_key`` (the v2
+    fix) was never even reached. This helper dispatches on layout:
+
+    * Legacy ``epics:`` nested → resolve *raw_id* across every epic block's
+      ``stories`` dict and flip the match.
+    * Upstream BMad flat (``development_status:`` or bare-flat root) → resolve
+      *raw_id* against the flat story keys and flip the match.
+
+    The mutated container is always a live reference into *snap*, so the caller
+    can ``write_sprint_status_yaml(snap)`` and preserve the original layout.
+    """
+    if not isinstance(snap, dict):
+        return None
+    epics = snap.get("epics")
+    if isinstance(epics, dict) and epics:
+        for epic_block in epics.values():
+            if not isinstance(epic_block, dict):
+                continue
+            stories = epic_block.get("stories")
+            if not isinstance(stories, dict):
+                continue
+            resolved = resolve_sprint_status_key(raw_id, stories.keys())
+            if resolved is not None:
+                stories[resolved] = "done"
+                return resolved
+        return None
+    flat = _bmad_flat_dict(snap)
+    if isinstance(flat, dict):
+        story_keys = [
+            k for k in flat if isinstance(k, str) and _STORY_KEY_RE.match(k)
+        ]
+        resolved = resolve_sprint_status_key(raw_id, story_keys)
+        if resolved is not None:
+            flat[resolved] = "done"
+            return resolved
+    return None
+
+
 def extract_status_token(value: Any) -> str:
     """Return the first whitespace-separated token of *value*, stripped of
     Python/YAML comments.
@@ -305,6 +352,7 @@ def parse_sprint_status_bmad(yaml_data: Any) -> dict[str, Any]:
 __all__ = [
     "KNOWN_STATUSES",
     "extract_status_token",
+    "mark_sprint_status_done",
     "normalize_story_id",
     "parse_sprint_status_bmad",
     "resolve_sprint_status_key",
