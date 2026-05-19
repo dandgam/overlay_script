@@ -386,6 +386,8 @@ recheck), merged в main `48febc0`.
 **Recommended next initiative:** `pilot_findings_closure_v5` — закрыть NEW-11/12/13 (все
 P2, fixable). После — replay, ожидаем 3/3 stories в integration. Pipeline уже замкнут
 (NEW-7 ✅), остались конкретные блокеры на пути 1.4/1.5.
+**Spec:** `spec/spec_pilot_findings_closure_v5.md` (v1.0, READY for `/auto-loop-spec-short`
+bootstrap — 3 P2 items, ~2 сессии).
 
 ---
 
