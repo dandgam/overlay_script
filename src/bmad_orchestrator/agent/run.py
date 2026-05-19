@@ -3427,7 +3427,7 @@ def _extract_verdict_from_event(ev: dict[str, Any]) -> tuple[str, str] | None:
 
 
 def _ensure_review_skill_in_worktree(worktree: str) -> None:
-    """NEW-25 — make ``/bmad-code-review`` resolvable to the review spawn.
+    """NEW-25/NEW-26 — make ``/bmad-code-review`` resolvable AND headless.
 
     The target project's ``.claude/skills/`` is gitignored, so ``git worktree
     add`` leaves the worktree's ``.claude/skills/`` empty; the ``isolated_home``
@@ -3435,14 +3435,24 @@ def _ensure_review_skill_in_worktree(worktree: str) -> None:
     Without the skill the inner ``claude -p`` aborts with ``Unknown command:
     /bmad-code-review`` → ``verdict=error`` every run.
 
-    Copy the orchestrator's embedded ``skills/upstream/bmad-code-review`` into
-    the worktree as a project-level skill (claude resolves slash commands from
-    the CWD upward). Project-agnostic — does not rely on the target machine's
-    ``~/.claude/skills/``. Idempotent: skips if the skill is already present.
+    NEW-26 — the *upstream* ``bmad-code-review`` skill is written for an
+    interactive operator: its step files HALT at numbered-choice checkpoints
+    and it never emits a machine-readable verdict. Under headless ``claude -p``
+    nothing answers the prompts → exit 0 with no ``verdict:`` line →
+    ``verdict=error`` every run. So we inject the **headless** variant
+    (``skills/headless/bmad-code-review``) instead: a single self-contained
+    SKILL.md with no HALTs that ends with ``VERDICT: approve|request_changes|
+    reject`` — the exact line :data:`_VERDICT_LINE_RE` parses.
+
+    The headless skill is copied into the worktree under the canonical name
+    ``bmad-code-review`` so ``/bmad-code-review`` resolves to it (claude
+    resolves slash commands from the CWD upward). Project-agnostic — does not
+    rely on the target machine's ``~/.claude/skills/``. Idempotent: skips if
+    the skill is already present.
     """
     # run.py → agent → bmad_orchestrator → src → project root
     package_root = Path(__file__).parent.parent.parent.parent
-    src_skill = package_root / "skills" / "upstream" / "bmad-code-review"
+    src_skill = package_root / "skills" / "headless" / "bmad-code-review"
     if not src_skill.is_dir():
         log.warning("review_skill_source_missing", path=str(src_skill))
         return
