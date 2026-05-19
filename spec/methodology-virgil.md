@@ -581,20 +581,40 @@ fallback), но merge упал на новом баге.
   3 review-спавнами (code-review/merge-gate spec+quality); идемпотентно; лог
   `review_skill_injected`. +3 tests (`test_new25_review_skill_injection.py`).
 
-- ⬜ **NEW-26 (P1, КОРЕНЬ #3) · Тип: 🐛 Баг — review skill даёт интерактивный вопрос вместо
-  verdict** — DIAGNOSED 2026-05-20, фикс НЕ применён. После NEW-24+NEW-25 review-спавн
-  наконец отрабатывает по-настоящему (сеть ✅, skill ✅) — но `verdict=error` всё равно.
-  Причина: skill `bmad-code-review` написан под **интерактивный** режим — ревьюер находит
-  замечания и завершает вывод вопросом пользователю с вариантами («findings #1-6 — реальные
-  CI-блокеры, рекомендую вариант 1. Ответь номером.»), вместо machine-readable verdict.
-  В headless `claude -p` ответа нет → процесс выходит `exit_code=0` без verdict-строки →
-  merge_gate не находит verdict → `verdict=error` (спасает fallback). Это поведенческая
-  проблема, не инфраструктурная. **Fix-направление:** либо headless-вариант skill
-  `bmad-code-review` (директива «выдай verdict-строку `VERDICT: approve|reject`, НЕ задавай
-  вопросов»), либо обёртка review-спавна directive-prompt'ом, требующим финальный verdict
-  (ср. memory [[feedback_directive_prompt_over_slash_command]],
-  [[feedback_llm_worker_overthinks_skills]]). До закрытия NEW-26 ревью в pipeline опирается
-  на runner-log fallback — это страховка, а не реальный verdict.
+- ✅ **NEW-26 (P1, КОРЕНЬ #3) · Тип: 🐛 Баг — review-спавн резолвил интерактивный skill
+  target-проекта** — DONE 2026-05-20 (commit `60a6eaf`), validated replay 1.5. После
+  NEW-24+NEW-25 review-спавн отрабатывал по-настоящему (сеть ✅, skill ✅) — но
+  `verdict=error` всё равно. **Истинная причина** (replay показал): `claude -p
+  /bmad-code-review` резолвил `/bmad-code-review` **из target-проекта**
+  (`Antares/.claude/skills/`), а не из Virgil — slash-команда резолвится подъёмом по
+  дереву каталогов, а worktree лежит ВНУТРИ target (`<target>/.worktrees/wt-*`), инжект
+  skill'а в worktree (NEW-25) collision не выигрывает. Этот target-skill написан под
+  **интерактивный** режим — step-файлы HALT'ят на numbered-choice чекпоинтах, machine-
+  readable verdict не выдаётся → headless `exit 0` без `verdict:` → `verdict=error`.
+  **Применённый fix:** review-спавн больше не использует slash-команду — передаёт
+  self-contained headless directive-prompt (`CODE_REVIEW_DIRECTIVE`, `agent/run.py`)
+  напрямую в `claude -p`, как dev-worker через `DEFAULT_SKILL_INVOCATION`. Никакого
+  skill-резолва, инжекта, collision, HALT'ов. Директива требует финальную строку
+  `VERDICT: approve|request_changes|reject` (матчит `_VERDICT_LINE_RE`). Удалено:
+  `_ensure_review_skill_in_worktree`, `MERGE_GATE_*_SKILL`, `CODE_REVIEW_SKILL_INVOCATION`.
+  Validated: replay 1.5 → spec-stage `VERDICT: approve`, quality-stage
+  `VERDICT: request_changes`, merged `request_changes` — впервые pipeline дал реальный
+  verdict end-to-end, БЕЗ runner-log fallback. +4 tests (`test_new26_review_headless_verdict.py`),
+  tests 2124. ⚠️ **Закрыт только code-review путь.** security-review-спавн ещё
+  использует slash `/bmad-security-review --auto` (тот же латентный баг) →
+  см. NEW-27.
+
+- ⬜ **NEW-27 (P1, СТРУКТУРНОЕ) · Тип: 🏗️ Изоляция — воркеры видят skill'ы target-проекта**
+  — OPEN 2026-05-20. NEW-26 выявил структурную причину: worktree-копии создаются ВНУТРИ
+  target-проекта (`<target>/.worktrees/wt-*`), поэтому `claude -p` любого воркера,
+  поднимаясь по дереву каталогов в поисках slash-команд, доходит до
+  `<target>/.claude/skills/` и резолвит **чужие** skill'ы. Нарушение принципа «Virgil
+  использует исключительно свои embedded-skill'ы». Ещё уязвимы: security-review-спавн
+  (slash `/bmad-security-review --auto`), вложенные `/skill` внутри тел embedded-skill'ов,
+  `~/.claude/skills/` в isolated_home overlay (копия хостового home). **Fix-направление:**
+  выносить worktree-копии НАРУЖУ target-проекта (`/tmp/virgil-worktrees/...` или сосед) —
+  тогда «подъём вверх» не достигает чужих `.claude/`; + перевод security-review на
+  directive-prompt; + чистый isolated_home. Spec — `spec/spec_worker_skill_isolation.md`.
 
 ---
 
