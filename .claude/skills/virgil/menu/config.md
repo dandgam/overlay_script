@@ -120,7 +120,7 @@
 
 - ✅ → текстовый вопрос «Путь к policy YAML? (Enter — взять путь по умолчанию)». Если пусто — `Bash`: `bmad-orchestrator validate-policy`; иначе `validate-policy --path <path>`.
 - 📥 → текстовый вопрос «Slug проекта?» (regex `^[a-z0-9][a-z0-9_-]*$`). Подтверждение. `Bash`: `bmad-orchestrator policy-apply <slug>` (без `--auto-apply` — пусть спрашивает каждую правку).
-- ↩️ → два текстовых вопроса: «Slug проекта?» + «id правки (proposal_id из audit-лога)?». Подтверждение через `AskUserQuestion` «⛔ Отменить» / «✅ Откатить». `Bash`: `bmad-orchestrator policy-rollback <slug> <proposal_id>`.
+- ↩️ → два текстовых вопроса: «Slug проекта?» + «id правки (proposal_id из audit-лога)?». Затем **двухшаговое подтверждение** — прочитай `../templates/confirm-destructive.md`, фраза `ROLLBACK POLICY`. При успехе → `Bash`: `bmad-orchestrator policy-rollback <slug> <proposal_id>`. При ошибке — `../templates/error-handling.md`.
 
 ## Drill-down: «🔧 Skills»
 
