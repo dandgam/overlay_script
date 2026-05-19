@@ -33,21 +33,6 @@
 
 ### Pending
 
-- **id:** S2
-  **title:** NEW-7 диагностика + reconcile + bus drain
-  **surface:** backend-python
-  **spec_section:** 50-83
-  **depends_on:** [S1]
-  **acceptance:**
-    - Root cause verdict→integration disconnect зафиксирован в tracker (вариант a/b/c).
-    - post-worker reconcile step эмитит synthetic CODE_REVIEW_VERDICT для success+commits story.
-    - explicit bus drain перед real_pilot_done.
-    - +5 tests, mypy/ruff clean.
-  **safety_gates:**
-    - L3 branch isolation — работа только на integration/pilot_findings_closure_v3.
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S3
   **title:** NEW-7 INTEGRATION_MERGE_SKIPPED + subscriber robustness + NEW-6 exit-code regex
   **surface:** backend-python
@@ -80,16 +65,16 @@
 
 ### Current
 
-- **id:** S1
-  **title:** NEW-1-completion (env threading) + NEW-3-completion (sprint-status resolver)
+- **id:** S2
+  **title:** NEW-7 диагностика + reconcile + bus drain
   **surface:** backend-python
-  **spec_section:** 84-126
-  **depends_on:** []
+  **spec_section:** 50-83
+  **depends_on:** [S1]
   **acceptance:**
-    - resolved Settings прокинут в _run_mock_pilot / _run_real_pilot_body / _run_real_pilot; безусловные load_settings() в pilot-call-chain удалены.
-    - `ORCHESTRATOR_TARGET_PROJECT=odyssey virgil run --project antares --dry-run` → worktree-пути под /home/server/Antares.
-    - resolve_sprint_status_key матчит реальные ключи Antares 1a (1-4-*, 1-5-*); pilot_mark_done_unresolved не firing.
-    - +8 tests (4 NEW-1 + 4 NEW-3), mypy/ruff clean.
+    - Root cause verdict→integration disconnect зафиксирован в tracker (вариант a/b/c).
+    - post-worker reconcile step эмитит synthetic CODE_REVIEW_VERDICT для success+commits story.
+    - explicit bus drain перед real_pilot_done.
+    - +5 tests, mypy/ruff clean.
   **safety_gates:**
     - L3 branch isolation — работа только на integration/pilot_findings_closure_v3.
   **checkpoint:** false
@@ -100,7 +85,20 @@
   **worker_branches:** []
 
 ### Completed
-(none yet)
+
+- **id:** S1
+  **title:** NEW-1-completion (env threading) + NEW-3-completion (sprint-status resolver)
+  **completed:** 2026-05-19 08:03 UTC
+  **commit:** 80a15d2
+  **files_changed:** 12
+  **tests_passed:** 2018 PASS (+9: 5 NEW-1 + 4 NEW-3)
+  **decisions_made:**
+    - settings сделан required keyword-only на всех трёх pilot-функциях (_run_mock_pilot / _run_real_pilot / _run_real_pilot_body) — обновлено ~25 test-callsite'ов.
+    - NEW-3 root cause = вариант (a) epic-block scoping: mark-done loop читал raw YAML и понимал только legacy `epics:` nested layout; на BMad-flat `development_status:` layout (реальный Antares 1a) snap["epics"] пуст → resolve_sprint_status_key вообще не вызывался. Сам resolver исправен — v2 fix 729650f чинил недостижимую функцию.
+    - Fix NEW-3 — новый mark_sprint_status_done в bmad_format.py, диспатчит по layout (legacy nested + BMad flat), мутирует in-place с сохранением формата файла.
+  **deferred_items:**
+    - mypy: 4 pre-existing ошибки в run.py (lines ~1031/1040/1090, _detect_orphan_stories arg-type + bus kwarg) — baseline до S1, не регрессия. Можно почистить в S4 finalize.
+    - mock-pilot mark-done loop (run.py ~644) оставлен на legacy-only — mock fixtures всегда legacy format, out of scope NEW-3.
 
 ## Safety Gates Triggered
 (none)
@@ -116,9 +114,17 @@
   **rationale:** Вся работа — Python-код в src/bmad_orchestrator/ (agent/run.py, runtime/*). Нет Rust/UI/destructive-infra/removal-only. backend-python — единственный подходящий narrow surface для Python-бэкенда.
   **impact:** Все сессии используют workflows/backend-python.md.
 
+- **date:** 2026-05-19
+  **session:** S1
+  **decision:** NEW-3 чинится не в resolve_sprint_status_key, а добавлением mark_sprint_status_done — диспатчера по layout sprint-status.
+  **rationale:** Диагностика показала: resolver исправен, ломался уровень выше — mark-done loop не понимал BMad-flat layout. Чинить resolver было бы лечением симптома.
+  **impact:** S3 (NEW-7) — при диагностике verdict→integration учитывать что mark-done теперь корректно обновляет sprint-status; resume-сценарии больше не re-spawn'ят done-stories.
+
 ## Journal
 
 [2026-05-19 bootstrap] S0 bootstrap: tracker + backup/integration branches created, 4 sessions planned, runtime=loop_wrapper delay=120s, auto-merge=false
+[2026-05-19 08:03 UTC] S1 execution: NEW-1 — settings прокинут в 3 pilot-функции (required kw-only), убраны load_settings() из pilot-chain; ~25 test-callsite'ов обновлены. NEW-3 — диагностика: mark-done loop не понимал BMad-flat layout; добавлен mark_sprint_status_done. +9 tests, 2018 PASS, ruff clean. commit 80a15d2.
+[2026-05-19 08:03 UTC] S1 done, runtime=loop_wrapper — wrapper handles next iteration. S2 promoted to Current.
 
 ## Final Report (populated on last session completion)
 
