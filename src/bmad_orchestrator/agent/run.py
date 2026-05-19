@@ -125,7 +125,7 @@ from bmad_orchestrator.runtime.project_registry import (
 )
 from bmad_orchestrator.runtime.sandbox import DEFAULT_CGROUP_LIMITS, detect_sandbox
 from bmad_orchestrator.runtime.security_review import (
-    SECURITY_REVIEW_SKILL_INVOCATION,
+    SECURITY_REVIEW_DIRECTIVE,
     parse_security_verdict_from_event,
     security_review_subscriber,
 )
@@ -3540,7 +3540,11 @@ async def _spawn_security_review_worker(
     story_id: str,
     wave: str,
 ) -> WorkerHandle:
-    """Spawn ``claude -p /bmad-security-review --auto`` in ``worktree``.
+    """Spawn the headless security-review worker in ``worktree``.
+
+    NEW-27 S2 — passes the ``SECURITY_REVIEW_DIRECTIVE`` directive prompt, not a
+    slash command (a slash would resolve up the dir tree into the target
+    project's skills — the NEW-26 trap).
 
     Same JSONL-namespace trick as :func:`_spawn_code_review_worker` — the
     ``BMAD_CURRENT_WAVE`` env var is pivoted to a security-scoped namespace so
@@ -3555,7 +3559,7 @@ async def _spawn_security_review_worker(
             worktree=worktree,
             story_id=story_id,
             branch=f"feature/{story_id}",
-            skill_invocation=SECURITY_REVIEW_SKILL_INVOCATION,
+            skill_invocation=SECURITY_REVIEW_DIRECTIVE,
             # NEW-24: reviewer makes LLM API calls — needs egress (see
             # _spawn_code_review_worker).
             sandbox_network="full",

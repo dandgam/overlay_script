@@ -55,7 +55,51 @@ SECURITY_REVIEW_POLICY_PATH_DEFAULT = (
     Path(__file__).resolve().parents[3] / "skills" / "policy" / "security-review.yaml"
 )
 
-SECURITY_REVIEW_SKILL_INVOCATION: str = "/bmad-security-review --auto"
+# NEW-27 S2 — headless security-review directive (replaces the
+# ``/bmad-security-review --auto`` slash). A slash command resolves by walking
+# up the worker's directory tree, so it could pick up the *target project's*
+# ``bmad-security-review`` skill — the NEW-26 trap, applied to security review.
+# Passing a self-contained directive prompt straight to ``claude -p`` (the
+# CODE_REVIEW_DIRECTIVE pattern) removes skill resolution entirely. The directive
+# mandates the exact ``VERDICT:`` line that :data:`_VERDICT_LINE_RE` parses.
+SECURITY_REVIEW_DIRECTIVE: str = (
+    "You are an elite application-security reviewer running HEADLESS inside an "
+    "autonomous orchestrator. There is no human present to answer questions. "
+    "Complete the entire security review yourself and end with one machine-"
+    "readable verdict line.\n"
+    "\n"
+    "RULES (no exceptions):\n"
+    "- NEVER halt, pause, or wait for input. There are no checkpoints.\n"
+    "- NEVER ask a question or present numbered option menus.\n"
+    "- Do NOT apply patches or modify any files. Review only.\n"
+    "\n"
+    "STEP 1 — Build the diff. Run, stopping at the first non-empty result: "
+    "`git diff main...HEAD`; if main is absent try `origin/main...HEAD` then "
+    "`master...HEAD`; if still empty `git diff HEAD` and `git show HEAD`. Also "
+    "always include uncommitted work via `git diff HEAD`. If the combined diff "
+    "is genuinely empty, emit `VERDICT: APPROVE` and stop.\n"
+    "\n"
+    "STEP 2 — Hunt for vulnerabilities the change INTRODUCES, from four angles: "
+    "(a) Injection — SQL/command/path/template injection, unparameterized "
+    "queries, unsanitized user input reaching a sink; (b) Auth bypass — missing "
+    "or wrong authz checks, broken session/token handling, JWT alg/exp/aud "
+    "gaps, IDOR; (c) Crypto — weak hashing for passwords, predictable RNG for "
+    "security purposes, reused IV/nonce, hardcoded keys/secrets; (d) Data leak "
+    "— PII in logs or external calls, missing tenant_id scoping in multi-tenant "
+    "queries, RLS / security_invoker gaps, secrets in diffs.\n"
+    "\n"
+    "STEP 3 — Triage each finding: exploitable (a real vulnerability this change "
+    "introduced) / minor (defense-in-depth gap, non-exploitable) / dismiss "
+    "(false positive).\n"
+    "\n"
+    "STEP 4 — Print a short summary (counts, one line per exploitable finding "
+    "with file:line), then print EXACTLY ONE final line, nothing after it:\n"
+    "- `VERDICT: APPROVE` — zero security findings.\n"
+    "- `VERDICT: MERGE WITH FIXES` — only minor, non-exploitable findings.\n"
+    "- `VERDICT: BLOCK` — one or more exploitable vulnerabilities introduced.\n"
+    "The orchestrator parses that final line — emit it verbatim, uppercase "
+    "`VERDICT:`, on its own line, as the very last line of your output."
+)
 
 VERDICT_APPROVE = "approve"
 VERDICT_MERGE_WITH_FIXES = "merge_with_fixes"
@@ -521,8 +565,8 @@ async def security_review_subscriber(
 
 __all__ = [
     "ALL_VERDICTS",
+    "SECURITY_REVIEW_DIRECTIVE",
     "SECURITY_REVIEW_POLICY_PATH_DEFAULT",
-    "SECURITY_REVIEW_SKILL_INVOCATION",
     "VERDICT_APPROVE",
     "VERDICT_BLOCK",
     "VERDICT_ERROR",
