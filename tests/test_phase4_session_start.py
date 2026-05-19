@@ -139,6 +139,11 @@ async def test_spawn_worker_real_mode_env_has_bootstrap(tmp_path: Path) -> None:
     fake_proc.pid = 42
     fake_proc.stdout = None
     fake_proc.wait = AsyncMock(return_value=0)
+    # NEW-5 dirty-worktree gate runs ``git status --porcelain`` via
+    # create_subprocess_exec before the real spawn — tmp_path is not a git
+    # repo, so emulate git exiting non-zero (gate treats it as not-applicable).
+    fake_proc.returncode = 1
+    fake_proc.communicate = AsyncMock(return_value=(b"", b""))
 
     captured_env: dict[str, str] = {}
 
@@ -174,6 +179,11 @@ async def test_spawn_worker_bootstrap_contains_story_id(tmp_path: Path) -> None:
     fake_proc.pid = 99
     fake_proc.stdout = None
     fake_proc.wait = AsyncMock(return_value=0)
+    # NEW-5 dirty-worktree gate runs ``git status --porcelain`` via
+    # create_subprocess_exec before the real spawn — tmp_path is not a git
+    # repo, so emulate git exiting non-zero (gate treats it as not-applicable).
+    fake_proc.returncode = 1
+    fake_proc.communicate = AsyncMock(return_value=(b"", b""))
 
     captured_env: dict[str, str] = {}
 

@@ -111,10 +111,13 @@ def test_event_loop_has_all_spec_types() -> None:
         # 2026-05-19 spec_pilot_findings_closure_v2 S2 #2 — reused-worktree
         # Stage 7 cleanup-failure detector.
         "runner_cleanup_failed_reused_worktree",
+        # 2026-05-19 spec_pilot_findings_closure_v3 S3 #1 — NEW-7 merge-skip
+        # observability (no_commits / verdict_missing / ff_conflict).
+        "integration_merge_skipped",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 35
+    assert len(ALL_EVENT_TYPES) == 36
 
 
 @pytest.mark.asyncio

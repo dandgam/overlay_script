@@ -120,6 +120,15 @@ class EventType(StrEnum):
     # CODE_REVIEW_VERDICT(verdict=approve, source=runner_cleanup_recovery) so the
     # merge subscriber recovers the work instead of treating it as a halt.
     RUNNER_CLEANUP_FAILED_REUSED_WORKTREE = "runner_cleanup_failed_reused_worktree"
+    # Initiative pilot_findings_closure_v3 S3 (#1 NEW-7 observability): emitted
+    # when a story finishes ``worker_completed status=success`` but its work
+    # never reaches ``integration/<wave>``. Payload: {story_id, reason, worktree,
+    # commits}. ``reason`` ∈ {``no_commits`` — success but zero commits past
+    # base_sha; ``verdict_missing`` — success but no WorkerHandle/base_sha to
+    # verify commits, so no verdict could be reconciled; ``ff_conflict`` —
+    # merge_to_integration_subscriber's fast-forward merge failed}. Turns a
+    # silent loss of work into a visible audit signal (replay finding NEW-7).
+    INTEGRATION_MERGE_SKIPPED = "integration_merge_skipped"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
@@ -192,6 +201,30 @@ class EventLoop:
             for cb in list(self._subs):
                 await cb(event)
         return event
+
+    async def drain(
+        self, *, max_events: int = 1000, idle_timeout: float = 0.05
+    ) -> list[Event]:
+        """Dispatch every queued event (and cascades they emit) until empty.
+
+        Returns the events dispatched, in FIFO order. Used by the real-pilot
+        body before ``real_pilot_done``: in real mode nothing else calls
+        :meth:`dispatch_one`, so without an explicit drain the
+        ``WORKER_COMPLETED`` → ``CODE_REVIEW_VERDICT`` → merge-to-integration
+        subscriber chain never runs and ``integration/<wave>`` is silently
+        never created (validation-replay finding NEW-7).
+
+        ``max_events`` bounds a runaway cascade (a subscriber re-emitting its
+        own trigger). On hitting the cap the drain stops — the queue may
+        still hold events, but the loop will not spin forever.
+        """
+        dispatched: list[Event] = []
+        while len(dispatched) < max_events:
+            event = await self.dispatch_one(timeout=idle_timeout)
+            if event is None:
+                break
+            dispatched.append(event)
+        return dispatched
 
     # ── single-shot correlation futures (W5 — bot ↔ intent-router bridge) ────
 

@@ -211,6 +211,41 @@ def _read_halt_reason(halt_path: Path) -> str:
     return ""
 
 
+async def _git_porcelain(worktree: Path) -> list[str] | None:
+    """Return ``git status --porcelain`` lines for ``worktree``.
+
+    ``None`` when the path is not a git worktree (``git`` exits non-zero) —
+    the dirty-worktree gate then treats it as not-applicable (mock workers
+    are routinely spawned into plain tmp dirs in tests).
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(worktree), "status", "--porcelain",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    return [ln for ln in stdout.decode(errors="replace").splitlines() if ln.strip()]
+
+
+async def _clean_dirty_worktree(worktree: Path) -> None:
+    """Discard uncommitted residue: ``git reset --hard`` + ``git clean -fd``.
+
+    Destructive — acceptable here ONLY because the caller has gated this to a
+    managed ``.worktrees/`` path under orchestrator control (never a user
+    repo): it discards just the orchestrator-residue of a prior aborted run
+    (NEW-5, spec_pilot_findings_closure_v3 §#5).
+    """
+    for args in (["reset", "--hard"], ["clean", "-fd"]):
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(worktree), *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+
+
 @dataclass(slots=True)
 class WorkerHandle:
     worktree: str
@@ -620,6 +655,7 @@ async def spawn_worker(
     mcp_readiness_timeout_s: int = MCP_READINESS_DEFAULT_TIMEOUT_S,
     mcp_readiness_interval_ms: int = MCP_READINESS_DEFAULT_INTERVAL_MS,
     auto_clear_halt: bool = False,
+    auto_clean_dirty_worktree: bool = True,
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 
@@ -693,6 +729,47 @@ async def spawn_worker(
                 worktree=worktree,
                 halt_path=str(halt_path),
                 reason=reason,
+            )
+
+    # Initiative pilot_findings_closure v3 (#5 NEW-5): dirty reused worktree
+    # gate. A reused worktree carrying uncommitted residue from a prior
+    # aborted run makes the runner's Stage 0 halt ("working tree not clean").
+    # The ``worktree_dirty_pre_spawn`` warning already fired upstream but took
+    # no action — the worker spawned and failed anyway. Resolve it here:
+    #   auto_clean_dirty_worktree=True (default) → reset --hard + clean -fd
+    #     (destructive, but :func:`_clean_dirty_worktree` is gated to managed
+    #      ``.worktrees/`` residue under orchestrator control — never a user
+    #      repo);
+    #   False (safe mode) → emit WORKER_HALT_PRESPAWN reason=dirty_worktree and
+    #     refuse to spawn, so the operator can inspect the residue by hand.
+    dirty = await _git_porcelain(wt_path)
+    if dirty:
+        if auto_clean_dirty_worktree:
+            await _clean_dirty_worktree(wt_path)
+            log.info(
+                "worktree_auto_cleaned story=%s discarded_files=%d",
+                story_id,
+                len(dirty),
+            )
+        else:
+            dirty_jsonl_path = worker_jsonl_path(worktree)
+            dirty_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            _emit(
+                dirty_jsonl_path,
+                {
+                    "event_type": "worker_halt_prespawn",
+                    "worktree": worktree,
+                    "story_id": story_id,
+                    "halt_path": "",
+                    "reason": "dirty_worktree",
+                    "dirty_count": len(dirty),
+                },
+            )
+            raise WorkerHaltPrespawnError(
+                story_id=story_id,
+                worktree=worktree,
+                halt_path="",
+                reason="dirty_worktree",
             )
 
     # Initiative pilot_findings_closure S5 (#5 R2): MCP readiness gate.

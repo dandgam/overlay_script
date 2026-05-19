@@ -365,6 +365,7 @@ async def test_all_seven_canonical_subscribers_wired_in_correct_order(
             session_id=None,
             models=ModelConfig(),
             options={},
+            settings=load_settings(),
         )
     finally:
         await bus.stop()
@@ -420,8 +421,10 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     # 2026-05-19 spec_pilot_findings_closure S6 #7 adds WORKER_HALT_PRESPAWN → 33 + 1 = 34.
     # 2026-05-19 spec_pilot_findings_closure_v2 S2 #2 adds
     #   RUNNER_CLEANUP_FAILED_REUSED_WORKTREE → 34 + 1 = 35.
-    assert len(ALL_EVENT_TYPES) == 35, (
-        f"Expected 35 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # 2026-05-19 spec_pilot_findings_closure_v3 S3 #1 adds
+    #   INTEGRATION_MERGE_SKIPPED → 35 + 1 = 36.
+    assert len(ALL_EVENT_TYPES) == 36, (
+        f"Expected 36 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 

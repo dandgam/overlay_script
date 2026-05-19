@@ -322,7 +322,7 @@ async def test_p1_5_real_pilot_persists_snapshot_after_wave_boundary(
             bus, project="proj_p1_5c", wave="w",
             max_parallel=1, max_stories=1, max_spend_usd=10.0,
             budget=budget, state_db=None, session_id=None,
-            models=ModelConfig(), options={},
+            models=ModelConfig(), options={}, settings=load_settings(),
         )
     finally:
         await bus.stop()
