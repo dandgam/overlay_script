@@ -12,7 +12,8 @@ MAX_COMMIT_STALE=2100    # 35 min — smart kill commit-staleness threshold
 HARD_CEILING_AGE=5400    # 90 min — unconditional kill (pre-commit hangs / runaways)
 INTERVAL=60
 
-cd "$(dirname "spec/spec_pilot_findings_closure_v2.md")/../.." || exit 1
+# Resolve project root from this script's own location (.claude/scripts/<x>.sh).
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || exit 1
 
 while true; do
   PID=$(pgrep -f "claude -p /auto-loop-spec spec/spec_pilot_findings_closure_v2.md" | head -1)

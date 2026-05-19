@@ -15,7 +15,8 @@
 #   ~45min/incident. Wake then continues to fresh Sxx+1.
 
 set -u
-cd "$(dirname "spec/spec_pilot_findings_closure_v2.md")/../.." || exit 1
+# Resolve project root from this script's own location (.claude/scripts/<x>.sh).
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || exit 1
 
 TRACKER=".claude/initiative-tracker-pilot_findings_closure_v2.md"
 LOG=".claude/auto-loop-pilot_findings_closure_v2.log"
