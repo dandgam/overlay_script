@@ -108,28 +108,42 @@ def resolve_sprint_status_key(raw: str, sprint_keys: Any) -> str | None:
     Looks up ``raw`` in ``sprint_keys`` (any iterable of strings):
 
     1. Exact match (case-insensitive) → return that key verbatim.
-    2. Else normalize ``raw`` to dotted form (``"1.3"``) and find the first
-       sprint key whose normalized form matches → return that key.
+    2. Else fold both sides through :func:`normalize_story_id` (dotted form,
+       e.g. ``"1.3"``) and collect every sprint key whose normalized form
+       matches. This bridges a dotted spawned id (``"1.3"``) to a
+       kebab-with-prose composite key (``"1-3-fastapi-app-lifespan-health"``).
+       - exactly one match → return it.
+       - multiple matches (e.g. ``"1-3-foo"`` and ``"1-3-bar"`` both reduce to
+         ``"1.3"``) → log a ``sprint_status_key_ambiguous`` warning and return
+         the lexicographically first key, so resolution stays deterministic.
     3. Else return ``None`` (caller decides fallback).
 
-    Used by the real-pilot mark-done loop to bridge dotted spawned ids
-    (``"1.3"``) to the kebab-with-prose keys actually present in
-    sprint-status.yaml (``"1-3-fastapi-app-lifespan-health"``).
+    Used by the real-pilot mark-done loop (NEW-3) to bridge dotted spawned ids
+    to the kebab-with-prose keys actually present in sprint-status.yaml.
     """
     if not isinstance(raw, str) or not raw:
         return None
-    keys = list(sprint_keys) if sprint_keys is not None else []
+    keys = [k for k in (sprint_keys or []) if isinstance(k, str)]
     if not keys:
         return None
     raw_lower = raw.lower()
     for k in keys:
-        if isinstance(k, str) and k.lower() == raw_lower:
+        if k.lower() == raw_lower:
             return k
     raw_norm = normalize_story_id(raw)
-    for k in keys:
-        if isinstance(k, str) and normalize_story_id(k) == raw_norm:
-            return k
-    return None
+    matches = sorted(k for k in keys if normalize_story_id(k) == raw_norm)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        logger.warning(
+            "sprint_status_key_ambiguous raw=%s normalized=%s candidates=%s "
+            "chosen=%s",
+            raw,
+            raw_norm,
+            matches,
+            matches[0],
+        )
+    return matches[0]
 
 
 def extract_status_token(value: Any) -> str:
@@ -293,4 +307,5 @@ __all__ = [
     "extract_status_token",
     "normalize_story_id",
     "parse_sprint_status_bmad",
+    "resolve_sprint_status_key",
 ]
