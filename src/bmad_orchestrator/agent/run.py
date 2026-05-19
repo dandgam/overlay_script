@@ -47,6 +47,7 @@ import secrets
 import shutil
 import signal
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -150,6 +151,7 @@ from bmad_orchestrator.runtime.worker_silent_failure import (
     parse_inner_exit_code,
 )
 from bmad_orchestrator.runtime.worker_spawn import (
+    WorkerHaltPrespawnError,
     WorkerHandle,
     tail_jsonl_events,
 )
@@ -210,8 +212,56 @@ ALWAYS_ON_TOOLS: tuple[str, ...] = (
 
 MCP_SERVER_NAME: str = "bmad_orchestrator"
 
+# NEW-8 — hard cap on the post-pilot shutdown sequence. A background task that
+# refuses to cancel within this window triggers ``orchestrator_shutdown_timeout``
+# + forced return instead of hanging the process (~13-min hang regression).
+ORCHESTRATOR_SHUTDOWN_TIMEOUT_S: float = 30.0
+
 
 # ── public API ───────────────────────────────────────────────────────────────
+
+
+async def _shutdown_orchestrator(
+    bus: EventLoop, *, pre_existing: set[asyncio.Task[Any]]
+) -> None:
+    """NEW-8 — explicit post-pilot shutdown so ``run_orchestrator`` returns
+    promptly instead of hanging on the event-bus backstop task / orphan
+    background coroutines (validation-replay finding: ~13-min hang after
+    ``real_pilot_done``).
+
+    Stops the event bus (cancels its backstop task), then cancels every
+    background task spawned *during* this orchestrator run — identified as
+    ``all_tasks() - pre_existing - {current}`` so a caller's TUI / parent
+    coroutine (the ``--watch`` path) is never cancelled. ``asyncio.wait`` with
+    a hard timeout bounds the wait genuinely: a task that swallows cancellation
+    is left ``pending`` (logged as ``orchestrator_shutdown_timeout``) and the
+    function returns regardless rather than blocking the process.
+    """
+    started = time.monotonic()
+    await bus.stop()
+    current = asyncio.current_task()
+    leftover = [
+        t
+        for t in asyncio.all_tasks()
+        if t not in pre_existing and t is not current and not t.done()
+    ]
+    for task in leftover:
+        task.cancel()
+    if leftover:
+        _, pending = await asyncio.wait(
+            leftover, timeout=ORCHESTRATOR_SHUTDOWN_TIMEOUT_S
+        )
+        if pending:
+            log.warning(
+                "orchestrator_shutdown_timeout",
+                timeout_s=ORCHESTRATOR_SHUTDOWN_TIMEOUT_S,
+                pending=len(pending),
+                elapsed_sec=round(time.monotonic() - started, 2),
+            )
+    log.info(
+        "orchestrator_shutdown_complete",
+        elapsed_sec=round(time.monotonic() - started, 2),
+    )
 
 
 async def run_orchestrator(
@@ -255,6 +305,11 @@ async def run_orchestrator(
     models = models or settings.models
     bus = event_loop or EventLoop()
 
+    # NEW-8 — snapshot tasks alive *before* the pilot so the post-pilot
+    # shutdown only cancels orchestrator-spawned background tasks and never a
+    # caller's TUI / parent coroutine.
+    _pre_existing_tasks = asyncio.all_tasks()
+
     log.info(
         "orchestrator_starting",
         project=project,
@@ -291,6 +346,7 @@ async def run_orchestrator(
         await _run_mock_pilot(
             bus, wave=wave, max_parallel=max_parallel, budget=budget, settings=settings
         )
+        await _shutdown_orchestrator(bus, pre_existing=_pre_existing_tasks)
         return bus
 
     # Real mode — FS4 B1: validate options shape against the SDK before any
@@ -317,6 +373,7 @@ async def run_orchestrator(
         story_filter=stories,
         settings=settings,
     )
+    await _shutdown_orchestrator(bus, pre_existing=_pre_existing_tasks)
     return bus
 
 
@@ -910,6 +967,34 @@ def _kill_orphan_workers(handles: list[WorkerHandle]) -> None:
         )
 
 
+_TRUTHY_ENV = {"1", "true", "yes", "on"}
+_FALSY_ENV = {"0", "false", "no", "off"}
+
+
+def _resolve_auto_clean_dirty_worktree(settings: Settings) -> bool:
+    """NEW-5 — effective dirty-worktree policy.
+
+    ``BMAD_AUTO_CLEAN_DIRTY_WORKTREE`` env var wins when set to a recognised
+    truthy/falsy token; otherwise ``Settings.auto_clean_dirty_worktree`` (the
+    programmatic default, True). An unrecognised env value is ignored (logged)
+    so a typo never silently flips the destructive auto-clean path.
+    """
+    raw = os.environ.get("BMAD_AUTO_CLEAN_DIRTY_WORKTREE")
+    if raw is None:
+        return settings.auto_clean_dirty_worktree
+    token = raw.strip().lower()
+    if token in _TRUTHY_ENV:
+        return True
+    if token in _FALSY_ENV:
+        return False
+    log.warning(
+        "bmad_auto_clean_dirty_worktree_invalid",
+        value=raw,
+        fallback=settings.auto_clean_dirty_worktree,
+    )
+    return settings.auto_clean_dirty_worktree
+
+
 async def _run_real_pilot_body(
     bus: EventLoop,
     *,
@@ -1018,7 +1103,11 @@ async def _run_real_pilot_body(
     # high-risk / hard-override topics emit HUMAN_QUERY for the operator.
     elicitation_policy_path = getattr(settings, "elicitation_policy_path", None)
     elicitation_engine = _load_elicitation_engine(elicitation_policy_path)
-    bus.on(cast(EventCallback, partial(make_elicitation_subscriber(elicitation_engine), bus=bus)))
+    # S4 finalize — bind ``bus`` via a closure rather than ``partial(fn, bus=bus)``.
+    # The factory return type is an unnamed ``Callable[[Event, EventLoop], ...]``,
+    # so a keyword bind tripped mypy ``call-arg``; a positional closure is clean.
+    _elicitation_sub = make_elicitation_subscriber(elicitation_engine)
+    bus.on(lambda e: _elicitation_sub(e, bus))
 
     # Supervisor LLM-loop (Phase 4 #9 — P4 Orchestrator-Workers + P2 Routing).
     # Listens on 5 high-level event types (HUMAN_QUERY, WORKER_HALT_FILE,
@@ -1028,7 +1117,8 @@ async def _run_real_pilot_body(
     # Filters out events with payload['source']='supervisor' to avoid loops.
     supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
     supervisor_engine = _load_supervisor_engine(supervisor_policy_path)
-    bus.on(cast(EventCallback, partial(make_supervisor_subscriber(supervisor_engine), bus=bus)))
+    _supervisor_sub = make_supervisor_subscriber(supervisor_engine)
+    bus.on(lambda e: _supervisor_sub(e, bus))
 
     # Self-learning consolidation loop (Phase 5 — P5 Evaluator-Optimizer).
     # Listens on 4 trigger events (WAVE_BOUNDARY_REACHED, EPIC_BOUNDARY_REACHED,
@@ -1037,7 +1127,8 @@ async def _run_real_pilot_body(
     self_learning_policy_path = getattr(settings, "self_learning_policy_path", None)
     sl_config = _load_self_learning_config(self_learning_policy_path)
     sl_consolidator = Consolidator(config=sl_config)
-    bus.on(cast(EventCallback, partial(make_self_learning_subscriber(sl_consolidator), bus=bus)))
+    _self_learning_sub = make_self_learning_subscriber(sl_consolidator)
+    bus.on(lambda e: _self_learning_sub(e, bus))
 
     # BMad Phase 4 canonical-workflow subscribers (gap-closure 2026-05-19).
     # SPRINT_SCOPE_CHANGE_DETECTED → bmad-correct-course.
@@ -1087,7 +1178,7 @@ async def _run_real_pilot_body(
         # (Phase-3.5 spikes are common offenders). The Gauntlet's Patch-AA
         # fallback handles this gracefully, but operator should know that the
         # canonical artifact chain is incomplete.
-        orphan_ids = _detect_orphan_stories(story_filter)
+        orphan_ids = _detect_orphan_stories(list(story_filter))
         if orphan_ids:
             log.warning(
                 "story_orphan_in_epics_md",
@@ -1121,6 +1212,11 @@ async def _run_real_pilot_body(
     worker_model = models.dev
 
     bus.start_backstop_task()
+
+    # NEW-5 — dirty reused worktree policy. ``BMAD_AUTO_CLEAN_DIRTY_WORKTREE``
+    # env var (truthy/falsy) overrides ``Settings.auto_clean_dirty_worktree``;
+    # absent → the Settings default (True = auto-clean residue before spawn).
+    auto_clean_dirty_worktree = _resolve_auto_clean_dirty_worktree(settings)
 
     daily_halt_reached = False
     # Initiative pilot_findings_closure S6 (#6 P2) — one auto-disable state
@@ -1335,18 +1431,33 @@ async def _run_real_pilot_body(
             # ``claude -p`` processes don't race on shared ``~/.claude*`` state
             # and don't blow past the host's per-UID RLIMIT_NPROC.
             parallel_isolation = max_parallel > 1
-            handle = await runtime_spawn_worker(
-                worktree=str(wt),
-                story_id=story["id"],
-                branch=branch_name,
-                mock=False,
-                sandbox_network="full",
-                embedded_skills_root=settings.skills_resolution_root,
-                allowed_worktree_root=worktree_root,
-                base_sha=base_sha,
-                isolated_home=parallel_isolation,
-                cgroup_limits=DEFAULT_CGROUP_LIMITS if parallel_isolation else None,
-            )
+            # NEW-5 — dirty reused worktree handling lives inside spawn_worker;
+            # in safe mode (auto_clean_dirty_worktree=False) it raises
+            # WorkerHaltPrespawnError instead of spawning. Catch it here so a
+            # single dirty story halts cleanly rather than aborting the whole
+            # pilot loop (the same guard also covers the #7 halt-reason gate).
+            try:
+                handle = await runtime_spawn_worker(
+                    worktree=str(wt),
+                    story_id=story["id"],
+                    branch=branch_name,
+                    mock=False,
+                    sandbox_network="full",
+                    embedded_skills_root=settings.skills_resolution_root,
+                    allowed_worktree_root=worktree_root,
+                    base_sha=base_sha,
+                    isolated_home=parallel_isolation,
+                    cgroup_limits=DEFAULT_CGROUP_LIMITS if parallel_isolation else None,
+                    auto_clean_dirty_worktree=auto_clean_dirty_worktree,
+                )
+            except WorkerHaltPrespawnError as exc:
+                log.warning(
+                    "worker_spawn_halted_prespawn",
+                    story_id=story["id"],
+                    reason=exc.reason,
+                )
+                failed.append(story["id"])
+                continue
             handles.append(handle)
             spawned_handles.append(handle)
             spawned.append(story["id"])

@@ -317,34 +317,16 @@ counter split дал spawned/succeeded/failed; S2 verdict-fallback не помо
 фиксы оказались частичными. Детали — memory [[project_pilot_antares_1a_replay_2026-05-19]].
 
 - ✅ **NEW-2 VALIDATED** — `grep -c "cannot delete branch"` по логу = 0 (прошлый run халтил 3/3). Stage 7 graceful cleanup работает в проде.
-- ⬜ **NEW-1-completion (P1): pilot body перечитывает env** — v2 пометил NEW-1 done, но
-  `agent/run.py:_run_real_pilot_body` (~933) и `_run_mock_pilot` (~541) делают
-  `settings = load_settings()` заново → читают `ORCHESTRATOR_TARGET_PROJECT` из `.env` →
-  worktrees создаются в `/home/server/odyssey`. Fix: прокинуть resolved `Settings` в
-  pilot body, убрать оба `load_settings()`. ~20-30 мин + тест. memory
-  [[project_backlog_new1_incomplete]].
-- ⬜ **NEW-3-completion (P2): resolver всё ещё не матчит** — `pilot_mark_done_unresolved`
-  снова firing для 1.4/1.5 несмотря на v2 fix `729650f`. sprint-status не обновляется.
-  Нужен повторный разбор `resolve_sprint_status_key`.
-- ⬜ **NEW-6 (P2): NEW-4 format gap** — runner выводит и `Exit code: N`, и `EXIT_CODE=N`;
-  `parse_inner_exit_code` regex `^(?:❯ )?Exit code: (\d+)$` ловит только первый. Worker
-  1.4 вывел `EXIT_CODE=2` → `worker_completed status=success` (неверно). Расширить regex
-  на оба формата.
-- ⬜ **NEW-7 (P1, ГЛАВНЫЙ БЛОКЕР): integration ветка не создаётся даже на succeeded** —
-  1.5 — чистый успех с commit `85bb8a4` — но `merge_to_integration_subscriber` не
-  сработал, `integration/wave-1a` не создана. Verdict→integration pipeline разорван.
-  S2 verdict-fallback не покрывает реальные сценарии. **До фикса production pilot
-  бессмыслен — stories делаются, но никуда не интегрируются.**
-- ⬜ **NEW-5 (P2): dirty worktree блокирует Stage 0** — reused worktree с uncommitted
-  изменениями (от прошлого aborted run'а) → runner Stage 0 halt `working tree not clean`.
-  1.3 упала на этом. `worktree_dirty_pre_spawn` warning есть — нужен action (auto-stash /
-  checkout -- . перед spawn'ом).
-- ⬜ **NEW-8 (P2): orchestrator висит ~13 мин после `real_pilot_done`** — процесс не
-  выходит сам. Возможно orphan-cleanup hang или wait на subscriber.
+- ✅ **NEW-1-completion (P1): pilot body перечитывает env** — DONE 2026-05-19 (commit `80a15d2`, S1 `pilot_findings_closure_v3`): `settings` сделан required keyword-only на `_run_mock_pilot`/`_run_real_pilot`/`_run_real_pilot_body`, оба `load_settings()` из pilot-chain убраны; ~25 test-callsite'ов обновлены.
+- ✅ **NEW-3-completion (P2): resolver всё ещё не матчит** — DONE 2026-05-19 (commit `80a15d2`, S1): root cause = mark-done loop читал raw YAML и понимал только legacy `epics:` layout; на BMad-flat `development_status:` resolver вообще не вызывался. Fix — новый `mark_sprint_status_done` в `bmad_format.py`, диспатчит по layout.
+- ✅ **NEW-6 (P2): NEW-4 format gap** — DONE 2026-05-19 (commit `1a80fa1`, S3): `_INNER_EXIT_RE` = `^(?:❯\s*)?(?:Exit code:\s*|EXIT_CODE=)(\d+)$` — альтернация ловит оба формата, last-match семантика сохранена.
+- ✅ **NEW-7 (P1, ГЛАВНЫЙ БЛОКЕР): integration ветка не создаётся даже на succeeded** — DONE 2026-05-19 (commits `db48b2c` S2 + `1a80fa1` S3): root cause = в real-режиме никто не дренировал шину (`dispatch_one` не вызывался → вся W4-цепочка мёртвая). Fix — `EventLoop.drain()` + `_reconcile_success_verdicts` synthetic-verdict fallback; `_run_real_pilot_body` делает drain→reconcile→drain перед `real_pilot_done`. EventType #36 `INTEGRATION_MERGE_SKIPPED` (reason no_commits/verdict_missing/ff_conflict) для observability.
+- ✅ **NEW-5 (P2): dirty worktree блокирует Stage 0** — DONE 2026-05-19 (S4 `pilot_findings_closure_v3`): `spawn_worker` получил pre-spawn dirty-worktree gate — `auto_clean_dirty_worktree=True` (default) → `git reset --hard` + `clean -fd` в managed worktree, `False` → `WORKER_HALT_PRESPAWN reason=dirty_worktree` без spawn. Env override `BMAD_AUTO_CLEAN_DIRTY_WORKTREE`.
+- ✅ **NEW-8 (P2): orchestrator висит ~13 мин после `real_pilot_done`** — DONE 2026-05-19 (S4): `_shutdown_orchestrator` — `bus.stop()` + cancel orchestrator-spawned background tasks (`all_tasks() - pre_existing - {current}`), `asyncio.wait` hard-timeout 30s guard, лог `orchestrator_shutdown_complete`.
 
-**Recommended next initiative:** `pilot_findings_closure_v3` через `/auto-loop-spec-long`
-(~3-4 сессии) — приоритет **NEW-7** (integration pipeline — критпуть) + NEW-1-completion
-+ NEW-3-completion + NEW-6 + NEW-5 + NEW-8. До v3 production pilot бессмыслен.
+**Closed by initiative:** `pilot_findings_closure_v3` (S1..S4 на `integration/pilot_findings_closure_v3`,
+NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 + EventType #36, tests 2009→2038).
+Post-merge — повторный validation-replay Antares 1a для финального подтверждения NEW-7.
 
 ---
 
@@ -368,6 +350,6 @@ counter split дал spawned/succeeded/failed; S2 verdict-fallback не помо
 
 ---
 
-**Last updated:** 2026-05-19 (v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Last updated:** 2026-05-19 (v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
 **Status:** v13.5 — **Phase 3 gate CLOSED** (Step A `28 tests` + Step B `10 real cases` + baseline scaffold `evals/baselines/phase3-step-b-baseline.json`). pilot_findings_closure initiative complete on integration branch (S1..S8, 5 P1 + 3 P2 + 1 P3 + R1 + R2): tests **1945 PASS** (+85 vs 1860 baseline; +5 expected after S8 merge), mypy/ruff clean, EventType count **34** (+5: STORY_AUTO_SPLIT, WORKER_CANCELLED, MCP_NOT_READY, BUDGET_AUTO_DISABLED, WORKER_HALT_PRESPAWN). **Awaits manual merge** `git checkout main && git merge --no-ff integration/pilot_findings_closure`. **#10 production pilot UNBLOCKED** post-merge.
 **Owner:** user + Claude orchestrator

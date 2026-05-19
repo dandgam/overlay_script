@@ -180,6 +180,15 @@ class Settings(BaseSettings):
     # baseline; per-story override via story frontmatter ``requires_mcp:`` list.
     required_mcp_tools: list[str] = Field(default_factory=list)
 
+    # Initiative pilot_findings_closure v3 (#5 NEW-5) — dirty reused worktree
+    # policy. True (default) → :func:`runtime.worker_spawn.spawn_worker`
+    # discards uncommitted residue in a reused managed worktree
+    # (``git reset --hard`` + ``git clean -fd``) before spawning. False → the
+    # worker is not spawned; ``WORKER_HALT_PRESPAWN reason=dirty_worktree`` is
+    # emitted so the operator can inspect the residue by hand. Env override:
+    # ``BMAD_AUTO_CLEAN_DIRTY_WORKTREE`` (resolved at the run.py spawn callsite).
+    auto_clean_dirty_worktree: bool = True
+
     locale: str = "ru"
 
 
