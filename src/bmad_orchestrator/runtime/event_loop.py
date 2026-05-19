@@ -129,6 +129,16 @@ class EventType(StrEnum):
     # merge_to_integration_subscriber's fast-forward merge failed}. Turns a
     # silent loss of work into a visible audit signal (replay finding NEW-7).
     INTEGRATION_MERGE_SKIPPED = "integration_merge_skipped"
+    # Initiative pilot_findings_closure_v5 S2 (NEW-13): emitted by
+    # ``runtime/security_review.security_review_subscriber`` each time the
+    # security-review runner yields ``verdict=error`` (a technical failure of
+    # the review step itself, not a story defect). Payload: {story_id,
+    # worktree, attempt, max_retries, retrying (bool), findings}. A technical
+    # error is NOT counted toward the supervisor circuit-breaker's
+    # consecutive-escalation cap — see ``supervisor/engine.py``. After retries
+    # are exhausted the subscriber escalates the single story via HUMAN_QUERY
+    # instead of aborting the whole pipeline.
+    SECURITY_REVIEW_ERROR = "security_review_error"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)

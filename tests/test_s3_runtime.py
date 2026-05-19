@@ -114,10 +114,13 @@ def test_event_loop_has_all_spec_types() -> None:
         # 2026-05-19 spec_pilot_findings_closure_v3 S3 #1 — NEW-7 merge-skip
         # observability (no_commits / verdict_missing / ff_conflict).
         "integration_merge_skipped",
+        # 2026-05-19 spec_pilot_findings_closure_v5 S2 NEW-13 — security_review
+        # technical-error audit signal (retry + escalate-story, no abort).
+        "security_review_error",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 36
+    assert len(ALL_EVENT_TYPES) == 37
 
 
 @pytest.mark.asyncio

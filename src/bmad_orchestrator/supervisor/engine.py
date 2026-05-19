@@ -55,6 +55,13 @@ class SupervisorEngine:
         self._history: deque[str] = deque(maxlen=10)
 
     async def decide(self, event_type: str, payload: dict[str, Any]) -> SupervisorDecision:
+        # NEW-13: a HUMAN_QUERY raised because security_review yielded
+        # verdict=error is a *technical* failure of the review step, not a
+        # genuine pipeline escalation. It must not push the circuit breaker
+        # toward abort_pipeline. Detect it once here and skip the
+        # consecutive-escalation increment for every _track call this wake.
+        count_escalation = not self._is_security_review_error(event_type, payload)
+
         # Rate limit fires BEFORE any decision logic — overload protection.
         if self._rate_limit_tripped():
             return self._make_decision(
@@ -68,7 +75,7 @@ class SupervisorEngine:
         rule_hit = self._match_hard_rule(event_type, payload)
         if rule_hit is not None:
             decision = self._decision_from_rule(rule_hit)
-            self._track(decision)
+            self._track(decision, count_escalation=count_escalation)
             return decision
 
         # Tier 1 — LLM judge
@@ -96,11 +103,11 @@ class SupervisorEngine:
                     tier=2,
                 )
             )
-            self._track(decision)
+            self._track(decision, count_escalation=count_escalation)
             return decision
 
         decision = self._decision_from_verdict(verdict)
-        self._track(decision)
+        self._track(decision, count_escalation=count_escalation)
 
         # Circuit breaker — too many escalations in a row → abort
         if self._consecutive_escalations >= self.policy.defaults.max_consecutive_escalations:
@@ -190,11 +197,30 @@ class SupervisorEngine:
             self._action_timestamps.popleft()
         return len(self._action_timestamps) >= self.policy.defaults.max_actions_per_minute
 
-    def _track(self, decision: SupervisorDecision) -> None:
+    @staticmethod
+    def _is_security_review_error(event_type: str, payload: dict[str, Any]) -> bool:
+        """True when this event is a HUMAN_QUERY raised by a security_review
+        technical error (NEW-13). Such events must not feed the circuit
+        breaker's consecutive-escalation counter — a failed review step is not
+        a story escalation."""
+        if event_type.upper() != "HUMAN_QUERY":
+            return False
+        return (
+            payload.get("security_verdict") == "error"
+            or payload.get("verdict") == "security_review_error"
+        )
+
+    def _track(
+        self, decision: SupervisorDecision, *, count_escalation: bool = True
+    ) -> None:
         self._action_timestamps.append(self._clock())
         self._history.append(decision.reason[:80])
         if decision.action == "escalate_human":
-            self._consecutive_escalations += 1
+            # NEW-13: when count_escalation is False (security_review error)
+            # leave the counter untouched — neither increment nor reset, so a
+            # technical failure neither advances nor masks the circuit breaker.
+            if count_escalation:
+                self._consecutive_escalations += 1
         else:
             self._consecutive_escalations = 0
 

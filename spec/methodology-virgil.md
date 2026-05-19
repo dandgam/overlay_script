@@ -384,14 +384,18 @@ recheck), merged в main `48febc0`.
   ругается. **DONE** (v5 S1): `PRE_COMMIT_ALLOW_NO_CONFIG=1` инжектится в env воркера
   (`WORKER_ENV_INJECTED` в `worker_spawn.py`) + pre-spawn detector логирует
   `precommit_config_absent`. Конфиг в чужой worktree НЕ создаётся (Critical Boundary).
-- ⬜ **NEW-13 (P2) · Тип: 🐛 Баг — security_review error → circuit breaker abort** — story
+- ✅ **NEW-13 (P2) · Тип: 🐛 Баг — security_review error → circuit breaker abort** — story
   1.4 ушла в security review, тот вернул `verdict=error` (не approve/reject), 3 escalations
-  подряд → `supervisor_abort_pipeline circuit breaker`. error-verdict не должен считаться
-  escalation'ом. 1.4 не смержена (есть на feature/1.4 `4b00212`).
+  подряд → `supervisor_abort_pipeline circuit breaker`. Закрыто в
+  `integration/pilot_findings_closure_v5` S2: `SupervisorEngine._is_security_review_error`
+  не инкрементит circuit breaker на `verdict=error` (technical failure ≠ escalation);
+  `security_review_subscriber` ретраит runner `error_retry_max` раз (default 1), эмитит
+  `SECURITY_REVIEW_ERROR` (EventType #37) per attempt, при исчерпании — одиночная
+  HUMAN_QUERY эскалация story (не abort pipeline). +7 tests.
 
-**Recommended next initiative:** `pilot_findings_closure_v5` — закрыть NEW-11/12/13 (все
-P2, fixable). После — replay, ожидаем 3/3 stories в integration. Pipeline уже замкнут
-(NEW-7 ✅), остались конкретные блокеры на пути 1.4/1.5.
+**Recommended next initiative:** pilot replay (Antares 1a) — NEW-11/12/13 закрыты в
+`integration/pilot_findings_closure_v5`; после merge v5 → replay, ожидаем 3/3 stories
+(1.3/1.4/1.5) в `integration/1a`. Pipeline замкнут (NEW-7 ✅), блокеры 1.4/1.5 устранены.
 **Spec:** `spec/spec_pilot_findings_closure_v5.md` (v1.0, READY for `/auto-loop-spec-short`
 bootstrap — 3 P2 items, ~2 сессии).
 
@@ -417,6 +421,6 @@ bootstrap — 3 P2 items, ~2 сессии).
 
 ---
 
-**Last updated:** 2026-05-19 (v13.10 — pilot run #4 findings: FIRST integration merge success (`integration/1a`, story 1.3), NEW-7 validated, new backlog NEW-11/12/13; v4 merged `48febc0`; v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Last updated:** 2026-05-19 (v13.11 — NEW-11/12/13 closed in integration/pilot_findings_closure_v5 (S1..S2): ruff graceful-skip + pre-commit no-config env flag + security_review error→retry/escalate-story (not abort); EventType #37 SECURITY_REVIEW_ERROR; tests 2061→2078, mypy/ruff clean; v13.10 — pilot run #4 findings: FIRST integration merge success (`integration/1a`, story 1.3), NEW-7 validated, new backlog NEW-11/12/13; v4 merged `48febc0`; v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
 **Status:** v13.10 — **Phase 4 (Deploy) in progress.** `pilot_findings_closure_v4` merged в main `48febc0` (S1..S2: NEW-9 verdict source-of-truth + NEW-10 observability + NEW-5 recheck, tests 2038→2061, mypy/ruff clean). **FIRST end-to-end production success** — pilot run #4 (Antares 1a, `BMAD_AUTO_SPLIT=1`) создал ветку `integration/1a`, story 1.3 смержена автономно через verdict→reconcile→merge (NEW-7 pipeline VALIDATED). `spawned=3 succeeded=2 failed=1`. Stories 1.4/1.5 не дошли до integration — new backlog **NEW-11/12/13** (P2, fixable: ruff halt · pre-commit config missing · security_review error→circuit breaker) → next initiative `pilot_findings_closure_v5`.
 **Owner:** user + Claude orchestrator
