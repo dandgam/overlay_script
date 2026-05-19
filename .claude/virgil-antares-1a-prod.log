@@ -1,24 +1,40 @@
+overriding ORCHESTRATOR_TARGET_PROJECT=/home/server/odyssey with --project=antares → resolved path /home/server/Antares
 Virgil starting project=antares wave=1a max_parallel=3 mock=False
 models: planner=claude-opus-4-7 reviewer=claude-opus-4-7 dev=claude-sonnet-4-6 routine=claude-sonnet-4-6 mechanical=claude-haiku-4-5 fallback=claude-haiku-4-5
-2026-05-19 13:31:45 [info     ] orchestrator_starting          dev=claude-sonnet-4-6 max_parallel=3 mock=False planner=claude-opus-4-7 project=antares target=/home/server/Antares wave=1a
-2026-05-19 13:31:45 [info     ] session_resolved               session_id=8 target_project=antares wave=1a
-2026-05-19 13:31:45 [info     ] elicitation_policy_loaded      path=examples/elicitation-policy.example.yaml rules=14
-2026-05-19 13:31:45 [info     ] supervisor_policy_loaded       hard_rules=3 path=config/supervisor-policy.yaml
-2026-05-19 13:31:45 [info     ] self_learning_config_loaded    enabled=True path=config/self-learning.yaml
-bmad_format.unknown_status
-bmad_format.unknown_status
-2026-05-19 13:31:45 [info     ] story_filter_active            count=3 dag_planner_bypassed=True ids=['1.3', '1.4', '1.5']
+2026-05-19 17:14:17 [info     ] orchestrator_starting          dev=claude-sonnet-4-6 max_parallel=3 mock=False planner=claude-opus-4-7 project=antares target=/home/server/Antares wave=1a
+2026-05-19 17:14:17 [info     ] session_resolved               session_id=8 target_project=antares wave=1a
+2026-05-19 17:14:17 [info     ] elicitation_policy_loaded      path=examples/elicitation-policy.example.yaml rules=14
+2026-05-19 17:14:17 [info     ] supervisor_policy_loaded       hard_rules=3 path=config/supervisor-policy.yaml
+2026-05-19 17:14:17 [info     ] self_learning_config_loaded    enabled=True path=config/self-learning.yaml
+2026-05-19 17:14:17 [info     ] story_filter_active            count=3 dag_planner_bypassed=True ids=['1.3', '1.4', '1.5']
 budget_auto_disabled reason=subscription_mode (no ANTHROPIC_API_KEY; skipping $-budget gates)
-2026-05-19 13:31:45 [info     ] git_worktree_reused            branch=feature/1.3 worktree=/home/server/Antares/.worktrees/wt-1.3
-2026-05-19 13:31:45 [warning  ] worktree_dirty_pre_spawn       count=2 entries=[' M _bmad/output/planning/stories/1.3.md', ' M _bmad/output/planning/stories/sprint-status.yaml'] note='pre-existing untracked/modified files may collide with story output' worktree=/home/server/Antares/.worktrees/wt-1.3
-2026-05-19 13:31:45 [info     ] git_worktree_reused            branch=feature/1.4 worktree=/home/server/Antares/.worktrees/wt-1.4
-2026-05-19 13:31:46 [info     ] git_worktree_reused            branch=feature/1.5 worktree=/home/server/Antares/.worktrees/wt-1.5
-2026-05-19 13:31:59 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.3
-2026-05-19 13:31:59 [warning  ] worker_silent_failure          base_sha=5756f2c62593882a65f35d062bc6026f9b9dcb64 note='exit_code=0 but zero new commits — treating as halt' story_id=1.3 worktree=/home/server/Antares/.worktrees/wt-1.3
-2026-05-19 13:39:33 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.5
-2026-05-19 13:45:08 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.4
-2026-05-19 13:45:09 [warning  ] pilot_mark_done_unresolved     reason='no matching sprint-status key in any epic block' spawned_id=1.4
-2026-05-19 13:45:09 [warning  ] pilot_mark_done_unresolved     reason='no matching sprint-status key in any epic block' spawned_id=1.5
-bmad_format.unknown_status
-bmad_format.unknown_status
-2026-05-19 13:45:09 [info     ] real_pilot_done                daily_spent_usd=45.0 failed=1 halted=False rounds=1 spawned=3 stories=3 succeeded=2
+2026-05-19 17:14:17 [info     ] git_worktree_created           branch=feature/1.3 new_branch=True worktree=/home/server/Antares/.worktrees/wt-1.3
+2026-05-19 17:14:18 [info     ] git_worktree_created           branch=feature/1.4 new_branch=True worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 17:14:18 [info     ] git_worktree_created           branch=feature/1.5 new_branch=True worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 17:37:23 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.4
+2026-05-19 17:42:47 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.3
+2026-05-19 17:44:18 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.5
+2026-05-19 17:44:19 [info     ] pilot_mark_done                resolved_key=1-3-smoke-health-endpoint spawned_id=1.3
+2026-05-19 17:44:19 [info     ] pilot_mark_done                resolved_key=1-4-smoke-vite-react-render spawned_id=1.4
+2026-05-19 17:44:19 [warning  ] stage5_recovery_failed         error='git commit: No .pre-commit-config.yaml file was found\n- To temporarily silence this, run `PRE_COMMIT_ALLOW_NO_CONFIG=1 git ...`\n- To permanently silence this, install pre-commit with the --allow-missing-config op' story_id=1.4 worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 17:44:19 [info     ] build_check_skip_missing_executable command=pytest token=pytest worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 17:44:19 [warning  ] build_check_halt               command=ruff exit_code=1 story_id=1.4 timed_out=False worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 17:44:19 [warning  ] stage5_recovery_failed         error='git commit: No .pre-commit-config.yaml file was found\n- To temporarily silence this, run `PRE_COMMIT_ALLOW_NO_CONFIG=1 git ...`\n- To permanently silence this, install pre-commit with the --allow-missing-config op' story_id=1.3 worktree=/home/server/Antares/.worktrees/wt-1.3
+2026-05-19 17:44:19 [info     ] build_check_skip_missing_executable command=pytest token=pytest worktree=/home/server/Antares/.worktrees/wt-1.3
+2026-05-19 17:44:19 [warning  ] build_check_halt               command=ruff exit_code=1 story_id=1.3 timed_out=False worktree=/home/server/Antares/.worktrees/wt-1.3
+2026-05-19 17:44:19 [info     ] self_learning_triggered        event_type=wave_boundary_reached
+2026-05-19 17:44:19 [info     ] consolidation_started          lessons_root=/home/server/bmad-orchestrator/.claude/memory trigger=wave_boundary_reached
+2026-05-19 17:44:19 [info     ] consolidation_complete         high=0 low=0 medium=0 patterns=0 total=0 trigger=wave_boundary_reached
+2026-05-19 17:44:19 [info     ] supervisor_escalated           confidence=0.5 source=HUMAN_QUERY tier=1
+2026-05-19 17:44:19 [info     ] supervisor_escalated           confidence=0.5 source=HUMAN_QUERY tier=1
+2026-05-19 17:44:19 [warning  ] integration_reconcile_synthetic_verdict commits=2 note='no merge-gate verdict surfaced — emitting synthetic approve' story_id=1.3
+2026-05-19 17:44:19 [warning  ] integration_reconcile_synthetic_verdict commits=2 note='no merge-gate verdict surfaced — emitting synthetic approve' story_id=1.4
+2026-05-19 17:44:19 [info     ] security_review_skipped_not_critical story_id=1.3 worktree=/home/server/Antares/.worktrees/wt-1.3
+2026-05-19 17:44:19 [info     ] patch_w_all_paths_out_of_scope out_of_scope=['_bmad/output/planning/stories/sprint-status.yaml', '_bmad/output/planning/stories/sprint-status.yaml.lock'] worktree=/home/server/Antares/.worktrees/wt-1.3
+2026-05-19 17:44:19 [info     ] patch_w_all_dirty_out_of_scope out_of_scope=['_bmad/output/planning/stories/sprint-status.yaml', '_bmad/output/planning/stories/sprint-status.yaml.lock'] story_id=1.3 worktree=/home/server/Antares/.worktrees/wt-1.3
+2026-05-19 17:44:19 [info     ] story_merged                   feature=feature/1.3 integration=integration/1a sha=68087124d640f4234b5c8feb898af826380ea5ab story_id=1.3
+2026-05-19 17:47:15 [info     ] security_review_dispatched     story_id=1.4 trigger=keyword verdict=error worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 17:47:15 [error    ] supervisor_abort_pipeline      reason='circuit breaker: 3 consecutive escalations exceeds cap 3' source=HUMAN_QUERY
+2026-05-19 17:47:15 [error    ] supervisor_abort_pipeline      reason='circuit breaker: 4 consecutive escalations exceeds cap 3' source=HUMAN_QUERY
+2026-05-19 17:47:15 [info     ] real_pilot_done                daily_spent_usd=45.0 failed=1 halted=False rounds=1 spawned=3 stories=3 succeeded=2
+2026-05-19 17:47:15 [info     ] orchestrator_shutdown_complete elapsed_sec=0.0

@@ -1,0 +1,34 @@
+Virgil starting project=antares wave=1a max_parallel=2 mock=False
+models: planner=claude-opus-4-7 reviewer=claude-opus-4-7 
+dev=claude-sonnet-4-6 routine=claude-sonnet-4-6 
+mechanical=claude-haiku-4-5 fallback=claude-haiku-4-5
+2026-05-19 19:58:59 [info     ] orchestrator_starting          dev=claude-sonnet-4-6 max_parallel=2 mock=False planner=claude-opus-4-7 project=antares target=/home/server/Antares wave=1a
+2026-05-19 19:58:59 [info     ] session_resolved               session_id=8 target_project=antares wave=1a
+2026-05-19 19:58:59 [info     ] elicitation_policy_loaded      path=examples/elicitation-policy.example.yaml rules=14
+2026-05-19 19:58:59 [info     ] supervisor_policy_loaded       hard_rules=3 path=config/supervisor-policy.yaml
+2026-05-19 19:58:59 [info     ] self_learning_config_loaded    enabled=True path=config/self-learning.yaml
+bmad_format.unknown_status
+bmad_format.unknown_status
+2026-05-19 19:58:59 [info     ] story_filter_active            count=2 dag_planner_bypassed=True ids=['1.4', '1.5']
+budget_auto_disabled reason=subscription_mode (no ANTHROPIC_API_KEY; skipping $-budget gates)
+2026-05-19 19:58:59 [info     ] git_worktree_created           branch=feature/1.4 new_branch=True worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 19:58:59 [info     ] git_worktree_created           branch=feature/1.5 new_branch=True worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 20:18:32 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.4
+2026-05-19 20:29:00 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.5
+2026-05-19 20:29:00 [info     ] pilot_mark_done                resolved_key=1-4-alembic-async-env spawned_id=1.4
+bmad_format.unknown_status
+bmad_format.unknown_status
+2026-05-19 20:29:00 [warning  ] stage5_recovery_failed         error='git commit: No .pre-commit-config.yaml file was found\n- To temporarily silence this, run `PRE_COMMIT_ALLOW_NO_CONFIG=1 git ...`\n- To permanently silence this, install pre-commit with the --allow-missing-config op' story_id=1.4 worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 20:29:00 [info     ] build_check_skip_missing_executable command=pytest token=pytest worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 20:29:00 [info     ] build_check_skip_no_ruff_config audit='ruff skipped — target worktree has no ruff config; default ruff rules would produce spurious lint halt' command=ruff worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 20:29:00 [info     ] build_check_clean              commands=['pytest', 'ruff'] story_id=1.4 worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 20:29:03 [info     ] merge_gate_spec_stage_done     story_id=1.4 verdict=error
+2026-05-19 20:29:03 [info     ] code_review_runner_log_fallback fallback_verdict=approve story_id=1.4 worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 20:29:05 [info     ] merge_gate_quality_stage_done  story_id=1.4 verdict=error
+2026-05-19 20:29:05 [info     ] code_review_dispatched         review_jsonl= story_id=1.4 verdict=error worktree=/home/server/Antares/.worktrees/wt-1.4
+2026-05-19 20:29:05 [info     ] self_learning_triggered        event_type=wave_boundary_reached
+2026-05-19 20:29:05 [info     ] consolidation_started          lessons_root=/home/server/bmad-orchestrator/.claude/memory trigger=wave_boundary_reached
+2026-05-19 20:29:05 [info     ] consolidation_complete         high=0 low=0 medium=0 patterns=0 total=0 trigger=wave_boundary_reached
+2026-05-19 20:29:05 [info     ] supervisor_escalated           confidence=0.5 source=HUMAN_QUERY tier=1
+2026-05-19 20:29:05 [info     ] real_pilot_done                daily_spent_usd=30.0 failed=1 halted=False rounds=1 spawned=2 stories=2 succeeded=1
+2026-05-19 20:29:05 [info     ] orchestrator_shutdown_complete elapsed_sec=0.0

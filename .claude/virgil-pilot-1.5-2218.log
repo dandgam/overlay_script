@@ -1,0 +1,34 @@
+Virgil starting project=antares wave=1a max_parallel=1 mock=False
+models: planner=claude-opus-4-7 reviewer=claude-opus-4-7 dev=claude-sonnet-4-6 routine=claude-sonnet-4-6 mechanical=claude-haiku-4-5 fallback=claude-haiku-4-5
+2026-05-19 22:18:47 [info     ] orchestrator_starting          dev=claude-sonnet-4-6 max_parallel=1 mock=False planner=claude-opus-4-7 project=antares target=/home/server/Antares wave=1a
+2026-05-19 22:18:47 [info     ] session_resolved               session_id=8 target_project=antares wave=1a
+2026-05-19 22:18:47 [info     ] elicitation_policy_loaded      path=examples/elicitation-policy.example.yaml rules=14
+2026-05-19 22:18:47 [info     ] supervisor_policy_loaded       hard_rules=3 path=config/supervisor-policy.yaml
+2026-05-19 22:18:47 [info     ] self_learning_config_loaded    enabled=True path=config/self-learning.yaml
+bmad_format_unknown_status
+bmad_format_unknown_status
+2026-05-19 22:18:47 [info     ] story_filter_active            count=1 dag_planner_bypassed=True ids=['1.5']
+budget_auto_disabled reason=subscription_mode (no ANTHROPIC_API_KEY; skipping $-budget gates)
+2026-05-19 22:18:47 [info     ] git_worktree_created           branch=feature/1.5 new_branch=True worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 22:48:47 [info     ] cost_tracking_unavailable      reason=subscription_mode story_id=1.5
+2026-05-19 22:48:47 [info     ] pilot_mark_done                resolved_key=1-5-pre-commit-hooks-ci spawned_id=1.5
+bmad_format_unknown_status
+bmad_format_unknown_status
+2026-05-19 22:48:50 [info     ] stage5_recovery_commit         commit_sha=6a2f611efa2804b25bc2919db2b322d94ce52ff6 staged=['_bmad/output/planning/architecture.md', '_bmad/output/planning/prd-validation-report.md', '_bmad/output/planning/research/technical-antares-backend-stack-auth-admin-research-2026-05-17.md', '_bmad/output/planning/stories/1.3.md', '_bmad/output/planning/stories/1.4.md', '_bmad/output/planning/stories/2-2-headscale-ha-litestream-hot-standby.md', '_bmad/output/planning/stories/2-3-tailscale-invite-flow-email.md', '_bmad/output/planning/stories/2-4-authentik-allowed-groups-rbac-headscale.md', '_bmad/output/planning/stories/2-5-oidc-nextcloud-onlyoffice-sso.md', '_bmad/output/planning/stories/2-6-emergency-bypass-break-glass-bus-factor.md', '_bmad/output/planning/stories/3-5-onboard-tenant-sh-atomic-onboarding.md', '_bmad/output/planning/stories/3-6-disable-tenant-sh-30-day-grace.md', '_bmad/output/planning/stories/3-7-purge-tenant-sh-152fz-hard-delete.md', '_bmad/output/planning/stories/4-6-backup-health-alerts-healthchecks-telegram.md', '_bmad/output/planning/stories/4-7-s3-object-lock-immutability-ransomware.md', '_bmad/output/planning/stories/6-4-restore-api-endpoint.md', '_bmad/output/planning/stories/6-5-restore-dramatiq-worker.md', '_bmad/output/planning/stories/6-6-sse-progress-stream.md', '_bmad/output/planning/stories/6-8-pomogite-multi-channel-button.md', '_bmad/output/planning/stories/8-9-status-dot-header.md', '_bmad/output/planning/stories/sprint-status.yaml', '_bmad/output/planning/ux-design-specification.md', 'backend/migrations/env.py', 'backend/src/antares/core/lifespan.py', 'backend/tests/integration/test_alembic.py', 'backend/tests/unit/core/test_logging.py', 'backend/tests/unit/core/test_middleware.py', 'backend/tests/unit/test_main.py', '_bmad/output/planning/stories/sprint-status.yaml.lock'] story_id=1.5 worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 22:48:50 [info     ] build_check_skip_missing_executable command=pytest token=pytest worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 22:48:50 [info     ] build_check_skip_no_ruff_config audit='ruff skipped — target worktree has no ruff config; default ruff rules would produce spurious lint halt' command=ruff worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 22:48:50 [info     ] build_check_clean              commands=['pytest', 'ruff'] story_id=1.5 worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 22:48:53 [info     ] merge_gate_spec_stage_done     story_id=1.5 verdict=error
+2026-05-19 22:48:53 [info     ] code_review_runner_log_fallback fallback_verdict=approve story_id=1.5 worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 22:51:53 [info     ] merge_gate_quality_stage_done  story_id=1.5 verdict=error
+2026-05-19 22:51:53 [info     ] code_review_quality_error_fallback_applied fallback_verdict=approve story_id=1.5
+2026-05-19 22:51:53 [info     ] scope_check_skipped_no_file_list reason='story declares no explicit ### File List' story_id=1.5
+2026-05-19 22:51:53 [info     ] code_review_dispatched         review_jsonl= story_id=1.5 verdict=approve worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 22:51:53 [info     ] self_learning_triggered        event_type=wave_boundary_reached
+2026-05-19 22:51:53 [info     ] consolidation_started          lessons_root=/home/server/bmad-orchestrator/.claude/memory trigger=wave_boundary_reached
+2026-05-19 22:51:53 [info     ] consolidation_complete         high=0 low=0 medium=0 patterns=0 total=0 trigger=wave_boundary_reached
+2026-05-19 22:54:53 [info     ] security_review_dispatched     story_id=1.5 trigger=keyword verdict=error worktree=/home/server/Antares/.worktrees/wt-1.5
+2026-05-19 22:54:53 [info     ] supervisor_escalated           confidence=0.5 source=HUMAN_QUERY tier=1
+2026-05-19 22:54:53 [info     ] supervisor_escalated           confidence=0.5 source=HUMAN_QUERY tier=1
+2026-05-19 22:54:54 [info     ] real_pilot_done                daily_spent_usd=15.0 failed=1 halted=False no_op=0 rounds=1 spawned=1 stories=1 succeeded=0 worker_succeeded=1
+2026-05-19 22:54:54 [info     ] orchestrator_shutdown_complete elapsed_sec=0.0
