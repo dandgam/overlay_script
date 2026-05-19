@@ -263,6 +263,27 @@ def test_liveness_stall_detection(tmp_path: Path) -> None:
     assert age is not None and age > 600
 
 
+def test_liveness_stall_empty_jsonl_with_start_time(tmp_path: Path) -> None:
+    """NEW-33.1 — пустой/отсутствующий JSONL после start_time > threshold → stalled."""
+    from datetime import UTC, datetime, timedelta
+
+    p = tmp_path / "events.jsonl"
+    # Без start_time — legacy: not stalled даже если файла нет.
+    assert is_stalled(p, threshold_seconds=10) is False
+    # start_time свежий → ещё не stalled.
+    fresh_start = datetime.now(UTC)
+    assert is_stalled(p, threshold_seconds=10, start_time=fresh_start) is False
+    # start_time час назад, JSONL отсутствует → stalled.
+    old_start = datetime.now(UTC) - timedelta(hours=1)
+    assert is_stalled(p, threshold_seconds=10, start_time=old_start) is True
+    # Файл создан, но пустой → тоже stalled (нет timestamp'ов).
+    p.write_text("", encoding="utf-8")
+    assert is_stalled(p, threshold_seconds=10, start_time=old_start) is True
+    # naive datetime — должен обрабатываться без падения.
+    naive_old = (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None)
+    assert is_stalled(p, threshold_seconds=10, start_time=naive_old) is True
+
+
 def test_liveness_heartbeat_summary_keys(tmp_path: Path) -> None:
     p = tmp_path / "events.jsonl"
     p.write_text('{"event_type":"x","ts":"2026-01-01T00:00:00+00:00"}\n', encoding="utf-8")

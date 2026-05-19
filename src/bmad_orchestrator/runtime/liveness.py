@@ -73,25 +73,46 @@ def last_event_age_seconds(jsonl_path: Path) -> float | None:
 
 
 def is_stalled(
-    jsonl_path: Path, threshold_seconds: int = DEFAULT_STALL_THRESHOLD_SECONDS
+    jsonl_path: Path,
+    threshold_seconds: int = DEFAULT_STALL_THRESHOLD_SECONDS,
+    start_time: datetime | None = None,
 ) -> bool:
-    """True если последний event старше threshold (или вообще нет event'ов >0s)."""
+    """True если worker считается зависшим.
+
+    Две ветки:
+    1. Есть события — последний старше threshold → stalled.
+    2. Событий нет (age=None) — если передан ``start_time`` и прошло
+       > threshold с момента старта → stalled. Без ``start_time`` поведение
+       legacy (return False) — pre-NEW-33 callers сохраняют семантику.
+
+    Branch 2 closes NEW-33: pilot 2b «events.jsonl застыл на 4 строках в
+    runs/default/» не ловился, потому что для пустого JSONL возвращалось False.
+    """
     age = last_event_age_seconds(jsonl_path)
-    if age is None:
+    if age is not None:
+        return age >= float(threshold_seconds)
+    if start_time is None:
         return False
-    return age >= float(threshold_seconds)
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=UTC)
+    elapsed = (datetime.now(UTC) - start_time).total_seconds()
+    return elapsed >= float(threshold_seconds)
 
 
 def heartbeat_summary(
-    pid: int, jsonl_path: Path, threshold_seconds: int = DEFAULT_STALL_THRESHOLD_SECONDS
+    pid: int,
+    jsonl_path: Path,
+    threshold_seconds: int = DEFAULT_STALL_THRESHOLD_SECONDS,
+    start_time: datetime | None = None,
 ) -> dict[str, Any]:
     """Объединённая сводка для get_worker_status tool / TUI dashboard."""
     age = last_event_age_seconds(jsonl_path)
+    stalled = is_stalled(jsonl_path, threshold_seconds, start_time=start_time)
     return {
         "pid": pid,
         "alive": is_alive(pid),
         "last_event_age_seconds": age,
-        "stalled": (age is not None and age >= float(threshold_seconds)),
+        "stalled": stalled,
         "threshold_seconds": threshold_seconds,
         "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
