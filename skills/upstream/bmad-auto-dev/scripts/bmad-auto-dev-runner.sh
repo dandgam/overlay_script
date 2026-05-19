@@ -71,6 +71,52 @@ log()  { printf '[runner %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { printf '[runner %s] WARN: %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 fail() { printf '[runner %s] FAIL: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 2; }
 
+# Stage 7 graceful feature-branch cleanup (#2 NEW-2 Layer A, 2026-05-19).
+# `git branch -d` refuses with "error: cannot delete branch '<b>' used by
+# worktree at '<path>'" when a reused/stale worktree still holds the branch
+# checked out. Under `set -e` that aborted the whole runner (exit 1) AFTER the
+# Stage 6 merge — losing the orchestrator's chance to record the verdict and
+# the work that already passed Stage 4-6 + autofix (real Antares Epic 1: 3/3
+# stories halted identically). Now the delete is skipped gracefully:
+#   - structured `stage7_skipped reason=... branch=... worktree=...` log line;
+#   - when the held branch carries commits past its fork point, a synthetic
+#     `verdict=approve` claude_event is printed to stdout so the orchestrator's
+#     merge subscriber still recovers the work;
+#   - `BMAD_RUNNER_SKIP_STAGE7=1` forces the skip unconditionally.
+# Always returns 0 — cleanup failure must never crash the runner.
+stage7_cleanup_feature_branch() {
+  local branch="$1" integ="$2"
+  if [[ "${BMAD_RUNNER_SKIP_STAGE7:-0}" == "1" ]]; then
+    log "stage7_skipped reason=env_override branch=$branch"
+    return 0
+  fi
+  local wt_path=""
+  wt_path="$(git worktree list --porcelain 2>/dev/null \
+    | awk -v b="branch refs/heads/$branch" '
+        /^worktree /{p=substr($0,10)}
+        $0==b{print p; exit}')"
+  if [[ -n "$wt_path" ]]; then
+    log "stage7_skipped reason=used_by_worktree branch=$branch worktree=$wt_path"
+    local base commits
+    base="$(git merge-base "$integ" "$branch" 2>/dev/null || true)"
+    if [[ -n "$base" ]]; then
+      commits="$(git rev-list --count "${base}..${branch}" 2>/dev/null || echo 0)"
+      if [[ "${commits:-0}" -gt 0 ]]; then
+        printf '{"event_type":"claude_event","verdict":"approve","source":"runner_stage7_skip","commits":%s,"branch":"%s"}\n' \
+          "$commits" "$branch"
+        log "stage7 synthetic verdict=approve commits=$commits branch=$branch"
+      fi
+    fi
+    return 0
+  fi
+  if git branch -d "$branch" 2>&1; then
+    log "stage7 feature branch deleted branch=$branch"
+  else
+    warn "stage7 git branch -d failed branch=$branch — leaving branch in place"
+  fi
+  return 0
+}
+
 STATE_DIR="_bmad/auto-dev-state"
 HALT_FILE="$STATE_DIR/halt-reason.txt"
 BATCH_FILE="$STATE_DIR/current-batch.json"
@@ -761,7 +807,7 @@ Working dir: $PROJECT_DIR." 2>&1 | tee "$autofix_log"; then
       fail "Stage 6.pass — checkout $INTEG_BRANCH failed; halt state -> $HALT_FILE"
     fi
     git merge --no-ff -m "merge story $story_id" "$feature_branch"
-    git branch -d "$feature_branch"
+    stage7_cleanup_feature_branch "$feature_branch" "$INTEG_BRANCH"
     sprint_status_mark_done "$story_id"
     state_write "$story_id" "$INTEG_BRANCH"
   else

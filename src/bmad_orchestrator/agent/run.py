@@ -144,6 +144,10 @@ from bmad_orchestrator.runtime.supervisor_subscriber import (
     make_supervisor_subscriber,
 )
 from bmad_orchestrator.runtime.verdict_fallback import parse_runner_review_log
+from bmad_orchestrator.runtime.worker_silent_failure import (
+    decide_cleanup_recovery,
+    detect_reused_worktree_cleanup_failure,
+)
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
     tail_jsonl_events,
@@ -1699,6 +1703,13 @@ async def _count_new_commits(worktree: str, base_sha: str) -> int:
         return 0
 
 
+# #2 NEW-2 Layer B — how many trailing stdout lines to retain for the runner
+# Stage 7 cleanup-failure scan. The refusal is logged once near the end of the
+# run; ~50 lines is the spec target, 300 gives generous headroom for noisy
+# trailing output without unbounded memory growth on long workers.
+_STDOUT_TAIL_CAP = 300
+
+
 async def _tail_and_emit_completion(
     handle: WorkerHandle,
     bus: EventLoop,
@@ -1741,6 +1752,11 @@ async def _tail_and_emit_completion(
     if budget is not None and model:
         tracker = WorkerCostTracker(model=model)
 
+    # #2 NEW-2 Layer B — keep a bounded tail of plain stdout lines so that, on
+    # the terminal event, we can detect the runner's reused-worktree Stage 7
+    # cleanup failure (``cannot delete branch ... used by worktree``).
+    stdout_tail: list[str] = []
+
     async for ev in tail_jsonl_events(handle.jsonl_path):
         if tracker is not None and budget is not None:
             delta = tracker.feed(ev)
@@ -1749,6 +1765,12 @@ async def _tail_and_emit_completion(
                     scope=f"worker:{handle.story_id}", spent=delta
                 )
         event_type = ev.get("event_type")
+        if event_type == "stdout_line":
+            text = ev.get("text")
+            if isinstance(text, str):
+                stdout_tail.append(text)
+                if len(stdout_tail) > _STDOUT_TAIL_CAP:
+                    del stdout_tail[: len(stdout_tail) - _STDOUT_TAIL_CAP]
         if event_type == "worker_completed":
             if tracker is not None and budget is not None:
                 if subscription_mode and _tracker_has_no_usage(tracker):
@@ -1758,6 +1780,63 @@ async def _tail_and_emit_completion(
                 else:
                     _emit_worker_cost_final(tracker, handle.story_id)
                     budget.record_story_cost(tracker.total_cost)
+            # #2 NEW-2 Layer B — detect the runner's reused-worktree Stage 7
+            # cleanup failure. When the feature branch still carries commits
+            # past base_sha, recover the work via a synthetic approve verdict;
+            # otherwise fall through to the silent-failure / halt path below.
+            cleanup_branch = detect_reused_worktree_cleanup_failure(stdout_tail)
+            if cleanup_branch is not None:
+                cleanup_commits = (
+                    await _count_new_commits(handle.worktree, handle.base_sha)
+                    if handle.base_sha
+                    else 0
+                )
+                decision = decide_cleanup_recovery(cleanup_commits)
+                log.warning(
+                    "runner_cleanup_failed_reused_worktree",
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    branch=cleanup_branch,
+                    commits=decision.commits,
+                    recover=decision.recover,
+                )
+                await bus.emit(
+                    EventType.RUNNER_CLEANUP_FAILED_REUSED_WORKTREE,
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    branch=cleanup_branch,
+                    commits=decision.commits,
+                    jsonl=str(handle.jsonl_path),
+                )
+                if decision.recover:
+                    review_iter = int(ev.get("review_iteration", 1) or 1)
+                    await bus.emit(
+                        EventType.CODE_REVIEW_VERDICT,
+                        story_id=handle.story_id,
+                        verdict="approve",
+                        source="runner_cleanup_recovery",
+                        commits=decision.commits,
+                        summary=(
+                            f"runner Stage 7 cleanup skipped (branch "
+                            f"{cleanup_branch} held by a reused worktree); "
+                            f"{decision.commits} commit(s) recovered past "
+                            "base_sha"
+                        ),
+                        worktree=handle.worktree,
+                        review_iteration=review_iter,
+                    )
+                    await bus.emit(
+                        EventType.WORKER_COMPLETED,
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        jsonl=str(handle.jsonl_path),
+                        exit_code=ev.get("exit_code", 0),
+                        status="success",
+                        mock=False,
+                        review_iteration=review_iter,
+                    )
+                    return "completed"
+                # no commits past base — preserve the existing halt behaviour.
             exit_code = ev.get("exit_code", 0)
             if exit_code == 0 and handle.base_sha:
                 commits = await _count_new_commits(
