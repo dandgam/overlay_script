@@ -2914,7 +2914,6 @@ async def human_query_subscriber(event: Event, bus: EventLoop) -> None:
 
 # ── CODE_REVIEW gate + auto-merge subscribers (W4) ───────────────────────────
 
-CODE_REVIEW_SKILL_INVOCATION: str = "/bmad-code-review"
 CODE_REVIEW_VERDICTS: frozenset[str] = frozenset({"approve", "request_changes", "reject"})
 _VERDICT_LINE_RE = re.compile(
     r"verdict\s*[:=]\s*(approve|request_changes|reject)\b",
@@ -3426,47 +3425,60 @@ def _extract_verdict_from_event(ev: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
-def _ensure_review_skill_in_worktree(worktree: str) -> None:
-    """NEW-25/NEW-26 — make ``/bmad-code-review`` resolvable AND headless.
-
-    The target project's ``.claude/skills/`` is gitignored, so ``git worktree
-    add`` leaves the worktree's ``.claude/skills/`` empty; the ``isolated_home``
-    overlay only carries ``~/.claude/skills/`` which lacks ``bmad-code-review``.
-    Without the skill the inner ``claude -p`` aborts with ``Unknown command:
-    /bmad-code-review`` → ``verdict=error`` every run.
-
-    NEW-26 — the *upstream* ``bmad-code-review`` skill is written for an
-    interactive operator: its step files HALT at numbered-choice checkpoints
-    and it never emits a machine-readable verdict. Under headless ``claude -p``
-    nothing answers the prompts → exit 0 with no ``verdict:`` line →
-    ``verdict=error`` every run. So we inject the **headless** variant
-    (``skills/headless/bmad-code-review``) instead: a single self-contained
-    SKILL.md with no HALTs that ends with ``VERDICT: approve|request_changes|
-    reject`` — the exact line :data:`_VERDICT_LINE_RE` parses.
-
-    The headless skill is copied into the worktree under the canonical name
-    ``bmad-code-review`` so ``/bmad-code-review`` resolves to it (claude
-    resolves slash commands from the CWD upward). Project-agnostic — does not
-    rely on the target machine's ``~/.claude/skills/``. Idempotent: skips if
-    the skill is already present.
-    """
-    # run.py → agent → bmad_orchestrator → src → project root
-    package_root = Path(__file__).parent.parent.parent.parent
-    src_skill = package_root / "skills" / "headless" / "bmad-code-review"
-    if not src_skill.is_dir():
-        log.warning("review_skill_source_missing", path=str(src_skill))
-        return
-    dest = Path(worktree) / ".claude" / "skills" / "bmad-code-review"
-    if dest.exists():
-        return
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src_skill, dest)
-        log.info(
-            "review_skill_injected", worktree=worktree, skill="bmad-code-review"
-        )
-    except OSError as exc:
-        log.warning("review_skill_inject_failed", worktree=worktree, error=str(exc))
+# NEW-26 — headless review directive (replaces the ``/bmad-code-review`` slash).
+#
+# The serial failure NEW-24 → NEW-25 → NEW-26 all stemmed from spawning a
+# *skill* into a sandboxed, headless ``claude -p`` reviewer:
+#   * NEW-24 — the spawn had no network → the reviewer's LLM calls failed.
+#   * NEW-25 — the ``/bmad-code-review`` slash resolved nowhere in the worktree.
+#   * NEW-26 — once it *did* resolve (to the target project's own
+#     ``.claude/skills/bmad-code-review``), that skill is written for an
+#     interactive operator: step files HALT at numbered-choice checkpoints and
+#     it never prints a machine-readable verdict. Headless, nothing answers the
+#     prompts → exit 0 with no ``verdict:`` line → ``verdict=error`` every run.
+#
+# Root fix: do not spawn a slash command at all. Pass a self-contained directive
+# prompt directly to ``claude -p`` (the same pattern the dev worker uses — see
+# ``DEFAULT_SKILL_INVOCATION``). No skill resolution, no worktree injection, no
+# collision with the target project's interactive skill, no HALTs. The directive
+# mandates the exact ``VERDICT:`` line that :data:`_VERDICT_LINE_RE` parses.
+CODE_REVIEW_DIRECTIVE: str = (
+    "You are an elite code reviewer running HEADLESS inside an autonomous "
+    "orchestrator. There is no human present to answer questions. Complete the "
+    "entire review yourself and end with one machine-readable verdict line.\n"
+    "\n"
+    "RULES (no exceptions):\n"
+    "- NEVER halt, pause, or wait for input. There are no checkpoints.\n"
+    "- NEVER ask a question or present numbered option menus.\n"
+    "- When a decision is ambiguous, pick the safe default and continue.\n"
+    "- Do NOT apply patches or modify any files. Review only.\n"
+    "\n"
+    "STEP 1 — Build the diff. Run, stopping at the first non-empty result: "
+    "`git diff main...HEAD`; if main is absent try `origin/main...HEAD` then "
+    "`master...HEAD`; if still empty `git diff HEAD` and `git show HEAD`. Also "
+    "always include uncommitted work via `git diff HEAD`. If the combined diff "
+    "is genuinely empty, emit `VERDICT: approve` and stop.\n"
+    "\n"
+    "STEP 2 — Adversarial review of the diff from three angles: "
+    "(a) correctness — logic bugs, wrong conditions, missing error handling, "
+    "resource leaks, unparameterized SQL, hardcoded secrets, injection; "
+    "(b) edge cases — null/empty inputs, concurrency, boundary values, "
+    "partial-failure paths; (c) acceptance — if a story/spec file for env "
+    "$ORCHESTRATOR_WORKER_STORY_ID exists under `_bmad-output/` or `_bmad/`, "
+    "check its acceptance criteria are met.\n"
+    "\n"
+    "STEP 3 — Triage each finding into exactly one bucket: blocker (a real "
+    "defect this change introduced that must be fixed before merge) / "
+    "non-blocker (pre-existing or minor) / dismiss (false positive).\n"
+    "\n"
+    "STEP 4 — Print a short summary (counts per bucket, one line per blocker), "
+    "then print EXACTLY ONE final line, nothing after it:\n"
+    "- `VERDICT: approve` — zero blockers.\n"
+    "- `VERDICT: request_changes` — one or more blockers, all fixable in place.\n"
+    "- `VERDICT: reject` — the change is fundamentally broken.\n"
+    "The orchestrator parses that final line — emit it verbatim, uppercase "
+    "`VERDICT:`, on its own line, as the very last line of your output."
+)
 
 
 async def _spawn_code_review_worker(
@@ -3485,13 +3497,14 @@ async def _spawn_code_review_worker(
     """
     original_wave = os.environ.get("BMAD_CURRENT_WAVE")
     os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__review_{story_id}"
-    _ensure_review_skill_in_worktree(worktree)  # NEW-25
     try:
         handle = await runtime_spawn_worker(
             worktree=worktree,
             story_id=story_id,
             branch=f"feature/{story_id}",
-            skill_invocation=CODE_REVIEW_SKILL_INVOCATION,
+            # NEW-26: directive prompt, not a slash command (see
+            # CODE_REVIEW_DIRECTIVE) — headless, self-contained, no skill.
+            skill_invocation=CODE_REVIEW_DIRECTIVE,
             # NEW-24: the review worker runs an inner ``claude -p`` reviewer
             # which makes LLM API calls. ``network="none"`` (--unshare-net)
             # made every call abort with "Unable to connect to API
@@ -3566,9 +3579,10 @@ async def _real_security_review_runner(
 
 
 # ── Phase 4 hardening #5 — Two-stage merge-gate split ───────────────────────
-
-MERGE_GATE_SPEC_SKILL: str = "/bmad-code-review"
-MERGE_GATE_QUALITY_SKILL: str = "/bmad-code-review"
+#
+# NEW-26 — both stages run the same headless ``CODE_REVIEW_DIRECTIVE`` directive
+# prompt (not the ``/bmad-code-review`` slash). The spec/quality split lives in
+# the JSONL namespace + retry wiring, not in a separate skill.
 
 
 def _merge_verdicts(spec_verdict: str, quality_verdict: str) -> str:
@@ -3599,13 +3613,13 @@ async def _spawn_merge_gate_spec_worker(
     """Spawn spec-stage review worker (AC coverage + story completeness)."""
     original_wave = os.environ.get("BMAD_CURRENT_WAVE")
     os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__gate_spec_{story_id}"
-    _ensure_review_skill_in_worktree(worktree)  # NEW-25
     try:
         handle = await runtime_spawn_worker(
             worktree=worktree,
             story_id=story_id,
             branch=f"feature/{story_id}",
-            skill_invocation=MERGE_GATE_SPEC_SKILL,
+            # NEW-26: headless directive prompt — see CODE_REVIEW_DIRECTIVE.
+            skill_invocation=CODE_REVIEW_DIRECTIVE,
             # NEW-24: reviewer makes LLM API calls — needs egress (see
             # _spawn_code_review_worker).
             sandbox_network="full",
@@ -3629,13 +3643,13 @@ async def _spawn_merge_gate_quality_worker(
     """Spawn quality-stage review worker (lints, tests, security, perf)."""
     original_wave = os.environ.get("BMAD_CURRENT_WAVE")
     os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__gate_quality_{story_id}"
-    _ensure_review_skill_in_worktree(worktree)  # NEW-25
     try:
         handle = await runtime_spawn_worker(
             worktree=worktree,
             story_id=story_id,
             branch=f"feature/{story_id}",
-            skill_invocation=MERGE_GATE_QUALITY_SKILL,
+            # NEW-26: headless directive prompt — see CODE_REVIEW_DIRECTIVE.
+            skill_invocation=CODE_REVIEW_DIRECTIVE,
             # NEW-24: reviewer makes LLM API calls — needs egress (see
             # _spawn_code_review_worker).
             sandbox_network="full",

@@ -32,7 +32,7 @@ from typing import Any
 import pytest
 
 from bmad_orchestrator.agent.run import (
-    CODE_REVIEW_SKILL_INVOCATION,
+    CODE_REVIEW_DIRECTIVE,
     CODE_REVIEW_VERDICTS,
     _extract_verdict_from_event,
     _ff_merge_to_integration,
@@ -757,11 +757,22 @@ async def test_w4_merge_subscriber_cleanup_failure_does_not_block_merge(
     assert [e.type for e in emitted] == [EventType.INTEGRATION_MERGE_COMPLETED]
 
 
-# ── 10. Skill invocation literal ─────────────────────────────────────────────
+# ── 10. Review directive prompt (NEW-26) ─────────────────────────────────────
 
 
-def test_w4_code_review_skill_invocation_literal() -> None:
-    assert CODE_REVIEW_SKILL_INVOCATION == "/bmad-code-review"
+def test_w4_code_review_directive_is_headless() -> None:
+    """NEW-26 — the review spawn uses a headless directive, not a slash command.
+
+    The directive must forbid halting and mandate the machine-readable
+    ``VERDICT:`` line the gate parses.
+    """
+    assert not CODE_REVIEW_DIRECTIVE.startswith("/"), (
+        "review spawn must pass a directive prompt, not a slash command"
+    )
+    assert "NEVER halt" in CODE_REVIEW_DIRECTIVE
+    assert "VERDICT:" in CODE_REVIEW_DIRECTIVE
+    for verdict in ("approve", "request_changes", "reject"):
+        assert _verdict_from_text(f"VERDICT: {verdict}") == verdict
 
 
 # ── 11. Grep validation (W4 DoD) ────────────────────────────────────────────
