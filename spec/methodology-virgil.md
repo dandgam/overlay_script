@@ -222,9 +222,9 @@
 
 - ✅ **R1 (P1): AbortController per worker** (2026-05-19, integration commit `6929ee7`, S4 of pilot_findings_closure) — `CancellationToken` + module-level `_REGISTRY` keyed by `story_id::branch::pid`, `cancel_worker(SIGTERM→2s→SIGKILL)`, supervisor action wired, `WORKER_CANCELLED` event. Tests +8.
 - ✅ **R2 (P1): MCP server readiness polling** (2026-05-19, integration commit `2a3a0d6`, S5 of pilot_findings_closure) — `runtime/mcp_readiness.poll_mcp_ready` (30s timeout / 500ms interval, injectable clock+sleep), `spawn_worker` pre-Popen gate, `MCPNotReadyError`, `Settings.required_mcp_tools`, `MCP_NOT_READY` event. Tests +8.
-- ⬜ **R3 (P2): Per-turn token snapshot** — сохранять token count по каждому шагу worker'а (не только aggregated total). Mid-wave cost tracking + pause-resume без потери granularity. Ref: `tasks/LocalAgentTask:41-104`. Reserved event `COST_SNAPSHOT_RECORDED` planned (see real-6 eval fixture).
-- ⬜ **R4 (P2): Stale worktree GC** — periodic cleanup orphan worktrees из crashed workers (regex slug pattern + 30-day mtime cutoff). Ref: `utils/worktree.ts:1058`
-- ⬜ **R5 (P3): Fail-closed cleanup policy** — не удалять worktree если `git status` вернул ошибку или есть unpushed commits (guard для R4). Ref: `utils/worktree.ts:1113`
+- ⬜ **R3 (P2)** · `Тип: ✨ Улучшение` — **Per-turn token snapshot** — сохранять token count по каждому шагу worker'а (не только aggregated total). Mid-wave cost tracking + pause-resume без потери granularity. Ref: `tasks/LocalAgentTask:41-104`. Reserved event `COST_SNAPSHOT_RECORDED` planned (see real-6 eval fixture).
+- ⬜ **R4 (P2)** · `Тип: ✨ Улучшение` — **Stale worktree GC** — periodic cleanup orphan worktrees из crashed workers (regex slug pattern + 30-day mtime cutoff). Ref: `utils/worktree.ts:1058`
+- ⬜ **R5 (P3)** · `Тип: ✨ Улучшение` — **Fail-closed cleanup policy** — не удалять worktree если `git status` вернул ошибку или есть unpushed commits (guard для R4). Ref: `utils/worktree.ts:1113`
 - 💡 Дополнительно: bundled skills которых нет у нас — `skillify` (command→skill конвертер), `stuck` (escape failure loop), `remember` (auto-memory → CLAUDE.md promotion)
 
 ### Backlog — pilot findings (closed 2026-05-19 via integration/pilot_findings_closure)
@@ -240,7 +240,7 @@ merge в `main` — manual (Auto merge=false).
 - ✅ **P2 #6: subscription-mode budget auto-detect** (S6, commit `185a948`) — `runtime/budget_autodetect.evaluate_budget_disabled` idempotent per-run, emits `BUDGET_AUTO_DISABLED` on subscription auto-path (manual `BMAD_DISABLE_BUDGET=1` suppressed from emission). Tests +5.
 - ✅ **P2 #7: pre-flight halt-state check** (S6, same commit `185a948`) — `spawn_worker(auto_clear_halt=False)` + `WorkerHaltPrespawnError` + pre-Popen halt-reason.txt gate + `WORKER_HALT_PRESPAWN` event. Tests +5.
 - ✅ **P2 #8: subprocess timeout adaptive / configurable per story** (S3, same commit `949d8e7`) — runner default 1800→3600, `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` env override, `pick_timeout_sec(ac_count)` bucket logic (0→DEFAULT, 1-3→SMALL, 4-8→MEDIUM, 9+→LARGE). Tests +8.
-- ⬜ **P3: backlog-writer subscriber (auto-capture dev findings)** — сейчас Virgil
+- ⬜ **P3** · `Тип: ✨ Улучшение` — **backlog-writer subscriber (auto-capture dev findings)** — сейчас Virgil
   авто-пишет только в `skills/policy/*.yaml` (operational tuning) + `retrospective.md`
   (per-wave). Архитектурные находки (subprocess_timeout patterns, отсутствие
   verdict event, recurring worker_silent_failure) попадают в dev backlog
@@ -338,7 +338,7 @@ integration ветка не создана. Детали — memory [[project_pi
 - ❌ **NEW-7 НЕ validated** — `_reconcile_success_verdicts` реконсилит только success
   verdict'ы; все 3 story помечены `failed` → нечего мержить → ни integration ветки, ни
   `INTEGRATION_MERGE_SKIPPED`. Merge-path так и не протестирован.
-- ⬜ **NEW-9 (P1, КОРЕНЬ): runner exit non-zero на успешной story перекрывает verdict** —
+- ⬜ **NEW-9 (P1, КОРЕНЬ)** · `Тип: 🐛 Баг` — **runner exit non-zero на успешной story перекрывает verdict** —
   story 1.5 прошла ПОЛНЫЙ цикл (dev `63dc8d4` + autofix `79bc93c` F1-F4, 2 коммита), но
   помечена `failed`. Цепочка: runner exit non-zero на финальной стадии → NEW-4
   `parse_inner_exit_code` ставит `status=failure` → counter failed → reconcile нечего
@@ -346,7 +346,7 @@ integration ветка не создана. Детали — memory [[project_pi
   коммитами = failed. Fix: orchestrator берёт `verdict=approve` из stage6 review log как
   source-of-truth (verdict approve + commits → success, независимо от runner exit code).
   Разблокирует NEW-7. ~1 сессия.
-- ⬜ **NEW-10 (P2): worker events не доходят до главного `events.jsonl` + orchestrator-лога** —
+- ⬜ **NEW-10 (P2)** · `Тип: 🐛 Баг` — **worker events не доходят до главного `events.jsonl` + orchestrator-лога** —
   `runs/default/wt-1.X.events.jsonl` с mtime прошлого run'а; orchestrator-лог пуст 30 мин
   между worktree_created и real_pilot_done. Диагностика run'а почти невозможна.
 
