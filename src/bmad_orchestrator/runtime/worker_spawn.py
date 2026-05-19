@@ -121,15 +121,48 @@ ALLOWED_WORKER_ENV: frozenset[str] = frozenset({
 })
 
 
+# NEW-12 (pilot_findings_closure_v5 S1): env vars the orchestrator INJECTS
+# into every worker subprocess (constants, not passthrough from os.environ).
+# ``PRE_COMMIT_ALLOW_NO_CONFIG=1`` makes pre-commit exit 0 when the worktree
+# has no ``.pre-commit-config.yaml`` instead of failing the worker's
+# ``git commit``. The orchestrator is project-agnostic — a target BMad
+# project is not required to ship pre-commit, and its absence must not break
+# the worker's commit. The flag is harmless when a config IS present
+# (pre-commit only consults it on the no-config path).
+WORKER_ENV_INJECTED: dict[str, str] = {
+    "PRE_COMMIT_ALLOW_NO_CONFIG": "1",
+}
+
+# NEW-12: relative path of the pre-commit config inside a worktree.
+PRECOMMIT_CONFIG_RELPATH = Path(".pre-commit-config.yaml")
+
+
 def _build_worker_env(extra: dict[str, str] | None) -> dict[str, str]:
     """Build subprocess env from allow-list only. Caller-passed `extra` is trusted
-    (intended for ORCHESTRATOR_WORKER_* context vars)."""
+    (intended for ORCHESTRATOR_WORKER_* context vars).
+
+    On top of the os.environ passthrough allow-list, the fixed
+    :data:`WORKER_ENV_INJECTED` constants are added (NEW-12). Caller-passed
+    ``extra`` is applied last, so a caller may still override an injected
+    default if it ever needs to.
+    """
     env: dict[str, str] = {
         k: os.environ[k] for k in ALLOWED_WORKER_ENV if k in os.environ
     }
+    env.update(WORKER_ENV_INJECTED)
     if extra:
         env.update(extra)
     return env
+
+
+def _detect_precommit_config(worktree: Path) -> bool:
+    """Return True if the worktree ships a ``.pre-commit-config.yaml``.
+
+    NEW-12 pre-spawn detector — emits an audit log when the config is absent
+    so operators can see why ``PRE_COMMIT_ALLOW_NO_CONFIG`` mattered for a
+    given story. Detection only; never fatal.
+    """
+    return (worktree / PRECOMMIT_CONFIG_RELPATH).is_file()
 
 # Module-level pool — predotvrachaet GC.collect() unblocking subprocess watcher
 # tasks before they finalize the JSONL stream. Callers obtain handles back from
@@ -772,6 +805,20 @@ async def spawn_worker(
                 halt_path=str(halt_path),
                 reason=reason,
             )
+
+    # NEW-12 (pilot_findings_closure_v5 S1): pre-commit config detector.
+    # If the target worktree has no ``.pre-commit-config.yaml`` the worker's
+    # ``git commit`` would still succeed (PRE_COMMIT_ALLOW_NO_CONFIG=1 is
+    # injected into the worker env), but we record an audit line so the
+    # absence is visible in the run log rather than silent.
+    if not _detect_precommit_config(wt_path):
+        log.info(
+            "precommit_config_absent story_id=%s worktree=%s — no "
+            ".pre-commit-config.yaml; PRE_COMMIT_ALLOW_NO_CONFIG=1 keeps "
+            "worker git commit green",
+            story_id,
+            worktree,
+        )
 
     # Initiative pilot_findings_closure v3 (#5 NEW-5): dirty reused worktree
     # gate. A reused worktree carrying uncommitted residue from a prior

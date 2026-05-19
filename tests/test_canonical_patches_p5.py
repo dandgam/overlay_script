@@ -456,7 +456,10 @@ async def test_subscriber_critical_block_mutates_and_emits_human_query(
 
 @pytest.mark.asyncio
 async def test_subscriber_critical_runner_error_halts(tmp_path: Path) -> None:
-    """Runner returning ERROR also halts merge — defensive (better safe)."""
+    """A persistently-failing runner halts merge after NEW-13 retries: the
+    error verdict is retried (error_retry_max default 1 → 2 attempts), each
+    failure emits SECURITY_REVIEW_ERROR, and the final outcome is a single
+    HUMAN_QUERY escalation for that story (pipeline not aborted)."""
     worktree = _make_worktree_with_story(
         tmp_path,
         "3.3",
@@ -487,8 +490,10 @@ async def test_subscriber_critical_runner_error_halts(tmp_path: Path) -> None:
     assert "security_review_error" in ev.payload["gate_reasons"]
     assert ev.payload["security_review_verdict"] == VERDICT_ERROR
     emitted = await _collect_emitted(bus)
-    assert len(emitted) == 1
-    assert emitted[0].type == EventType.HUMAN_QUERY
+    human_queries = [e for e in emitted if e.type == EventType.HUMAN_QUERY]
+    assert len(human_queries) == 1
+    sre = [e for e in emitted if e.type == EventType.SECURITY_REVIEW_ERROR]
+    assert len(sre) == 2  # 1 retried + 1 terminal
 
 
 def _default_policy_path(tmp_path: Path) -> Path:

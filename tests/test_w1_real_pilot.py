@@ -459,7 +459,10 @@ async def test_w1_real_pilot_calls_spawn_with_mock_false(
     captured_kwargs: dict[str, Any] = {}
 
     async def _fake_spawn(**kwargs: Any) -> WorkerHandle:
-        captured_kwargs.update(kwargs)
+        # Dev-story spawns omit ``skill_invocation`` (default); review /
+        # merge-gate spawns pass it explicitly. Capture only the dev spawn.
+        if "skill_invocation" not in kwargs:
+            captured_kwargs.update(kwargs)
         jsonl_path = tmp_path / f"{kwargs['story_id']}.jsonl"
         _seed_jsonl_completed(jsonl_path, kwargs["story_id"])
         return WorkerHandle(
@@ -562,7 +565,10 @@ async def test_w1_max_stories_caps_at_one(
     base_fake = _make_fake_spawn(tmp_path / "jsonl")
 
     async def _counting_fake(**kwargs: Any) -> WorkerHandle:
-        spawn_count["n"] += 1
+        # Count dev-story spawns only — review / merge-gate workers also go
+        # through ``runtime_spawn_worker`` but pass ``skill_invocation``.
+        if "skill_invocation" not in kwargs:
+            spawn_count["n"] += 1
         return await base_fake(**kwargs)
 
     monkeypatch.setattr(run_module, "runtime_spawn_worker", _counting_fake)
@@ -591,7 +597,10 @@ async def test_w1_max_stories_two(
     base_fake = _make_fake_spawn(tmp_path / "jsonl")
 
     async def _counting_fake(**kwargs: Any) -> WorkerHandle:
-        spawn_count["n"] += 1
+        # Count dev-story spawns only — review / merge-gate workers also go
+        # through ``runtime_spawn_worker`` but pass ``skill_invocation``.
+        if "skill_invocation" not in kwargs:
+            spawn_count["n"] += 1
         return await base_fake(**kwargs)
 
     monkeypatch.setattr(run_module, "runtime_spawn_worker", _counting_fake)

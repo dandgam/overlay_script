@@ -97,6 +97,10 @@ class SecurityReviewPolicy(BaseModel):
         default_factory=lambda: ["abandon", "manual_security_fix"]
     )
     escalation_text: str = ""
+    # NEW-13: how many times to re-run the security-review runner when it
+    # yields ``verdict=error`` (a technical failure of the review step). 0 =
+    # no retry. Total attempts = error_retry_max + 1. Default 1 (= 2 attempts).
+    error_retry_max: int = Field(default=1, ge=0)
 
 
 @dataclass(slots=True, frozen=True)
@@ -394,24 +398,52 @@ async def security_review_subscriber(
         return
 
     wave = str(payload.get("wave") or "default")
-    try:
-        verdict, findings_text = await runner(worktree, story_id, wave)
-    except (OSError, RuntimeError) as exc:
-        log.exception(
-            "security_review_runner_failed",
+    # NEW-13: a ``verdict=error`` is a technical failure of the review step,
+    # not a story defect. Retry the runner up to ``error_retry_max`` times
+    # before escalating; emit SECURITY_REVIEW_ERROR per attempt for audit.
+    max_retries = policy.error_retry_max
+    verdict = VERDICT_ERROR
+    findings_text = ""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            verdict, findings_text = await runner(worktree, story_id, wave)
+        except (OSError, RuntimeError) as exc:
+            log.exception(
+                "security_review_runner_failed",
+                story_id=story_id,
+                worktree=str(worktree),
+                attempt=attempt,
+            )
+            verdict = VERDICT_ERROR
+            findings_text = f"runner failed: {type(exc).__name__}: {exc}"
+
+        if verdict not in ALL_VERDICTS:
+            log.warning(
+                "security_review_unrecognized_verdict",
+                story_id=story_id,
+                verdict=verdict,
+                attempt=attempt,
+            )
+            verdict = VERDICT_ERROR
+
+        if verdict != VERDICT_ERROR:
+            break
+
+        retrying = attempt <= max_retries
+        await bus.emit(
+            EventType.SECURITY_REVIEW_ERROR,
             story_id=story_id,
             worktree=str(worktree),
+            attempt=attempt,
+            max_retries=max_retries,
+            retrying=retrying,
+            trigger=trigger.reason,
+            findings=findings_text,
         )
-        verdict = VERDICT_ERROR
-        findings_text = f"runner failed: {type(exc).__name__}: {exc}"
-
-    if verdict not in ALL_VERDICTS:
-        log.warning(
-            "security_review_unrecognized_verdict",
-            story_id=story_id,
-            verdict=verdict,
-        )
-        verdict = VERDICT_ERROR
+        if not retrying:
+            break
 
     log.info(
         "security_review_dispatched",

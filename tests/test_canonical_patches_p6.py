@@ -423,8 +423,10 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     #   RUNNER_CLEANUP_FAILED_REUSED_WORKTREE → 34 + 1 = 35.
     # 2026-05-19 spec_pilot_findings_closure_v3 S3 #1 adds
     #   INTEGRATION_MERGE_SKIPPED → 35 + 1 = 36.
-    assert len(ALL_EVENT_TYPES) == 36, (
-        f"Expected 36 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # 2026-05-19 spec_pilot_findings_closure_v5 S2 NEW-13 adds
+    #   SECURITY_REVIEW_ERROR → 36 + 1 = 37.
+    assert len(ALL_EVENT_TYPES) == 37, (
+        f"Expected 37 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 
