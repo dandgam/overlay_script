@@ -252,6 +252,67 @@ merge в `main` — manual (Auto merge=false).
   Связано с self-learning loop, но другой слой: тот тюнит цифры, этот ловит
   АРХИТЕКТУРНЫЕ паттерны. После P1-3 (критический путь).
 
+### Backlog — НОВЫЕ pilot findings (Antares 1a real 2026-05-19, post-closure)
+
+Источник: первый production pilot после merge `pilot_findings_closure` (`f2ff857` на main).
+Запуск `virgil run --project antares --wave 1a --real --story 1.3/1.4/1.5`. Все 3 stories
+halted на одном паттерне, 1.3 с реальной работой потеряна (не merged в integration).
+
+- ⬜ **P1 NEW-1: `--project <slug>` flag не побеждает `ORCHESTRATOR_TARGET_PROJECT` env var** —
+  при запуске `virgil run --project antares` оркестратор создал worktrees в
+  `/home/server/odyssey/.worktrees/wt-1.X` несмотря на `config/projects.yaml::antares.path=/home/server/Antares`.
+  Workaround: `ORCHESTRATOR_TARGET_PROJECT=/home/server/Antares virgil run ...` (env override
+  поверх env override). Fix: `runtime/project_registry.py` resolved path должен override'ить
+  `Settings.target_project` ДО любых downstream resolvers. См. memory
+  [[project_backlog_target_resolution_bug]]. ~0.5 сессии + тест
+  `test_project_flag_overrides_env.py`. **Блокирует чистый запуск любого target проекта.**
+
+- ⬜ **P1 NEW-2: runner Stage 7 cleanup ломается на reused worktree** — 3/3 stories
+  на Antares 1a (включая 1.3 с 2 коммитами реальной autofix-работы) halted одинаково:
+  `error: cannot delete branch 'feature/1.X' used by worktree at '/home/server/Antares/.worktrees/wt-1.X'`.
+  `bmad-auto-dev-runner.sh` Stage 7 cleanup делает `git branch -D feature/<id>` на
+  ветке, которая checked out в worktree — git отказывает. Runner exit 1, но claude -p
+  обёртка exit 0 → orchestrator пишет `worker_silent_failure`. Особенно болезненно:
+  **1.3 fully прошла Stage 4-6 (dev-story + autofix iteration H1/H2/H3/M2-M11),
+  2 новых коммита на feature/1.3 (+1286/-37 LOC, 22 файла)** — но Stage 7 cleanup
+  fail → НЕТ verdict event → `merge_to_integration_subscriber` не сработал →
+  **integration/wave-1a ветка не создана, реальная работа потеряна на feature/1.3**.
+  Fix варианты (комбинация):
+  - **Runner-side:** Stage 7 detect «used by worktree» error → skip cleanup gracefully
+    + emit `verdict=approve` если есть коммиты с base_sha.
+  - **Orchestrator-side detect:** `worker_silent_failure` detector распознаёт pattern
+    `cannot delete branch ... used by worktree` в stdout_lines → emit synthetic
+    `runner_cleanup_failed_reused_worktree` event + treat as `verdict=approve` если
+    commits есть.
+  - **Pre-spawn worktree refresh:** если `branch_tip == base_sha` (story already done) →
+    emit `verdict=approve` без spawn'а; иначе fresh worktree через `--force-new-worktree`.
+  См. memory [[project_backlog_runner_reused_worktree_cleanup]]. ~1-1.5 сессии.
+  **Блокирует ЛЮБОЙ production pilot на projects где worktrees уже существуют (т.е. почти всегда).**
+
+- ⬜ **P2 NEW-3: S1 `normalize_story_id` resolver не находит match** — log показал
+  `pilot_mark_done_unresolved reason='no matching sprint-status key in any epic block' spawned_id=1.3`,
+  при этом sprint-status имеет ключ `1-3-fastapi-app-lifespan-health`. Наш
+  `resolve_sprint_status_key` (S1, commit `7edc9bb`) видимо не сматчил `1.3` → kebab+slug
+  composite key. Fix: расширить fuzzy match — split kebab key на dotted-prefix +
+  slug-suffix, match только по prefix. ~0.3 сессии.
+
+- ⬜ **P2 NEW-4: `worker_completed status=success` при runner exit 1** — race условие:
+  outer claude -p exit 0 (он dutifully reported inner exit), но inner
+  `bmad-auto-dev-runner.sh` exit 1. Orchestrator пишет `status=success` потому что
+  смотрит на outer exit. Fix: parse stdout_lines на `^Exit code: (\d+)$` regex,
+  использовать inner exit code в `worker_completed`. ~0.3 сессии.
+
+**Связь с pilot_findings_closure:** этот pilot — первый РЕАЛЬНЫЙ production run после
+merge `f2ff857`. Подтвердил что fixes работают (S6 budget auto-disable сработал; S1
+counter split дал spawned/succeeded/failed; S2 verdict-fallback не помог в этом случае
+потому что Stage 7 падает ДО Stage 6 review log creation). Нашёл 4 новых P1/P2 баг'а,
+из которых **P1 NEW-2 — главная блокировка** для любого production pilot.
+
+**Recommended next initiative:** `pilot_findings_closure_v2` через `/auto-loop-spec-long` —
+2-3 сессии на P1 NEW-1 + P1 NEW-2 + P2 NEW-3 + P2 NEW-4. После закрытия — повторный
+прогон Antares Epic 1 (теперь с fresh worktrees через decommission старых) для
+валидации.
+
 ---
 
 ## 6. References
