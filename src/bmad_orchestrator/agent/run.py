@@ -139,6 +139,15 @@ from bmad_orchestrator.runtime.self_learning_subscriber import (
     make_self_learning_subscriber,
 )
 from bmad_orchestrator.runtime.stage5_completeness import stage5_completeness_subscriber
+from bmad_orchestrator.runtime.stuck_watchdog import (
+    DEFAULT_CHECK_INTERVAL_SECONDS as STUCK_CHECK_INTERVAL_DEFAULT,
+)
+from bmad_orchestrator.runtime.stuck_watchdog import (
+    DEFAULT_STUCK_TIMEOUT_SECONDS as STUCK_TIMEOUT_DEFAULT,
+)
+from bmad_orchestrator.runtime.stuck_watchdog import (
+    tail_with_stuck_watchdog,
+)
 from bmad_orchestrator.runtime.supervisor_subscriber import (
     load_supervisor_engine as _load_supervisor_engine,
 )
@@ -160,15 +169,6 @@ from bmad_orchestrator.runtime.worker_silent_failure import (
     decide_worker_status,
     detect_reused_worktree_cleanup_failure,
     parse_inner_exit_code,
-)
-from bmad_orchestrator.runtime.stuck_watchdog import (
-    DEFAULT_CHECK_INTERVAL_SECONDS as STUCK_CHECK_INTERVAL_DEFAULT,
-)
-from bmad_orchestrator.runtime.stuck_watchdog import (
-    DEFAULT_STUCK_TIMEOUT_SECONDS as STUCK_TIMEOUT_DEFAULT,
-)
-from bmad_orchestrator.runtime.stuck_watchdog import (
-    tail_with_stuck_watchdog,
 )
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHaltPrespawnError,
@@ -1079,8 +1079,28 @@ def _wire_pipeline_subscribers(
     bus.on(lambda e: _elicitation_sub(e, bus))
 
     # Supervisor LLM-loop (Phase 4 #9 — P4 Orchestrator-Workers + P2 Routing).
+    # NEW-33.3 — judge_factory hook: BMAD_SUPERVISOR_LLM=1 enables a future
+    # real-Anthropic judge (M4). Until then the factory returns StubJudge
+    # (same as default), but the wiring path is established and tested.
     supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
-    supervisor_engine = _load_supervisor_engine(supervisor_policy_path)
+
+    def _supervisor_judge_factory() -> Any:
+        from bmad_orchestrator.supervisor.llm_judge import StubJudge
+
+        mode = os.environ.get("BMAD_SUPERVISOR_LLM", "").strip().lower()
+        if mode in {"1", "true", "anthropic", "sonnet"}:
+            # M4 placeholder: real Sonnet judge wiring goes here. Until then
+            # behave like stub but log so audit captures the intent.
+            log.info(
+                "supervisor_llm_real_requested_but_deferred",
+                hint="real-Anthropic judge lands with spec_supervisor_llm_loop M4",
+            )
+        return StubJudge()
+
+    supervisor_engine = _load_supervisor_engine(
+        supervisor_policy_path,
+        judge_factory=_supervisor_judge_factory,
+    )
     _supervisor_sub = make_supervisor_subscriber(supervisor_engine)
     bus.on(lambda e: _supervisor_sub(e, bus))
 

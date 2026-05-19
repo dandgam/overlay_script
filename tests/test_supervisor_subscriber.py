@@ -22,15 +22,61 @@ def test_default_policy_path_resolvable():
     assert DEFAULT_POLICY_PATH.is_file() or DEFAULT_POLICY_PATH.is_absolute() is False
 
 
-def test_watched_event_types_include_5():
+def test_watched_event_types_include_5_plus_stuck():
+    """NEW-33.3 — WORKER_STUCK_TIMEOUT joins the original 5 watched types."""
     expected = {
         EventType.HUMAN_QUERY,
         EventType.WORKER_HALT_FILE,
         EventType.BUDGET_THRESHOLD_HIT,
         EventType.WORKER_SILENT_FAILURE,
         EventType.COMPLIANCE_SWEEP_NEEDED,
+        EventType.WORKER_STUCK_TIMEOUT,
     }
     assert WATCHED_EVENT_TYPES == frozenset(expected)
+
+
+def test_load_engine_uses_judge_factory_when_explicit_judge_absent():
+    """NEW-33.3 — judge_factory hook fires when no explicit judge passed."""
+    calls = []
+
+    class _FakeJudge:
+        async def classify(self, _input):  # pragma: no cover — protocol stub
+            return None
+
+    def _factory():
+        calls.append(1)
+        return _FakeJudge()
+
+    engine = load_supervisor_engine(judge_factory=_factory)
+    assert calls == [1]
+    assert isinstance(engine.judge, _FakeJudge)
+
+
+def test_load_engine_explicit_judge_overrides_factory():
+    """Explicit ``judge`` wins over factory."""
+
+    class _FakeA:
+        async def classify(self, _input):  # pragma: no cover
+            return None
+
+    class _FakeB:
+        async def classify(self, _input):  # pragma: no cover
+            return None
+
+    a = _FakeA()
+    engine = load_supervisor_engine(judge=a, judge_factory=lambda: _FakeB())
+    assert engine.judge is a
+
+
+def test_load_engine_factory_exception_falls_back_to_stub():
+    """NEW-33.3 — factory raising must not crash engine load."""
+    from bmad_orchestrator.supervisor.llm_judge import StubJudge
+
+    def _bad_factory():
+        raise RuntimeError("anthropic key missing")
+
+    engine = load_supervisor_engine(judge_factory=_bad_factory)
+    assert isinstance(engine.judge, StubJudge)
 
 
 def test_load_engine_with_default_path():

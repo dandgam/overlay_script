@@ -38,6 +38,11 @@ WATCHED_EVENT_TYPES: frozenset[EventType] = frozenset(
         EventType.BUDGET_THRESHOLD_HIT,
         EventType.WORKER_SILENT_FAILURE,
         EventType.COMPLIANCE_SWEEP_NEEDED,
+        # NEW-33.3 — Tier 0 hard rule пропускает к decide() события от
+        # cumulative stuck-worker watchdog. По умолчанию политика
+        # escalate_human, real Sonnet (M4) сможет автомиатически решать
+        # retry vs abort на основе истории.
+        EventType.WORKER_STUCK_TIMEOUT,
     }
 )
 
@@ -45,6 +50,7 @@ WATCHED_EVENT_TYPES: frozenset[EventType] = frozenset(
 def load_supervisor_engine(
     policy_path: Path | None = None,
     judge: LLMJudgeProtocol | None = None,
+    judge_factory: Callable[[], LLMJudgeProtocol] | None = None,
 ) -> SupervisorEngine:
     """Build a SupervisorEngine from YAML path.
 
@@ -67,7 +73,22 @@ def load_supervisor_engine(
             hint="Tier 1 StubJudge will fail-safe escalate every event",
         )
         policy = SupervisorPolicy(version=1)
-    return SupervisorEngine(policy, judge=judge)
+    # NEW-33.3 — resolution order: explicit ``judge`` > ``judge_factory()`` >
+    # SupervisorEngine default (StubJudge). The factory hook lets callers
+    # (agent/run.py) plug an env-gated real-LLM judge without importing
+    # Anthropic types at the supervisor module boundary.
+    resolved_judge = judge
+    if resolved_judge is None and judge_factory is not None:
+        try:
+            resolved_judge = judge_factory()
+        except Exception as exc:
+            log.warning(
+                "supervisor_judge_factory_failed",
+                error=str(exc),
+                hint="falling back to StubJudge — Tier 1 will escalate",
+            )
+            resolved_judge = None
+    return SupervisorEngine(policy, judge=resolved_judge)
 
 
 def make_supervisor_subscriber(

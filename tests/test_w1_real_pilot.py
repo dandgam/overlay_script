@@ -799,9 +799,15 @@ def test_w1_run_real_pilot_source_references_caps() -> None:
 
 
 def test_w1_tail_helper_bridges_to_bus() -> None:
-    """``_tail_and_emit_completion`` must call ``tail_jsonl_events``."""
+    """``_tail_and_emit_completion`` must drive the worker JSONL tail.
+
+    NEW-33.2 swapped raw ``tail_jsonl_events`` for the stuck-watchdog wrapper
+    ``tail_with_stuck_watchdog`` (which itself dispatches to the real tailer
+    via its ``inner_factory`` default). Either name in source proves the
+    bridge is still wired.
+    """
     src = inspect.getsource(_tail_and_emit_completion)
-    assert "tail_jsonl_events" in src
+    assert "tail_jsonl_events" in src or "tail_with_stuck_watchdog" in src
     assert "WORKER_COMPLETED" in src
 
 

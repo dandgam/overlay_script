@@ -31,6 +31,8 @@ WatchedEventType = Literal[
     "BUDGET_THRESHOLD_HIT",
     "WORKER_SILENT_FAILURE",
     "COMPLIANCE_SWEEP_NEEDED",
+    # NEW-33.3 — cumulative stuck-worker timeout from runtime.stuck_watchdog.
+    "WORKER_STUCK_TIMEOUT",
 ]
 
 

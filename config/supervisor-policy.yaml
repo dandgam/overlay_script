@@ -55,3 +55,9 @@ hard_rules:
       event: WORKER_SILENT_FAILURE
     action: escalate_human
     reason: "Silent failure требует diagnostic — automated path небезопасен"
+  - id: worker-stuck-timeout
+    when:
+      event: WORKER_STUCK_TIMEOUT
+    action: escalate_human
+    reason: "Cumulative stuck-worker (NEW-33.2) — нужно человеческое решение: retry / abort / манипуляция wave-env"
+
