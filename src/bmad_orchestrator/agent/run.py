@@ -3606,6 +3606,128 @@ async def _run_merge_gate_quality_stage(
     return verdict, summary, metrics
 
 
+def _code_review_error_retry_max() -> int:
+    """NEW-15: retry budget for a code-review ``verdict=error``.
+
+    A ``verdict=error`` is a *technical* failure of the review step (empty
+    review JSONL, spawn failure), not a story defect. ``0`` = no retry; total
+    attempts = value + 1. Default ``1`` (= 2 attempts), overridable via the
+    ``CODE_REVIEW_ERROR_RETRY_MAX`` env var. Mirrors
+    :attr:`SecurityReviewPolicy.error_retry_max`.
+    """
+    raw = os.environ.get("CODE_REVIEW_ERROR_RETRY_MAX", "1")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1
+
+
+@dataclass(slots=True, frozen=True)
+class _MergeGateStageResult:
+    """Outcome of one full two-stage merge-gate run (NEW-15).
+
+    ``spec_only`` is True when the spec stage did not approve and the quality
+    stage was skipped. ``fallback_verdict`` is set when the spec verdict came
+    from the bmad-auto-dev runner review log rather than the review event
+    stream.
+    """
+
+    verdict: str
+    summary: str
+    metrics: ReviewMetrics | None
+    verdict_source: str
+    spec_only: bool
+    fallback_verdict: str | None
+
+
+async def _run_merge_gate_two_stage(
+    *, worktree: str, story_id: str, wave: str, bus: EventLoop
+) -> _MergeGateStageResult:
+    """Run the two-stage merge gate once and return the merged outcome.
+
+    Does NOT emit the final ``CODE_REVIEW_VERDICT`` — the caller wraps this in
+    a ``verdict=error`` retry loop (NEW-15) and emits once a non-error verdict
+    is reached, or escalates the story via HUMAN_QUERY after retries exhaust.
+    """
+    spec_verdict, spec_summary, spec_metrics = await _run_merge_gate_spec_stage(
+        worktree=worktree, story_id=story_id, wave=wave, bus=bus
+    )
+
+    # ── S2 (spec_pilot_findings_closure §1 #2) — runner-log fallback.
+    # When the merge-gate spec worker fails to surface a parseable verdict
+    # event (JSONL stream had no `verdict: ...` token), fall back to reading
+    # the bmad-auto-dev runner's own Stage 6 review log from the worktree.
+    verdict_source = "merge_gate_spec"
+    fallback_verdict: str | None = None
+    if spec_verdict == "error":
+        fallback = parse_runner_review_log(worktree, story_id)
+        if fallback is not None:
+            fb_verdict, fb_summary = fallback
+            log.info(
+                "code_review_runner_log_fallback",
+                story_id=story_id,
+                worktree=worktree,
+                fallback_verdict=fb_verdict,
+            )
+            spec_verdict = fb_verdict
+            spec_summary = fb_summary
+            verdict_source = "runner_log_fallback"
+            fallback_verdict = fb_verdict
+
+    if spec_verdict != "approve":
+        # Spec stage failed — skip quality stage entirely (saves cost).
+        log.info(
+            "merge_gate_quality_stage_skipped",
+            story_id=story_id,
+            spec_verdict=spec_verdict,
+        )
+        return _MergeGateStageResult(
+            verdict=spec_verdict,
+            summary=spec_summary,
+            metrics=spec_metrics,
+            verdict_source=verdict_source,
+            spec_only=True,
+            fallback_verdict=fallback_verdict,
+        )
+
+    # ── Stage 2: quality (lints, tests, security, perf).
+    quality_verdict, quality_summary, quality_metrics = await _run_merge_gate_quality_stage(
+        worktree=worktree, story_id=story_id, wave=wave, bus=bus
+    )
+
+    # NEW-15 sub-bug (b): a runner-log fallback verdict is a holistic PASS /
+    # NEEDS-FIX signal for the WHOLE story. When the spec stage came from the
+    # fallback and the quality stage yields a *technical* error, the fallback
+    # verdict must carry through to the final verdict instead of being
+    # worst-wins-merged into `error` (which would silently block the merge).
+    if (
+        quality_verdict == "error"
+        and fallback_verdict is not None
+        and fallback_verdict != "error"
+    ):
+        log.info(
+            "code_review_quality_error_fallback_applied",
+            story_id=story_id,
+            fallback_verdict=fallback_verdict,
+        )
+        verdict = fallback_verdict
+    else:
+        # Merge verdicts: worst wins.
+        verdict = _merge_verdicts(spec_verdict, quality_verdict)
+    summary = quality_summary if quality_summary else spec_summary
+    metrics: ReviewMetrics | None = (
+        quality_metrics if quality_metrics is not None else spec_metrics
+    )
+    return _MergeGateStageResult(
+        verdict=verdict,
+        summary=summary,
+        metrics=metrics,
+        verdict_source=verdict_source,
+        spec_only=False,
+        fallback_verdict=fallback_verdict,
+    )
+
+
 async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
     """On ``WORKER_COMPLETED(success)`` → run two-stage merge gate, emit verdict.
 
@@ -3646,49 +3768,82 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         "BMAD_CURRENT_WAVE", "default"
     )
 
-    # ── Phase 4 hardening #5 — Stage 1: spec (AC coverage + story completeness).
-    spec_verdict, spec_summary, spec_metrics = await _run_merge_gate_spec_stage(
-        worktree=worktree, story_id=story_id, wave=wave, bus=bus
-    )
-
-    # ── S2 (spec_pilot_findings_closure §1 #2) — runner-log fallback.
-    # When the merge-gate spec worker fails to surface a parseable verdict
-    # event (JSONL stream had no `verdict: ...` token), fall back to reading
-    # the bmad-auto-dev runner's own Stage 6 review log from the worktree.
-    # The runner records PASS / NEEDS-FIX / BLOCKED there — re-use that signal
-    # instead of escalating every event-stream miss to a human.
-    verdict_source = "merge_gate_spec"
-    if spec_verdict == "error":
-        fallback = parse_runner_review_log(worktree, story_id)
-        if fallback is not None:
-            fb_verdict, fb_summary = fallback
-            log.info(
-                "code_review_runner_log_fallback",
-                story_id=story_id,
-                worktree=worktree,
-                fallback_verdict=fb_verdict,
-            )
-            spec_verdict = fb_verdict
-            spec_summary = fb_summary
-            verdict_source = "runner_log_fallback"
-
-    if spec_verdict != "approve":
-        # Spec stage failed — skip quality stage entirely (saves cost).
-        log.info(
-            "merge_gate_quality_stage_skipped",
-            story_id=story_id,
-            spec_verdict=spec_verdict,
+    # ── NEW-15: a verdict=error from the two-stage merge gate is a *technical*
+    #    failure of the review step (empty review JSONL, spawn failure), not a
+    #    story defect. Retry the gate up to CODE_REVIEW_ERROR_RETRY_MAX times
+    #    before escalating; emit CODE_REVIEW_ERROR per failing attempt for audit.
+    max_error_retries = _code_review_error_retry_max()
+    attempt = 0
+    while True:
+        attempt += 1
+        stage_result = await _run_merge_gate_two_stage(
+            worktree=worktree, story_id=story_id, wave=wave, bus=bus
         )
+        if stage_result.verdict != "error":
+            break
+        retrying = attempt <= max_error_retries
+        await bus.emit(
+            EventType.CODE_REVIEW_ERROR,
+            story_id=story_id,
+            worktree=worktree,
+            attempt=attempt,
+            max_retries=max_error_retries,
+            retrying=retrying,
+            gate_stage="spec" if stage_result.spec_only else "quality",
+        )
+        if not retrying:
+            break
+
+    # ── NEW-15: persistent error → escalate the single story via ONE
+    #    HUMAN_QUERY. Deliberately do NOT emit CODE_REVIEW_VERDICT(error): that
+    #    would feed the supervisor circuit breaker as a story escalation and
+    #    abort the whole pipeline after 3 in a row. The verdict /
+    #    review_verdict markers below are recognised by
+    #    SupervisorEngine._is_security_review_error so the breaker counter is
+    #    left untouched (NEW-13 pattern, generalised to code_review).
+    if stage_result.verdict == "error":
+        log.warning(
+            "code_review_persistent_error",
+            story_id=story_id,
+            worktree=worktree,
+            attempts=attempt,
+        )
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id if cfg is not None else None,
+            story_id=story_id,
+            worktree=worktree,
+            verdict="code_review_error",
+            review_verdict="error",
+            text=(
+                f"Code-review технически не смог вынести вердикт для story "
+                f"{story_id} после {attempt} попыток (verdict=error — пустой "
+                f"review JSONL или сбой spawn).\n\n"
+                f"Worktree: {worktree}\n"
+                f"Summary: {stage_result.summary}"
+            ),
+            actions=["retry_review", "abandon"],
+        )
+        return
+
+    verdict = stage_result.verdict
+    summary = stage_result.summary
+    verdict_source = stage_result.verdict_source
+
+    # ── Spec stage did not approve (reject / request_changes) — quality stage
+    #    was skipped; emit the verdict directly, skipping the approve-only gates.
+    if stage_result.spec_only:
         await bus.emit(
             EventType.CODE_REVIEW_VERDICT,
             story_id=story_id,
-            verdict=spec_verdict,
-            summary=spec_summary,
+            verdict=verdict,
+            summary=summary,
             worktree=worktree,
             review_iteration=review_iteration,
             gate_stage="spec",
             source=verdict_source,
         )
+        spec_metrics = stage_result.metrics
         if spec_metrics is not None and cfg is not None and cfg.budget is not None:
             gates_for_tuning = _load_review_gates(cfg)
             await _apply_live_tuning(
@@ -3701,18 +3856,9 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
             )
         return
 
-    # ── Stage 2: quality (lints, tests, security, perf).
-    quality_verdict, quality_summary, quality_metrics = await _run_merge_gate_quality_stage(
-        worktree=worktree, story_id=story_id, wave=wave, bus=bus
-    )
-
-    # Merge verdicts: worst wins.
-    verdict = _merge_verdicts(spec_verdict, quality_verdict)
-    summary = quality_summary if quality_summary else spec_summary
-    metrics: ReviewMetrics | None = quality_metrics if quality_metrics is not None else spec_metrics
+    metrics: ReviewMetrics | None = stage_result.metrics
 
     # Dummy handle reference for review_jsonl field in emit (quality stage is last).
-    # Use spec_summary for the combined summary if quality is empty.
     handle_jsonl_str = ""
 
     gates = _load_review_gates(cfg)

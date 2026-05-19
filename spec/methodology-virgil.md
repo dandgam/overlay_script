@@ -414,18 +414,24 @@ Validated частично:
 
 Регрессии и новые баги:
 
-- ⬜ **NEW-14 (P1) · Тип: 🐛 Баг — NEW-12 регрессия: stage5_recovery git commit без env** —
+- ✅ **NEW-14 (P1) · Тип: 🐛 Баг — NEW-12 регрессия: stage5_recovery git commit без env** —
   `stage5_recovery_failed: No .pre-commit-config.yaml file` на 1.4 снова. Фикс v5 прокинул
   `PRE_COMMIT_ALLOW_NO_CONFIG=1` в env *воркера* (`worker_spawn.py`), но stage5 recovery path
-  вызывает `git commit` отдельным процессом без проброшенного env. Fix — инжектить флаг во
-  все `git commit` вызовы stage5_recovery (или глобально в subprocess env пути runner'а).
-- ⬜ **NEW-15 (P1) · Тип: 🐛 Баг — code_review verdict=error блокирует merge gate** —
+  вызывает `git commit` отдельным процессом без проброшенного env. **DONE** (v6 S2): общий
+  helper `_git_commit_env()` в `runtime/git_env.py` (константа `GIT_COMMIT_ENV_INJECTED`
+  переиспользуется и `worker_spawn.WORKER_ENV_INJECTED`); `env=_git_commit_env()` проброшен
+  в `git commit` subprocess обоих recovery-путей — `stage5_completeness.py` (Patch S) и
+  `commit_recovery.py` (Patch R). +4 tests.
+- ✅ **NEW-15 (P1) · Тип: 🐛 Баг — code_review verdict=error блокирует merge gate** —
   `code_review_dispatched review_jsonl= verdict=error` на 1.4: review_jsonl пустой → verdict
   становится `error`, оба merge-gate stage (`spec`/`quality`) дают `verdict=error`. Аналог
-  NEW-13, но для **code_review**, не security_review — v5-фикс error→retry покрыл только
-  security_review. Под-баг (b): `code_review_runner_log_fallback fallback_verdict=approve`
-  отработал, но `merge_gate_quality_stage_done` всё равно `verdict=error` — fallback-verdict
-  не применяется к итоговому merge-gate verdict.
+  NEW-13, но для **code_review**. **DONE** (v6 S2): `code_review_subscriber` ретраит
+  two-stage gate `CODE_REVIEW_ERROR_RETRY_MAX` раз (default 1), эмитит `CODE_REVIEW_ERROR`
+  (EventType #39) per attempt, при исчерпании — одиночная HUMAN_QUERY (`verdict=code_review_error`),
+  НЕ `CODE_REVIEW_VERDICT(error)` → не кормит circuit breaker;
+  `SupervisorEngine._is_security_review_error` распознаёт и code_review-маркеры. Под-баг (b):
+  fallback-verdict из `code_review_runner_log_fallback` теперь доезжает до итогового verdict
+  даже при `quality stage = error`. +5 tests.
 - ⬜ **NEW-16 (P1) · Тип: 🐛 Баг — ложный `succeeded` для no-op story** — 1.5 worker написал
   код (`.pre-commit-config.yaml`, `.gitleaks.toml`, `ci.yml`, ADR 0005) но **не закоммитил**
   (uncommitted changes висят в `wt-1.5`), не дошёл до merge gate, нет ни одного merge_gate /

@@ -34,6 +34,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
+from bmad_orchestrator.runtime.git_env import _git_commit_env
 from bmad_orchestrator.skills_repo import PolicyInvalidError, PolicyNotFoundError
 
 log = structlog.get_logger(__name__)
@@ -162,10 +163,13 @@ async def _git_commit(
     if signoff:
         args.append("--signoff")
     try:
+        # NEW-14: inject PRE_COMMIT_ALLOW_NO_CONFIG=1 so a config-less worktree's
+        # pre-commit hook does not abort this recovery commit.
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=_git_commit_env(),
         )
     except (OSError, FileNotFoundError) as e:
         return False, str(e), ""

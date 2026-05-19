@@ -49,6 +49,7 @@ from bmad_orchestrator.runtime.embedded_skills import (
     ApplyResult,
     apply_embedded_skills,
 )
+from bmad_orchestrator.runtime.git_env import GIT_COMMIT_ENV_INJECTED
 from bmad_orchestrator.runtime.mcp_readiness import (
     DEFAULT_INTERVAL_MS as MCP_READINESS_DEFAULT_INTERVAL_MS,
 )
@@ -129,9 +130,11 @@ ALLOWED_WORKER_ENV: frozenset[str] = frozenset({
 # project is not required to ship pre-commit, and its absence must not break
 # the worker's commit. The flag is harmless when a config IS present
 # (pre-commit only consults it on the no-config path).
-WORKER_ENV_INJECTED: dict[str, str] = {
-    "PRE_COMMIT_ALLOW_NO_CONFIG": "1",
-}
+#
+# NEW-14: the same flag set is shared with the stage5 / commit-recovery
+# ``git commit`` subprocesses via :data:`GIT_COMMIT_ENV_INJECTED` — defined
+# once in ``runtime.git_env`` so worker spawn and recovery never drift apart.
+WORKER_ENV_INJECTED: dict[str, str] = dict(GIT_COMMIT_ENV_INJECTED)
 
 # NEW-12: relative path of the pre-commit config inside a worktree.
 PRECOMMIT_CONFIG_RELPATH = Path(".pre-commit-config.yaml")

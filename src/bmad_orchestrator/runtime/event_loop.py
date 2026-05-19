@@ -149,6 +149,16 @@ class EventType(StrEnum):
     # synthesized the dev commit from a dirty worktree)}. Lets audit consumers
     # distinguish a cheap validation replay from a real worker-dev pilot run.
     REPLAY_MODE_STARTED = "replay_mode_started"
+    # Initiative pilot_findings_closure_v6 S2 (NEW-15): emitted once per failing
+    # attempt of the two-stage merge gate when it yields ``verdict=error`` (a
+    # technical failure of the review step — empty review JSONL, spawn failure
+    # — not a story defect). Payload: {story_id, worktree, attempt, max_retries,
+    # retrying (bool), gate_stage}. Mirrors :data:`SECURITY_REVIEW_ERROR`. After
+    # retries are exhausted ``code_review_subscriber`` escalates the single
+    # story via one HUMAN_QUERY (verdict=code_review_error) instead of emitting
+    # a CODE_REVIEW_VERDICT(error) — the latter would feed the supervisor
+    # circuit breaker as a story escalation.
+    CODE_REVIEW_ERROR = "code_review_error"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)

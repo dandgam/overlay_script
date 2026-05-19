@@ -199,15 +199,24 @@ class SupervisorEngine:
 
     @staticmethod
     def _is_security_review_error(event_type: str, payload: dict[str, Any]) -> bool:
-        """True when this event is a HUMAN_QUERY raised by a security_review
-        technical error (NEW-13). Such events must not feed the circuit
-        breaker's consecutive-escalation counter — a failed review step is not
-        a story escalation."""
+        """True when this event is a HUMAN_QUERY raised by a *technical* review
+        error — security_review (NEW-13) OR code_review (NEW-15). Such events
+        must not feed the circuit breaker's consecutive-escalation counter: a
+        failed review step is not a story escalation.
+
+        Markers recognised:
+          * security_review error — ``security_verdict=error`` or
+            ``verdict=security_review_error``;
+          * code_review error — ``review_verdict=error`` or
+            ``verdict=code_review_error``.
+        """
         if event_type.upper() != "HUMAN_QUERY":
             return False
         return (
             payload.get("security_verdict") == "error"
             or payload.get("verdict") == "security_review_error"
+            or payload.get("review_verdict") == "error"
+            or payload.get("verdict") == "code_review_error"
         )
 
     def _track(

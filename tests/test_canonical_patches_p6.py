@@ -427,8 +427,10 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     #   SECURITY_REVIEW_ERROR → 36 + 1 = 37.
     # 2026-05-19 spec_pilot_findings_closure_v6 S1 NEW-19 adds
     #   REPLAY_MODE_STARTED → 37 + 1 = 38.
-    assert len(ALL_EVENT_TYPES) == 38, (
-        f"Expected 38 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # 2026-05-19 spec_pilot_findings_closure_v6 S2 NEW-15 adds
+    #   CODE_REVIEW_ERROR → 38 + 1 = 39.
+    assert len(ALL_EVENT_TYPES) == 39, (
+        f"Expected 39 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 
