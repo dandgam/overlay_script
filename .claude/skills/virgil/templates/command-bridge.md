@@ -3,13 +3,35 @@
 > Как skill `/virgil` формирует команды для `bmad-orchestrator <subcommand>` и стримит вывод в чат.
 > Читать **перед каждым** запуском CLI из меню.
 
+## 0. ⚠️ Как вызывать CLI — полный путь обязателен
+
+Исполняемый файл `bmad-orchestrator` живёт **внутри venv проекта**, его НЕТ в системном PATH. Голый вызов `bmad-orchestrator` упадёт с `command not found` (exit 127).
+
+**Везде где в этом skill написано `bmad-orchestrator` — подставляй полный путь:**
+
+```
+/home/server/bmad-orchestrator/.venv/bin/bmad-orchestrator
+```
+
+Удобно задать переменную один раз в начале `Bash`-вызова:
+```bash
+VIRGIL=/home/server/bmad-orchestrator/.venv/bin/bmad-orchestrator
+"$VIRGIL" status
+```
+
+**Резолюция пути (на случай если venv переедет):**
+1. Сначала пробуй `/home/server/bmad-orchestrator/.venv/bin/bmad-orchestrator`.
+2. Если файла нет — `/home/server/bmad-orchestrator/venv/bin/bmad-orchestrator`.
+3. Если и его нет — `command -v bmad-orchestrator` (вдруг добавлен в PATH).
+4. Ничего не нашлось → сказать пользователю: «CLI оркестратора не найден — проверь что `.venv` создан (`cd /home/server/bmad-orchestrator && python -m venv .venv && .venv/bin/pip install -e .`)».
+
 ## 1. Формат вызова
 
 Skill **только формирует команду** из ответов меню и вызывает `Bash`. Никаких альтернативных путей запуска (Python import, subprocess.Popen, etc.) — только CLI.
 
-Шаблон:
+Шаблон (с полным путём из раздела 0):
 ```bash
-bmad-orchestrator <subcommand> [--flag1 value1 --flag2 value2 ...]
+/home/server/bmad-orchestrator/.venv/bin/bmad-orchestrator <subcommand> [--flag1 value1 ...]
 ```
 
 **Запуск:**
