@@ -232,10 +232,16 @@ def _canonical_status(
     the Status field (``Done``, ``Drafted``) — the lowercased token is returned
     so downstream comparisons against ``"done"`` keep working (NEW-18).
 
-    On a genuinely unknown token, emit a *structured* warning carrying
-    ``story_id`` + ``raw_status`` + ``layout`` so an operator can see exactly
-    which Status values fail to parse and in which sprint-status layout — the
-    pre-NEW-18 message logged only an opaque ``bmad_format.unknown_status`` key.
+    On a genuinely unknown token, emit a warning carrying ``story_id`` +
+    ``raw_status`` + ``token`` + ``layout`` so an operator can see exactly which
+    Status values fail to parse and in which sprint-status layout.
+
+    NEW-22: the fields are interpolated into the *message string* itself, not
+    only into ``extra=``. ``bmad_format`` uses the stdlib ``logging`` module —
+    ``extra`` keys become ``LogRecord`` attributes that the default formatter
+    does NOT render, so the pre-NEW-22 line printed a bare opaque
+    ``bmad_format_unknown_status`` to stdout. ``extra`` is kept as well for
+    structured-log aggregators that DO consume record attributes.
     """
     token = extract_status_token(raw)
     if not token:
@@ -244,7 +250,11 @@ def _canonical_status(
     if token_lc in KNOWN_STATUSES:
         return token_lc
     logger.warning(
-        "bmad_format_unknown_status",
+        "bmad_format_unknown_status story_id=%s raw_status=%s token=%s layout=%s",
+        source_key,
+        str(raw),
+        token,
+        layout,
         extra={
             "story_id": source_key,
             "raw_status": str(raw),
