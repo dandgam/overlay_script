@@ -139,6 +139,22 @@ async def _drain(bus: EventLoop) -> list[Event]:
     return captured
 
 
+def _record_events(bus: EventLoop) -> list[Event]:
+    """Attach a capture subscriber BEFORE the pilot runs.
+
+    Since NEW-7 the real pilot drains its own bus (``EventLoop.drain``) before
+    returning, so the queue is empty post-run. Capture must subscribe up front
+    and observe events as the production drain dispatches them.
+    """
+    captured: list[Event] = []
+
+    async def _capture(ev: Event) -> None:
+        captured.append(ev)
+
+    bus.on(_capture)
+    return captured
+
+
 # ── P0-1: subscribers wired into bus ──────────────────────────────────────────
 
 
@@ -291,13 +307,14 @@ async def test_p0_2_real_pilot_wave_boundary_has_completed_stories(
 
     bus = EventLoop()
     budget = BudgetGuard(load_settings().budget, event_loop=bus)
+    events = _record_events(bus)
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=2, max_stories=10,
         max_spend_usd=100.0, budget=budget, state_db=None, session_id=None,
         models=ModelConfig(), options={}, settings=load_settings(),
     )
 
-    events = await _drain(bus)
+    await _drain(bus)
     boundaries = [e for e in events if e.type == EventType.WAVE_BOUNDARY_REACHED]
     assert len(boundaries) == 1
     payload = boundaries[0].payload
@@ -321,13 +338,14 @@ async def test_p0_2_real_pilot_completed_stories_matches_spawned_count(
 
     bus = EventLoop()
     budget = BudgetGuard(load_settings().budget, event_loop=bus)
+    events = _record_events(bus)
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=3, max_stories=10,
         max_spend_usd=100.0, budget=budget, state_db=None, session_id=None,
         models=ModelConfig(), options={}, settings=load_settings(),
     )
 
-    events = await _drain(bus)
+    await _drain(bus)
     boundaries = [e for e in events if e.type == EventType.WAVE_BOUNDARY_REACHED]
     assert boundaries[0].payload["completed_stories"] == 3
 

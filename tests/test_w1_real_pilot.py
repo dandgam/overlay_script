@@ -141,6 +141,22 @@ async def _drain(bus: EventLoop) -> list[Any]:
     return captured
 
 
+def _record_events(bus: EventLoop) -> list[Any]:
+    """Attach a capture subscriber BEFORE the pilot runs.
+
+    Since NEW-7 the real pilot drains its own bus (``EventLoop.drain``) before
+    returning, so the queue is empty post-run. Capture must therefore subscribe
+    up front and observe events as the production drain dispatches them.
+    """
+    captured: list[Any] = []
+
+    async def _capture(ev: Any) -> None:
+        captured.append(ev)
+
+    bus.on(_capture)
+    return captured
+
+
 async def _run_pilot_and_stop(bus: EventLoop, **kwargs: Any) -> None:
     """Call ``_run_real_pilot`` with sensible defaults, then stop the bus.
 
@@ -407,6 +423,7 @@ async def test_w1_real_pilot_spawns_worker_and_bridges_completed(
     bus = EventLoop()
     budget = BudgetGuard(load_settings().budget, event_loop=bus)
 
+    events = _record_events(bus)
     await _run_real_pilot(
         bus,
         project="proj",
@@ -422,7 +439,7 @@ async def test_w1_real_pilot_spawns_worker_and_bridges_completed(
         settings=load_settings(),
     )
 
-    events = await _drain(bus)
+    await _drain(bus)
     completed = [e for e in events if e.type == EventType.WORKER_COMPLETED]
     assert len(completed) >= 1, f"expected ≥1 WORKER_COMPLETED, got {events!r}"
     # WorkerHandle.mock must be False (real path).
@@ -486,13 +503,14 @@ async def test_w1_real_pilot_emits_wave_boundary(
 
     bus = EventLoop()
     budget = BudgetGuard(load_settings().budget, event_loop=bus)
+    events = _record_events(bus)
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=1, max_stories=1,
         max_spend_usd=50.0, budget=budget, state_db=None, session_id=None,
         models=ModelConfig(), options={}, settings=load_settings(),
     )
 
-    events = await _drain(bus)
+    await _drain(bus)
     boundaries = [e for e in events if e.type == EventType.WAVE_BOUNDARY_REACHED]
     assert len(boundaries) == 1
     assert boundaries[0].payload.get("wave") == "w"
@@ -680,13 +698,14 @@ async def test_w1_max_spend_usd_emits_budget_threshold_hit(
 
     bus = EventLoop()
     budget = BudgetGuard(load_settings().budget, event_loop=bus)
+    events = _record_events(bus)
     await _run_real_pilot(
         bus, project="proj", wave="w", max_parallel=1, max_stories=10,
         max_spend_usd=1.0, budget=budget, state_db=None, session_id=None,
         models=ModelConfig(), options={}, settings=load_settings(),
     )
 
-    events = await _drain(bus)
+    await _drain(bus)
     halts = [e for e in events if e.type == EventType.BUDGET_THRESHOLD_HIT]
     assert any(
         e.payload.get("reason") == "max_spend_usd_cap" for e in halts

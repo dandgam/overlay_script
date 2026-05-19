@@ -193,6 +193,30 @@ class EventLoop:
                 await cb(event)
         return event
 
+    async def drain(
+        self, *, max_events: int = 1000, idle_timeout: float = 0.05
+    ) -> list[Event]:
+        """Dispatch every queued event (and cascades they emit) until empty.
+
+        Returns the events dispatched, in FIFO order. Used by the real-pilot
+        body before ``real_pilot_done``: in real mode nothing else calls
+        :meth:`dispatch_one`, so without an explicit drain the
+        ``WORKER_COMPLETED`` → ``CODE_REVIEW_VERDICT`` → merge-to-integration
+        subscriber chain never runs and ``integration/<wave>`` is silently
+        never created (validation-replay finding NEW-7).
+
+        ``max_events`` bounds a runaway cascade (a subscriber re-emitting its
+        own trigger). On hitting the cap the drain stops — the queue may
+        still hold events, but the loop will not spin forever.
+        """
+        dispatched: list[Event] = []
+        while len(dispatched) < max_events:
+            event = await self.dispatch_one(timeout=idle_timeout)
+            if event is None:
+                break
+            dispatched.append(event)
+        return dispatched
+
     # ── single-shot correlation futures (W5 — bot ↔ intent-router bridge) ────
 
     def subscribe_one_correlation(self, corr_id: str) -> asyncio.Future[Event]:

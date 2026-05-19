@@ -1415,6 +1415,25 @@ async def _run_real_pilot_body(
         completed_stories=len(succeeded),
     )
 
+    # NEW-7 — verdict→integration pipeline. In real mode nothing else drains
+    # the bus, so the WORKER_COMPLETED → CODE_REVIEW_VERDICT →
+    # merge_to_integration subscriber chain never ran: workers committed to
+    # feature/<id> but integration/<wave> was never created (validation-replay
+    # finding NEW-7 — root cause variant (b): events were emitted onto the
+    # queue, the bus never processed them before the pilot loop returned).
+    #
+    # Drain #1 processes the queued WORKER_COMPLETED / WAVE_BOUNDARY events
+    # (and their cascades) through the registered subscribers. The post-worker
+    # reconcile then enforces the spec invariant: any succeeded story with
+    # commits past base_sha that the merge gate failed to verdict receives a
+    # synthetic approve. Drain #2 processes those synthetic verdicts so the
+    # ff-merge actually lands before ``real_pilot_done``.
+    dispatched = await bus.drain()
+    await _reconcile_success_verdicts(
+        bus, succeeded=succeeded, handles=spawned_handles, dispatched=dispatched
+    )
+    await bus.drain()
+
     # P1-5 — persist a fresh project_memory snapshot so the next pilot of the
     # same project boots with primed BudgetGuard windows (E7 prime_from_memory)
     # instead of an empty deque. Failure must not abort the pilot — log and
@@ -1710,6 +1729,72 @@ async def _count_new_commits(worktree: str, base_sha: str) -> int:
         return int(stdout.decode(errors="replace").strip())
     except ValueError:
         return 0
+
+
+async def _reconcile_success_verdicts(
+    bus: EventLoop,
+    *,
+    succeeded: list[str],
+    handles: list[WorkerHandle],
+    dispatched: list[Event],
+) -> list[str]:
+    """NEW-7 — emit a synthetic ``CODE_REVIEW_VERDICT`` for stranded successes.
+
+    Invariant (spec_pilot_findings_closure_v3 §1 #1): any story with a
+    ``worker_completed status=success`` AND ≥1 commit on ``feature/<id>``
+    past ``base_sha`` MUST receive a ``CODE_REVIEW_VERDICT`` before the pilot
+    loop ends — otherwise ``merge_to_integration_subscriber`` never fires and
+    the work is silently stranded on the feature branch.
+
+    ``dispatched`` is the event list from the post-worker :meth:`EventLoop.drain`
+    — when the merge-gate ``code_review_subscriber`` already surfaced a verdict
+    (any verdict, including ``reject``) the story is skipped: a real review
+    decision must not be overridden by a synthetic approve. Reconcile only
+    rescues the case where NO verdict surfaced at all (merge-gate worker error
+    + runner-log fallback miss — root cause variant (a)/(b)).
+
+    Returns the story_ids that received a synthetic verdict.
+    """
+    verdict_seen = {
+        str((e.payload or {}).get("story_id") or "")
+        for e in dispatched
+        if e.type == EventType.CODE_REVIEW_VERDICT
+    }
+    handle_by_story = {h.story_id: h for h in handles}
+    reconciled: list[str] = []
+    for sid in succeeded:
+        if sid in verdict_seen:
+            continue
+        handle = handle_by_story.get(sid)
+        if handle is None or not handle.base_sha:
+            continue
+        commits = await _count_new_commits(handle.worktree, handle.base_sha)
+        if commits <= 0:
+            # success + zero commits — left for the S3 INTEGRATION_MERGE_SKIPPED
+            # observability event; not a merge candidate here.
+            continue
+        log.warning(
+            "integration_reconcile_synthetic_verdict",
+            story_id=sid,
+            commits=commits,
+            note="no merge-gate verdict surfaced — emitting synthetic approve",
+        )
+        await bus.emit(
+            EventType.CODE_REVIEW_VERDICT,
+            story_id=sid,
+            verdict="approve",
+            source="success_path_reconcile",
+            commits=commits,
+            summary=(
+                f"post-worker reconcile: {commits} commit(s) on feature/{sid} "
+                "past base_sha, no merge-gate verdict surfaced — synthetic "
+                "approve to recover the work (NEW-7)"
+            ),
+            worktree=handle.worktree,
+            review_iteration=1,
+        )
+        reconciled.append(sid)
+    return reconciled
 
 
 # #2 NEW-2 Layer B — how many trailing stdout lines to retain for the runner
