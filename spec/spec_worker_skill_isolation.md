@@ -2,8 +2,9 @@
 name: spec_worker_skill_isolation
 initiative: worker_skill_isolation
 finding: NEW-27
-status: draft
+status: done
 created: 2026-05-20
+completed: 2026-05-20
 ---
 
 # Spec — Worker Skill Isolation (NEW-27)

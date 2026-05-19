@@ -604,17 +604,26 @@ fallback), но merge упал на новом баге.
   использует slash `/bmad-security-review --auto` (тот же латентный баг) →
   см. NEW-27.
 
-- ⬜ **NEW-27 (P1, СТРУКТУРНОЕ) · Тип: 🏗️ Изоляция — воркеры видят skill'ы target-проекта**
-  — OPEN 2026-05-20. NEW-26 выявил структурную причину: worktree-копии создаются ВНУТРИ
-  target-проекта (`<target>/.worktrees/wt-*`), поэтому `claude -p` любого воркера,
-  поднимаясь по дереву каталогов в поисках slash-команд, доходит до
-  `<target>/.claude/skills/` и резолвит **чужие** skill'ы. Нарушение принципа «Virgil
-  использует исключительно свои embedded-skill'ы». Ещё уязвимы: security-review-спавн
-  (slash `/bmad-security-review --auto`), вложенные `/skill` внутри тел embedded-skill'ов,
-  `~/.claude/skills/` в isolated_home overlay (копия хостового home). **Fix-направление:**
-  выносить worktree-копии НАРУЖУ target-проекта (`/tmp/virgil-worktrees/...` или сосед) —
-  тогда «подъём вверх» не достигает чужих `.claude/`; + перевод security-review на
-  directive-prompt; + чистый isolated_home. Spec — `spec/spec_worker_skill_isolation.md`.
+- ✅ **NEW-27 (P1, СТРУКТУРНОЕ) · Тип: 🏗️ Изоляция — воркеры видели skill'ы target-проекта**
+  — DONE 2026-05-20 (S1-S4), validated replay 1.5. NEW-26 выявил структурную причину:
+  worktree-копии создавались ВНУТРИ target-проекта (`<target>/.worktrees/wt-*`), поэтому
+  `claude -p` любого воркера, поднимаясь по дереву каталогов в поисках slash-команд,
+  доходил до `<target>/.claude/skills/` и резолвил **чужие** skill'ы. Spec —
+  `spec/spec_worker_skill_isolation.md`. Закрыто 4 сессиями:
+  - **S1** (`0f60773`) — `worktree_root()` возвращает корень ВНЕ дерева проекта:
+    `/var/tmp/virgil-worktrees/<target>` (нет `.claude`-предка), env-override
+    `ORCHESTRATOR_WORKTREE_ROOT`. 3 хардкод-сайта переведены на helper. Мёртвый
+    config-флаг `worktree_layout` удалён. +4 tests.
+  - **S2** (`5233c4d`) — security-review-спавн с slash `/bmad-security-review --auto` на
+    `SECURITY_REVIEW_DIRECTIVE` (headless 4-hunter brief, `VERDICT: APPROVE|MERGE WITH
+    FIXES|BLOCK`). +4 tests.
+  - **S3** (`0732fd2`) — `_create_isolated_home` стрипает `~/.claude/skills/` из overlay
+    (пустой placeholder) — чужой user-level skill оператора больше не виден воркеру.
+    +2 tests.
+  - **S4** — replay 1.5 с worktree в `/var/tmp/virgil-worktrees/Antares/wt-1.5`:
+    review дал `VERDICT: request_changes` (реальный, не fallback), **0** упоминаний
+    `bmad-code-review`/`Antares/.claude`/`Unknown command` в review jsonl — ноль
+    skill-резолва. Tests 2124 → 2134.
 
 ---
 
