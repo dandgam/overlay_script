@@ -34,14 +34,6 @@
 
 ### Pending
 
-- **id:** S2
-  **title:** NEW-14 pre-commit env в recovery path + NEW-15 code_review error handling
-  **surface:** backend-python
-  **spec_section:** §2 (NEW-14), §3 (NEW-15)
-  **acceptance:** stage5 recovery коммитит в config-less worktree без ошибки; code_review verdict=error не валит merge-gate безусловно, fallback-verdict доезжает до итогового решения. +8 tests (NEW-14 ×3 + NEW-15 ×5), каждый тест воспроизводит конкретный code path (правило v6 §0).
-  **depends_on:** S1
-  **destructive_actions:** []
-
 - **id:** S3
   **title:** NEW-16 succeeded-метрика + NEW-17 silent worker exit + NEW-18 status parser
   **surface:** backend-python
@@ -52,17 +44,24 @@
 
 ### Current
 
-- **id:** S1
-  **title:** NEW-19 replay-from-worktree режим
+- **id:** S2
+  **title:** NEW-14 pre-commit env в recovery path + NEW-15 code_review error handling
   **surface:** backend-python
-  **spec_section:** §1
-  **acceptance:** `replay --worktree wt-1.4 --story 1.4` прогоняет хвост pipeline (stage5→build-check→merge-gate→reconcile→merge) за секунды, ноль вызовов worker-dev. EventType `REPLAY_MODE_STARTED`, лог `replay_mode_active`. +5 tests (3 unit CLI/skip-spawn/detect-commits + 2 integration mock-worktree/dirty+auto-commit-dev).
-  **depends_on:** []
+  **spec_section:** §2 (NEW-14), §3 (NEW-15)
+  **acceptance:** stage5 recovery коммитит в config-less worktree без ошибки; code_review verdict=error не валит merge-gate безусловно, fallback-verdict доезжает до итогового решения. +8 tests (NEW-14 ×3 + NEW-15 ×5), каждый тест воспроизводит конкретный code path (правило v6 §0).
+  **depends_on:** S1
   **destructive_actions:** []
   **retry_count:** 0
 
 ### Completed
-(none)
+
+- **id:** S1
+  **title:** NEW-19 replay-from-worktree режим
+  **surface:** backend-python
+  **spec_section:** §1
+  **completed:** 2026-05-19
+  **commit:** 0772517
+  **result:** CLI `replay --worktree/--story/--integration [--auto-commit-dev]`; модуль `runtime/replay.py` (git-хелперы + prepare_replay_worktree) + `agent.run.run_replay` (хвост pipeline через общий `_wire_pipeline_subscribers`, переиспользуется `_run_real_pilot_body`). EventType #38 `REPLAY_MODE_STARTED`, лог `replay_mode_active`. +5 tests PASS (3 unit: CLI parse / skip-spawn / detect-commits; 2 integration: ready worktree merge / dirty+auto-commit-dev synth). Suite 2078→2083, mypy/ruff clean на changed files.
 
 ## Safety Gates Triggered
 (none)
@@ -78,9 +77,17 @@
   **rationale:** Весь объём — Python в `src/bmad_orchestrator/` (runtime/, cli/, eval/, agent/, bmad_format.py) + pytest. Единственная narrow-поверхность на сессию → не mixed. Delay 120s для консистентности с v5 (сессии 25-45 мин, не token-heavy).
   **impact:** Каждая сессия делегирует workflow backend-python. Delay переопределяется ручной правкой `.claude/scripts/auto-loop-pilot_findings_closure_v6.sh` или re-bootstrap.
 
+- **date:** 2026-05-19 (S1)
+  **session:** S1
+  **decision:** Subscriber-wiring блок (configure_code_review_gate + 13 bus.on) вынесен из `_run_real_pilot_body` в module-level `_wire_pipeline_subscribers(bus, settings, wave)`.
+  **rationale:** spec §1 «не дублировать логику» — replay должен переиспользовать тот же gate-chain, не копировать. Блок самодостаточен (зависит только от bus/settings/wave).
+  **impact:** `_run_real_pilot_body` и `run_replay` регистрируют идентичные subscriber'ы. `run_replay` принимает `wire_subscribers=False` для тестов со stub-цепочкой.
+
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 3 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure_v6, runtime=loop_wrapper, delay=120s, auto_merge=false. Backup branch backup/pilot_findings_closure_v6-pre-2026-05-19, integration branch integration/pilot_findings_closure_v6.
+
+[2026-05-19 UTC] S1 done, runtime=loop_wrapper — wrapper handles next iteration. NEW-19 replay-from-worktree closed: commit 0772517 on integration/pilot_findings_closure_v6. New module runtime/replay.py + agent.run.run_replay + CLI `replay` command + EventType #38 REPLAY_MODE_STARTED. +5 tests, suite 2078→2083, mypy/ruff clean. S2 promoted to Current.
 
 ## Final Report
 
