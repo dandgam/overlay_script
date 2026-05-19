@@ -37,26 +37,26 @@
 
 ### Current
 
-- **id:** S4
-  **title:** NEW-5 dirty worktree pre-spawn + NEW-8 clean shutdown + finalize
-  **surface:** backend-python
-  **spec_section:** 147-191
-  **depends_on:** [S3]
-  **acceptance:**
-    - dirty reused worktree → auto-clean (default) или WORKER_HALT_PRESPAWN (safe-режим).
-    - run_orchestrator завершается сразу после real_pilot_done (no hang), shutdown timeout guard.
-    - methodology-virgil §5 обновлён (NEW-1/3/5/6/7/8 → DONE) в финальном commit'е.
-    - +9 tests, итог ≥2037 PASS, mypy/ruff clean.
-  **safety_gates:**
-    - L3 branch isolation. NEW-5 пишет код с `git reset --hard` в managed worktree — обоснование комментарием у callsite (не prod-destructive для самой сессии).
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 08:30 UTC
-  **workflow:** workflows/backend-python.md
-  **retry_count:** 0
-  **worker_branches:** []
+(none — initiative complete, all 4 sessions executed)
 
 ### Completed
+
+- **id:** S4
+  **title:** NEW-5 dirty worktree pre-spawn + NEW-8 clean shutdown + finalize
+  **completed:** 2026-05-19 08:45 UTC
+  **commit:** 65f701e
+  **files_changed:** 7
+  **tests_passed:** 2038 PASS (+9: 5 в test_dirty_worktree_prespawn.py, 4 в test_orchestrator_clean_shutdown.py)
+  **decisions_made:**
+    - NEW-5 реализован как pre-spawn gate ВНУТРИ `spawn_worker` (worker_spawn.py), а не в `_ensure_git_worktree` — переиспользует существующую `_emit` + `WorkerHaltPrespawnError` + `worker_jsonl_path` машинерию #7-халта и его тест-инфраструктуру. Gate ставится сразу после halt-reason блока, до MCP probe.
+    - `_git_porcelain` возвращает None если путь не git-worktree (git exit≠0) → gate no-op. Это намеренно: mock-worker'ы в тестах спавнятся в plain tmp-dir'ах, gate их не трогает.
+    - Settings.auto_clean_dirty_worktree: bool = True. Env override `BMAD_AUTO_CLEAN_DIRTY_WORKTREE` резолвится в run.py `_resolve_auto_clean_dirty_worktree` (truthy/falsy токены; невалидное значение → лог + fallback на Settings — typo не флипает destructive auto-clean).
+    - run.py round-loop: spawn обёрнут в try/except WorkerHaltPrespawnError → `failed.append` + `continue`. Это и safe-режим NEW-5, и попутно robustness для #7 halt-reason gate (раньше необработанный raise рушил весь pilot loop).
+    - NEW-8: `_shutdown_orchestrator` использует `asyncio.wait(leftover, timeout=30)` (НЕ `wait_for` вокруг gather) — `wait` даёт настоящий hard-timeout: task который глотает CancelledError остаётся в pending, функция возвращается. `wait_for` завис бы вместе с cancel-proof task'ом.
+    - Pre-existing tasks снапшотятся в начале `run_orchestrator` → shutdown кансельит только orchestrator-spawned tasks (`all_tasks - pre_existing - current`), никогда caller TUI/parent (`--watch` path).
+  **deferred_items:**
+    - 3 pre-existing mypy ошибки в НЕзатронутых модулях (main_merge_token.py:40 no-any-return, sandbox.py:528 assignment, phase4_subscribers.py:142 unused-ignore) — baseline до инициативы, вне scope NEW-5/NEW-8. Затронутые файлы (run.py/worker_spawn.py/config.py) mypy-clean; 4 documented run.py baseline-ошибки закрыты в этой сессии (closure-bind вместо partial(fn,bus=bus); list(story_filter)).
+    - test_phase4_session_start 2 теста: их `fake_proc` MagicMock дополнен `communicate`+`returncode=1` — NEW-5 gate теперь зовёт `git status` через create_subprocess_exec до реального spawn.
 
 - **id:** S3
   **title:** NEW-7 INTEGRATION_MERGE_SKIPPED + subscriber robustness + NEW-6 exit-code regex
@@ -71,8 +71,8 @@
     - NEW-6: `_INNER_EXIT_RE` = `^(?:❯\s*)?(?:Exit code:\s*|EXIT_CODE=)(\d+)$` — альтернация на оба формата, last-match семантика сохранена. Runner-скрипт bmad-auto-dev-runner.sh `EXIT_CODE=` не печатает (формат идёт от claude-p wrapper) — regex без пробелов корректен.
   **deferred_items:**
     - 3 теста инвентаря EventType обновлены под 36 (test_canonical_patches_p6, test_s3_runtime); test_w4 conflict-тест теперь ждёт 2 события (skipped+human_query) — намеренное поведенческое изменение.
-    - mypy: 4 pre-existing ошибки в run.py (lines ~1021/1031/1040/1090, orphan arg-type + bus kwarg) — baseline, не регрессия, чистка в S4 finalize.
-    - methodology-virgil §5 (NEW-* → DONE) — финальный commit S4.
+    - mypy: 4 pre-existing ошибки в run.py — закрыты в S4 finalize.
+    - methodology-virgil §5 (NEW-* → DONE) — закрыто в S4 finalize.
 
 - **id:** S2
   **title:** NEW-7 диагностика + reconcile + bus drain
@@ -88,8 +88,8 @@
     - INTEGRATION_MERGE_SKIPPED (EventType #36) для success+no-commits — S3. ✅ закрыто в S3.
     - merge_to_integration_subscriber worktree-resolve из registry при пустом payload — S3. ✅ закрыто в S3.
     - Auto-split stories (synthetic WORKER_COMPLETED без WorkerHandle) reconcile не покрывает — они получают verdict через code_review_subscriber на drain'е; отдельная защита не нужна, зафиксировано.
-    - test_w1 line ~736 (`max_spend_usd_default_50`) теперь проверяет halt по пустому списку (vacuous pass) — косметика, не регрессия, можно усилить в S4.
-    - mypy: 4 pre-existing ошибки в run.py (orphan arg-type + bus kwarg) — baseline, чистка в S4 finalize.
+    - test_w1 line ~736 (`max_spend_usd_default_50`) теперь проверяет halt по пустому списку (vacuous pass) — косметика, не регрессия.
+    - mypy: 4 pre-existing ошибки в run.py — закрыты в S4 finalize.
 
 - **id:** S1
   **title:** NEW-1-completion (env threading) + NEW-3-completion (sprint-status resolver)
@@ -102,51 +102,86 @@
     - NEW-3 root cause = вариант (a) epic-block scoping: mark-done loop читал raw YAML и понимал только legacy `epics:` nested layout; на BMad-flat `development_status:` layout (реальный Antares 1a) snap["epics"] пуст → resolve_sprint_status_key вообще не вызывался. Сам resolver исправен — v2 fix 729650f чинил недостижимую функцию.
     - Fix NEW-3 — новый mark_sprint_status_done в bmad_format.py, диспатчит по layout (legacy nested + BMad flat), мутирует in-place с сохранением формата файла.
   **deferred_items:**
-    - mypy: 4 pre-existing ошибки в run.py (lines ~1031/1040/1090, _detect_orphan_stories arg-type + bus kwarg) — baseline до S1, не регрессия. Можно почистить в S4 finalize.
+    - mypy: 4 pre-existing ошибки в run.py — закрыты в S4 finalize.
     - mock-pilot mark-done loop (run.py ~644) оставлен на legacy-only — mock fixtures всегда legacy format, out of scope NEW-3.
 
 ## Safety Gates Triggered
 (none)
 
 ## Blockers / Pauses
-(none)
+
+- **date:** 2026-05-19 08:45 UTC
+  **session:** S4
+  **type:** manual_merge_pending
+  **detail:** initiative complete on integration/pilot_findings_closure_v3 (S1..S4, all 6 findings closed). Auto merge=false — user must merge manually:
+    git checkout main && git merge --no-ff integration/pilot_findings_closure_v3 -m "merge pilot_findings_closure_v3 S1..S4"
+  **resolution:** PENDING (user action)
 
 ## Decisions Log
 
 - **date:** 2026-05-19
   **session:** bootstrap
   **decision:** Все 4 сессии surface=backend-python.
-  **rationale:** Вся работа — Python-код в src/bmad_orchestrator/ (agent/run.py, runtime/*). Нет Rust/UI/destructive-infra/removal-only. backend-python — единственный подходящий narrow surface для Python-бэкенда.
+  **rationale:** Вся работа — Python-код в src/bmad_orchestrator/ (agent/run.py, runtime/*). Нет Rust/UI/destructive-infra/removal-only.
   **impact:** Все сессии используют workflows/backend-python.md.
 
 - **date:** 2026-05-19
   **session:** S1
   **decision:** NEW-3 чинится не в resolve_sprint_status_key, а добавлением mark_sprint_status_done — диспатчера по layout sprint-status.
-  **rationale:** Диагностика показала: resolver исправен, ломался уровень выше — mark-done loop не понимал BMad-flat layout. Чинить resolver было бы лечением симптома.
-  **impact:** S3 (NEW-7) — при диагностике verdict→integration учитывать что mark-done теперь корректно обновляет sprint-status; resume-сценарии больше не re-spawn'ят done-stories.
+  **rationale:** Диагностика показала: resolver исправен, ломался уровень выше — mark-done loop не понимал BMad-flat layout.
+  **impact:** S3 (NEW-7) — mark-done теперь корректно обновляет sprint-status; resume больше не re-spawn'ит done-stories.
 
 - **date:** 2026-05-19
   **session:** S2
-  **decision:** NEW-7 root cause — отсутствие consumer'а шины в real-режиме, а не race verdict-эмиссии. Fix = explicit `EventLoop.drain()` в `_run_real_pilot_body` + reconcile-fallback, а не патч verdict_fallback.py.
-  **rationale:** `bus.emit` лишь кладёт event в `asyncio.Queue`; subscriber'ы отрабатывают только через `dispatch_one`. В проде `_run_real_pilot_body` ни разу его не вызывал → ВСЯ W4-цепочка (включая merge_to_integration) была недостижима. verdict-fallback (4ac3e56) был корректен, но за мёртвым consumer'ом. Это объясняет почему «Stage 7 проходит, log есть, а merge нет».
-  **impact:** S3 — INTEGRATION_MERGE_SKIPPED эмитится внутри той же drain-цепочки, теперь она реально крутится. S4 — NEW-8 clean shutdown должен дренировать/останавливать шину (`bus.stop()` отменяет backstop) после `real_pilot_done`; drain уже отрабатывает до него. Поведенческое изменение: build_check/deletion_safety/code_review-гейты впервые реально срабатывают в real-пилоте — это и есть намеренная цель NEW-7.
+  **decision:** NEW-7 root cause — отсутствие consumer'а шины в real-режиме. Fix = explicit `EventLoop.drain()` в `_run_real_pilot_body` + reconcile-fallback.
+  **rationale:** `bus.emit` лишь кладёт event в `asyncio.Queue`; subscriber'ы отрабатывают только через `dispatch_one`. В проде `_run_real_pilot_body` ни разу его не вызывал → ВСЯ W4-цепочка была недостижима.
+  **impact:** S3/S4 — drain-цепочка реально крутится; NEW-8 shutdown дренирует/останавливает шину после real_pilot_done.
 
 - **date:** 2026-05-19
   **session:** S3
   **decision:** INTEGRATION_MERGE_SKIPPED эмитится в трёх точках с разными reason; verdict_missing добавлен для success-story без WorkerHandle/base_sha.
-  **rationale:** Спека называла reason no_commits/verdict_missing/ff_conflict. no_commits и ff_conflict очевидны; verdict_missing нужен для случая когда reconcile не может проверить commits (нет handle/base_sha) — раньше тихий continue, теперь видимый сигнал. Это покрывает auto-split synthetic-success без WorkerHandle.
-  **impact:** S4 — NEW-8 shutdown не трогает эту цепочку. Поведенческое: test_w4 conflict-тест и 2 EventType-инвентаря обновлены под 36; будущие сессии при добавлении EventType должны бампать те же 3 теста.
+  **rationale:** verdict_missing нужен для случая когда reconcile не может проверить commits — раньше тихий continue, теперь видимый сигнал. Покрывает auto-split synthetic-success без WorkerHandle.
+  **impact:** S4 — NEW-8 shutdown не трогает эту цепочку.
+
+- **date:** 2026-05-19
+  **session:** S4
+  **decision:** NEW-5 dirty-worktree gate помещён в `spawn_worker`, а НЕ в `_ensure_git_worktree`; safe-режим raise'ит WorkerHaltPrespawnError, перехваченный в run.py round-loop как failed+continue.
+  **rationale:** spawn_worker уже владеет _emit/WorkerHaltPrespawnError/worker_jsonl_path машинерией #7-халта — переиспользование вместо дублирования. try/except в round-loop попутно закрывает дыру: необработанный halt-prespawn (включая #7) раньше рушил весь pilot loop.
+  **impact:** Будущий production pilot — single dirty/halt story халтит чисто, не убивая остальные. NEW-5 safe-режим (`BMAD_AUTO_CLEAN_DIRTY_WORKTREE=0`) полезен когда оператор хочет вручную разобрать residue.
+
+- **date:** 2026-05-19
+  **session:** S4
+  **decision:** NEW-8 shutdown использует `asyncio.wait(timeout=)` вместо `asyncio.wait_for` вокруг gather.
+  **rationale:** `wait_for` при timeout кансельит inner future и ЖДЁТ завершения отмены — task, глотающий CancelledError, завесил бы и сам `wait_for`. `asyncio.wait` возвращает done/pending строго по таймауту, pending-task просто остаётся (process exit его уберёт). Это настоящий hard-timeout.
+  **impact:** Будущие shutdown-related правки — не возвращаться к wait_for вокруг неотменяемых task'ов.
 
 ## Journal
 
 [2026-05-19 bootstrap] S0 bootstrap: tracker + backup/integration branches created, 4 sessions planned, runtime=loop_wrapper delay=120s, auto-merge=false
-[2026-05-19 08:03 UTC] S1 execution: NEW-1 — settings прокинут в 3 pilot-функции (required kw-only), убраны load_settings() из pilot-chain; ~25 test-callsite'ов обновлены. NEW-3 — диагностика: mark-done loop не понимал BMad-flat layout; добавлен mark_sprint_status_done. +9 tests, 2018 PASS, ruff clean. commit 80a15d2.
+[2026-05-19 08:03 UTC] S1 execution: NEW-1 — settings прокинут в 3 pilot-функции (required kw-only). NEW-3 — добавлен mark_sprint_status_done (диспатч по layout). +9 tests, 2018 PASS, ruff clean. commit 80a15d2.
 [2026-05-19 08:03 UTC] S1 done, runtime=loop_wrapper — wrapper handles next iteration. S2 promoted to Current.
-[2026-05-19 08:18 UTC] S2 execution: NEW-7 диагностика — root cause = нет consumer'а шины в real-режиме (events эмитятся, dispatch_one не зовётся → W4-цепочка мёртвая). Fix: EventLoop.drain() + _reconcile_success_verdicts; _run_real_pilot_body делает drain→reconcile→drain перед real_pilot_done. +5 tests; w1/embed_phase45 тесты переведены на pre-run recorder. 2023 PASS, ruff clean, mypy 4 baseline. commit db48b2c.
+[2026-05-19 08:18 UTC] S2 execution: NEW-7 диагностика — root cause = нет consumer'а шины. Fix: EventLoop.drain() + _reconcile_success_verdicts. +5 tests, 2023 PASS, ruff clean. commit db48b2c.
 [2026-05-19 08:18 UTC] S2 done, runtime=loop_wrapper — wrapper handles next iteration. S3 promoted to Current.
-[2026-05-19 08:30 UTC] S3 execution: NEW-7 observability — EventType #36 INTEGRATION_MERGE_SKIPPED (count 35→36), эмитится в reconcile (no_commits/verdict_missing) и merge subscriber (ff_conflict). merge_to_integration_subscriber резолвит worktree из registry при пустом payload. NEW-6 — _INNER_EXIT_RE ловит оба формата (Exit code: N + EXIT_CODE=N). +6 tests; 3 EventType-инвентарь-теста обновлены под 36. 2029 PASS, ruff clean, mypy 4 baseline. commit 1a80fa1.
+[2026-05-19 08:30 UTC] S3 execution: NEW-7 observability — EventType #36 INTEGRATION_MERGE_SKIPPED; merge subscriber резолвит worktree из registry. NEW-6 — _INNER_EXIT_RE ловит оба формата. +6 tests, 2029 PASS, ruff clean. commit 1a80fa1.
 [2026-05-19 08:30 UTC] S3 done, runtime=loop_wrapper — wrapper handles next iteration. S4 promoted to Current.
+[2026-05-19 08:45 UTC] S4 execution: NEW-5 — spawn_worker pre-spawn dirty-worktree gate (auto-clean / WORKER_HALT_PRESPAWN), Settings-поле + BMAD_AUTO_CLEAN_DIRTY_WORKTREE env, run.py ловит halt. NEW-8 — _shutdown_orchestrator (bus.stop + cancel orchestrator tasks + asyncio.wait 30s hard-timeout). Finalize: 4 baseline mypy в run.py убраны, methodology-virgil §5 → NEW-* DONE. +9 tests, 2038 PASS, ruff clean, mypy clean (затронутые файлы). commit 65f701e.
+[2026-05-19 08:45 UTC] S4 done, runtime=loop_wrapper — initiative complete. Auto merge=false → manual_merge_pending, no further wakes.
 
 ## Final Report (populated on last session completion)
 
-(empty — pending S4 close)
+Initiative: Pilot Findings Closure v3 (Antares 1a validation-replay)
+Spec: spec/spec_pilot_findings_closure_v3.md
+Started: 2026-05-19 (bootstrap)
+Completed: 2026-05-19 08:45 UTC
+Sessions: 4 planned, 4 executed, 0 buffered
+Safety gate trips: 0
+Human pauses: 0
+Integration branch: integration/pilot_findings_closure_v3
+Commits on integration (vs main): 80a15d2 (S1), db48b2c (S2), 1a80fa1 (S3), 65f701e (S4) + 4 tracker commits
+Diff vs main: 28 files changed, 1943 insertions(+), 105 deletions(-)
+Tests: 2009 → 2038 PASS (+29 across S1..S4); ruff clean; mypy clean on touched files (run.py/worker_spawn.py/config.py)
+Findings closed: NEW-1-completion, NEW-3-completion, NEW-5, NEW-6, NEW-7, NEW-8 (6/6)
+EventType count: 35 → 36 (+INTEGRATION_MERGE_SKIPPED)
+Recommendation: MERGE TO MAIN. Все 6 находок validation-replay закрыты, suite зелёный. Pre-existing mypy в 3 несвязанных модулях (main_merge_token/sandbox/phase4_subscribers) — baseline до инициативы, не блокер.
+Merge hint: git checkout main && git merge --no-ff integration/pilot_findings_closure_v3 -m "merge pilot_findings_closure_v3 S1..S4"
+Post-merge: повторный validation-replay Antares 1a — проверить spawned=3 succeeded=3 И integration/wave-1a создана. Только после этого Phase 4 #10 production pilot разблокирован.
