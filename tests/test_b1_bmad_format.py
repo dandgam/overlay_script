@@ -136,19 +136,23 @@ def test_parse_bmad_bare_flat_root() -> None:
 def test_parse_unknown_status_falls_back_to_backlog(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Unknown enum value → ``backlog`` + structured WARNING."""
+    """Unknown enum value → ``backlog`` + structured WARNING.
+
+    NEW-18 — ``DONE`` (capitalised) is now recognised case-insensitively;
+    only a genuinely novel token (``wibbling``) falls back to ``backlog``.
+    """
     data = {
         "development_status": {
             "epic-5": "done",
             "5-1-novel-status": "wibbling",
-            "5-2-something": "DONE",  # case-sensitive — also unknown
+            "5-2-something": "DONE",  # NEW-18 — case-insensitive → done
         }
     }
     with caplog.at_level(logging.WARNING, logger="bmad_orchestrator.runtime.bmad_format"):
         result = parse_sprint_status_bmad(data)
     stories = result["epics"]["5"]["stories"]
     assert stories["5.1"] == "backlog"
-    assert stories["5.2"] == "backlog"
+    assert stories["5.2"] == "done"  # NEW-18 — capitalised form recognised
     assert any("unknown_status" in rec.message for rec in caplog.records)
 
 

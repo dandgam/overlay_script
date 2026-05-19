@@ -113,6 +113,7 @@ from bmad_orchestrator.runtime.live_tuning import (
     atomic_write_gates_yaml,
     evaluate_threshold,
 )
+from bmad_orchestrator.runtime.pilot_outcomes import partition_pilot_outcomes
 from bmad_orchestrator.runtime.project_memory import (
     ProjectMemoryError,
     ProjectMemoryInvalidError,
@@ -155,6 +156,7 @@ from bmad_orchestrator.runtime.worker_events import (
 )
 from bmad_orchestrator.runtime.worker_silent_failure import (
     decide_cleanup_recovery,
+    decide_uncommitted_exit,
     decide_worker_status,
     detect_reused_worktree_cleanup_failure,
     parse_inner_exit_code,
@@ -1673,7 +1675,14 @@ async def _run_real_pilot_body(
     await _reconcile_success_verdicts(
         bus, succeeded=succeeded, handles=spawned_handles, dispatched=dispatched
     )
-    await bus.drain()
+    post_drain = await bus.drain()
+
+    # NEW-16 — reclassify worker-completed stories by REAL integration-merge
+    # status. ``succeeded`` above only tracks workers that exited
+    # ``status=success``; it does not prove the work reached integration. The
+    # post-dev pipeline emits INTEGRATION_MERGE_COMPLETED / _SKIPPED — partition
+    # against those so the ``real_pilot_done`` metric is honest (spec §4).
+    pilot_outcomes = partition_pilot_outcomes(succeeded, dispatched + post_drain)
 
     # P1-5 — persist a fresh project_memory snapshot so the next pilot of the
     # same project boots with primed BudgetGuard windows (E7 prime_from_memory)
@@ -1698,8 +1707,14 @@ async def _run_real_pilot_body(
     log.info(
         "real_pilot_done",
         spawned=len(spawned),
-        succeeded=len(succeeded),
-        failed=len(failed),
+        # NEW-16 — `succeeded` now means "merged into integration", not merely
+        # "worker exited success". `worker_succeeded` keeps the old count for
+        # operators who need the pre-merge signal; `no_op` = success-with-zero-
+        # commits; `failed` aggregates spawn failures + stranded (not-merged).
+        succeeded=pilot_outcomes.succeeded_count,
+        worker_succeeded=len(succeeded),
+        no_op=len(pilot_outcomes.no_op),
+        failed=len(failed) + len(pilot_outcomes.failed),
         # Spec #9 — keep legacy `stories` key for backwards-compat with
         # downstream parsers (operators have grep'd the old line for months).
         stories=len(spawned),
@@ -2119,6 +2134,10 @@ async def _tail_and_emit_completion(
     # the terminal event, we can detect the runner's reused-worktree Stage 7
     # cleanup failure (``cannot delete branch ... used by worktree``).
     stdout_tail: list[str] = []
+    # NEW-17 — track whether a stage5 (commit recovery) marker appeared. If the
+    # worker exits silently (no terminal event), a missing commit is only a
+    # silent failure when stage5 never ran.
+    stage5_seen = False
 
     async for ev in tail_jsonl_events(handle.jsonl_path):
         if tracker is not None and budget is not None:
@@ -2138,6 +2157,8 @@ async def _tail_and_emit_completion(
                 # log does not go silent for the full worker lifetime.
                 stage = detect_stage_marker(text)
                 if stage is not None:
+                    if stage == "stage:5":
+                        stage5_seen = True
                     log.info(
                         "worker_stage_progress",
                         story_id=handle.story_id,
@@ -2275,6 +2296,35 @@ async def _tail_and_emit_completion(
                     exit_code=exit_code,
                     base_sha=handle.base_sha,
                 )
+                # NEW-17 — distinguish "worker did nothing" from "worker wrote
+                # files and lost them". The plain worker_silent_failure above
+                # is silent on which it is; if the worktree is dirty and no
+                # stage5 recovery ran, the worker produced work it never
+                # committed — surface that loudly (spec §5).
+                worktree_dirty = await _worktree_has_uncommitted_changes(
+                    handle.worktree
+                )
+                uncommitted = decide_uncommitted_exit(
+                    worktree_dirty=worktree_dirty, stage5_seen=stage5_seen
+                )
+                if uncommitted.emit:
+                    log.warning(
+                        "worker_exit_uncommitted",
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        reason=uncommitted.reason,
+                        note=(
+                            "worker exited with uncommitted changes and no "
+                            "stage5 recovery — work written but never committed"
+                        ),
+                    )
+                    await bus.emit(
+                        EventType.WORKER_EXIT_UNCOMMITTED,
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        jsonl=str(handle.jsonl_path),
+                        reason=uncommitted.reason,
+                    )
                 await bus.emit(
                     EventType.WORKER_HALT_FILE,
                     story_id=handle.story_id,
@@ -2342,6 +2392,28 @@ async def _tail_and_emit_completion(
             )
             return "halted"
     return "halted"
+
+
+async def _worktree_has_uncommitted_changes(worktree: str) -> bool:
+    """NEW-17 — True when ``git status --porcelain`` reports a dirty worktree.
+
+    Returns ``False`` on any git error or missing worktree — a detection helper
+    must never raise into the completion tailer.
+    """
+    if not worktree:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", worktree, "status", "--porcelain",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return False
+    return bool(stdout.decode(errors="replace").strip())
 
 
 def _emit_worker_cost_final(tracker: WorkerCostTracker, story_id: str) -> None:
@@ -4210,6 +4282,17 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
 
     log.info(
         "story_merged",
+        story_id=story_id,
+        feature=feature_branch,
+        integration=integration_branch,
+        sha=merge_sha,
+    )
+    # NEW-16 — positive merge signal. ``partition_pilot_outcomes`` consumes
+    # this to compute the honest ``succeeded`` metric: a worker exiting
+    # ``status=success`` only proves dev work landed on the feature branch,
+    # NOT that it reached integration. Only a story with this event counts.
+    await bus.emit(
+        EventType.INTEGRATION_MERGE_COMPLETED,
         story_id=story_id,
         feature=feature_branch,
         integration=integration_branch,

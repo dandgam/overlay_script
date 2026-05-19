@@ -109,6 +109,55 @@ def decide_cleanup_recovery(commit_count: int) -> CleanupRecoveryDecision:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class UncommittedExitDecision:
+    """Outcome of :func:`decide_uncommitted_exit` (NEW-17).
+
+    * ``emit`` — True when the orchestrator should emit a
+      ``WORKER_EXIT_UNCOMMITTED`` audit event.
+    * ``reason`` — short machine-readable tag for the decision.
+    """
+
+    emit: bool
+    reason: str
+
+
+def decide_uncommitted_exit(
+    *,
+    worktree_dirty: bool,
+    stage5_seen: bool,
+) -> UncommittedExitDecision:
+    """Decide whether a worker exited silently with work uncommitted (NEW-17).
+
+    Background — pilot_findings_closure_v6 spec §5: on real Antares story 1.5
+    the worker exited ``status=success`` with ZERO new commits past base_sha
+    (the orchestrator already flags that as ``worker_silent_failure``). But the
+    worker had *written files* into its worktree — it just never committed
+    them — and no ``stage5`` (commit recovery) marker appeared. The plain
+    ``worker_silent_failure`` event does not distinguish "worker did nothing"
+    from "worker did work and lost it": the latter is strictly worse.
+
+    This pure helper, called only on the zero-commit silent-failure path,
+    decides whether to additionally surface a loud ``WORKER_EXIT_UNCOMMITTED``
+    audit event:
+
+    * ``worktree_dirty`` — ``git status --porcelain`` reports uncommitted
+      changes in the worktree. If clean the worker genuinely produced nothing
+      — the existing ``worker_silent_failure`` event already covers it.
+    * ``stage5_seen`` — a stage5 (commit recovery) marker appeared in the
+      worker's stdout. If stage5 ran, the missing commit is already accounted
+      for by the stage5 recovery path — no extra event.
+
+    Emit only when the worktree is dirty AND stage5 never ran — the exact
+    work-written-but-never-committed shape from §5.
+    """
+    if not worktree_dirty:
+        return UncommittedExitDecision(emit=False, reason="clean_worktree")
+    if stage5_seen:
+        return UncommittedExitDecision(emit=False, reason="stage5_ran")
+    return UncommittedExitDecision(emit=True, reason="uncommitted_no_stage5")
+
+
 def parse_inner_exit_code(stdout_lines: Iterable[str]) -> int | None:
     """Scan tailed stdout lines for the runner's inner exit-code marker.
 
@@ -178,7 +227,9 @@ def decide_worker_status(
 
 __all__ = [
     "CleanupRecoveryDecision",
+    "UncommittedExitDecision",
     "decide_cleanup_recovery",
+    "decide_uncommitted_exit",
     "decide_worker_status",
     "detect_reused_worktree_cleanup_failure",
     "is_reused_worktree_cleanup_line",

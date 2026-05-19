@@ -657,9 +657,11 @@ async def test_w4_merge_subscriber_approve_ff_merge_and_cleanup(
     # Worktrees root preserved.
     assert worktrees_root.exists()
 
-    # No HUMAN_QUERY emitted on the happy path.
+    # Happy path emits exactly one INTEGRATION_MERGE_COMPLETED (NEW-16) and
+    # no HUMAN_QUERY.
     emitted = _collect_emitted(bus)
-    assert emitted == []
+    assert [e.type for e in emitted] == [EventType.INTEGRATION_MERGE_COMPLETED]
+    assert emitted[0].payload["story_id"] == "s1"
 
 
 @pytest.mark.asyncio
@@ -750,7 +752,9 @@ async def test_w4_merge_subscriber_cleanup_failure_does_not_block_merge(
     # Merge must have succeeded (integration advanced).
     assert _git(repo, "rev-parse", "integration/1a") == _git(repo, "rev-parse", "feature/s1")
     # No HUMAN_QUERY emitted — cleanup failure is downgraded to a warn log.
-    assert _collect_emitted(bus) == []
+    # The merge still emits INTEGRATION_MERGE_COMPLETED (NEW-16).
+    emitted = _collect_emitted(bus)
+    assert [e.type for e in emitted] == [EventType.INTEGRATION_MERGE_COMPLETED]
 
 
 # ── 10. Skill invocation literal ─────────────────────────────────────────────

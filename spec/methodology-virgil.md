@@ -432,19 +432,22 @@ Validated частично:
   `SupervisorEngine._is_security_review_error` распознаёт и code_review-маркеры. Под-баг (b):
   fallback-verdict из `code_review_runner_log_fallback` теперь доезжает до итогового verdict
   даже при `quality stage = error`. +5 tests.
-- ⬜ **NEW-16 (P1) · Тип: 🐛 Баг — ложный `succeeded` для no-op story** — 1.5 worker написал
-  код (`.pre-commit-config.yaml`, `.gitleaks.toml`, `ci.yml`, ADR 0005) но **не закоммитил**
-  (uncommitted changes висят в `wt-1.5`), не дошёл до merge gate, нет ни одного merge_gate /
-  `story_merged` события — однако засчитан `succeeded=1`. `succeeded` обязан требовать
-  `story_merged` (или хотя бы непустой коммит на feature-ветке), иначе метрика врёт.
-- ⬜ **NEW-17 (P2) · Тип: 🐛 Баг — 1.5 worker завершился молча без коммита** — для 1.5 нет
-  `pilot_mark_done`, нет `stage5_recovery`, нет `merge_gate` — только `cost_tracking_unavailable`.
-  Worker написал файлы и вышел, не закоммитив. Вероятно тот же pre-commit-config блок
-  (NEW-14), но для 1.5 даже `stage5_recovery_failed` не залогирован — silent failure.
-- ⬜ **NEW-18 (P2) · Тип: 🐛 Баг — `bmad_format.unknown_status` ×4** — парсер статусов историй
-  печатает голый `bmad_format.unknown_status` в stdout (не структурный лог) 4 раза за прогон
-  — не распознаёт Status-поле части историй. Нужен structured warning + диагностика какие
-  именно статусы не парсятся.
+- ✅ **NEW-16 (P1) · Тип: 🐛 Баг — ложный `succeeded` для no-op story** — DONE
+  (pilot_findings_closure_v6 S3). `runtime/pilot_outcomes.partition_pilot_outcomes` пересчитывает
+  worker-completed список по реальным merge-событиям: `INTEGRATION_MERGE_COMPLETED` (новый
+  EventType #40) → `succeeded`; `INTEGRATION_MERGE_SKIPPED` reason=`no_commits` → `no_op`; иначе
+  (или вовсе нет merge-события) → `failed`. `real_pilot_done` репортит честный `succeeded` +
+  `worker_succeeded`/`no_op`. `merge_to_integration_subscriber` эмитит `INTEGRATION_MERGE_COMPLETED`.
+- ✅ **NEW-17 (P2) · Тип: 🐛 Баг — 1.5 worker завершился молча без коммита** — DONE
+  (pilot_findings_closure_v6 S3). На zero-commit silent-failure пути `_tail_and_emit_completion`
+  проверяет dirty worktree (`git status --porcelain`) + отсутствие stage5-маркера через
+  `worker_silent_failure.decide_uncommitted_exit`; при «файлы написаны, не закоммичены, stage5 не
+  было» эмитит loud `WORKER_EXIT_UNCOMMITTED` (новый EventType #41) — отличает «worker ничего не
+  сделал» от «worker сделал работу и потерял её».
+- ✅ **NEW-18 (P2) · Тип: 🐛 Баг — `bmad_format.unknown_status` ×4** — DONE
+  (pilot_findings_closure_v6 S3). `_canonical_status` эмитит structured warning
+  `bmad_format_unknown_status` с полями `story_id`/`raw_status`/`layout`; матчинг статусов
+  case-insensitive (`Done`/`DONE` → `done`); `KNOWN_STATUSES` расширен `drafted`/`approved`.
 - ✅ **NEW-19 (P1) · Тип: ✨ Улучшение — replay-from-worktree режим** — DONE
   `integration/pilot_findings_closure_v6` S1: CLI `bmad-orchestrator replay --worktree <path>
   --story <id> --integration <branch>` прогоняет хвост pipeline (WORKER_COMPLETED →

@@ -159,6 +159,23 @@ class EventType(StrEnum):
     # a CODE_REVIEW_VERDICT(error) — the latter would feed the supervisor
     # circuit breaker as a story escalation.
     CODE_REVIEW_ERROR = "code_review_error"
+    # Initiative pilot_findings_closure_v6 S3 (NEW-16): emitted by
+    # :func:`agent.run.merge_to_integration_subscriber` after a feature branch
+    # is fast-forward-merged into ``integration/<wave>``. Payload: {story_id,
+    # feature, integration, sha}. The positive counterpart of
+    # :data:`INTEGRATION_MERGE_SKIPPED` — :func:`runtime.pilot_outcomes.
+    # partition_pilot_outcomes` uses it to compute the honest ``succeeded``
+    # metric (a worker exiting ``status=success`` only proves dev work landed
+    # on the feature branch, not that it reached integration).
+    INTEGRATION_MERGE_COMPLETED = "integration_merge_completed"
+    # Initiative pilot_findings_closure_v6 S3 (NEW-17): emitted by
+    # ``agent.run._tail_and_emit_completion`` when a worker's JSONL tail ends
+    # WITHOUT a terminal ``worker_completed``/``worker_halt_file`` event, the
+    # worktree still carries uncommitted changes, and no stage5 recovery ran.
+    # Turns a silent worker exit (story 1.5 pilot run #5 — files written, never
+    # committed, no stage5_recovery_failed) into a loud audit signal. Payload:
+    # {story_id, worktree, jsonl, reason}.
+    WORKER_EXIT_UNCOMMITTED = "worker_exit_uncommitted"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
