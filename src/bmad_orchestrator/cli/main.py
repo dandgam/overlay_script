@@ -43,7 +43,7 @@ from bmad_orchestrator.cli.path_validation import (
     safe_resolve_path,
 )
 from bmad_orchestrator.cli.tui import DashboardSnapshot, render_once, run_live
-from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.config import ModelConfig, Settings, load_settings
 from bmad_orchestrator.runtime.multi_run import (
     MultiProjectPlan,
     MultiRunError,
@@ -313,24 +313,104 @@ def _resolve_models(
 def _build_snapshot(
     *, project: str | None = None, wave: str | None = None
 ) -> DashboardSnapshot:
-    """Best-effort dashboard snapshot (S8: minimal; runtime-fed in pilot)."""
+    """Best-effort dashboard snapshot read from live sources.
+
+    Sources, each isolated (broken/missing → empty defaults, no exception):
+      - state.db        → status / wave / project (latest active session) + day spend
+      - sprint-status   → progress + ready_next + done_recent
+      - events.jsonl    → active workers + tail events
+
+    `project` / `wave` arguments override what's read from state.db (used by
+    `status --project X --wave Y` to label the snapshot when no session is
+    active yet).
+    """
+    from bmad_orchestrator.cli.snapshot import (
+        derive_agent_thinking,
+        derive_budget_level,
+        read_active_workers,
+        read_events_tail,
+        read_latest_session,
+        read_session_budget,
+        read_sprint_progress,
+    )
+
     settings = load_settings()
-    return DashboardSnapshot(
+    snap = DashboardSnapshot(
         status="idle",
         wave=wave,
         project=project or settings.target_project.name,
-        progress_done=0,
-        progress_total=0,
-        budget_spent_usd=0.0,
         budget_cap_usd=settings.budget.daily_limit_usd,
-        budget_level="ok",
-        workers=[],
-        ready_next=[],
-        blocked=[],
-        done_recent=[],
         agent_thinking=t("agent.idle"),
-        events_tail=[],
     )
+
+    try:
+        session = read_latest_session(settings.state_db)
+    except Exception:
+        session = None
+    if session is not None:
+        snap.status = session.status
+        snap.wave = wave or session.wave
+        snap.project = project or session.target_project
+        try:
+            snap.budget_spent_usd = read_session_budget(settings.state_db, session.id)
+        except Exception:
+            snap.budget_spent_usd = 0.0
+        snap.budget_level = derive_budget_level(
+            snap.budget_spent_usd, snap.budget_cap_usd
+        )
+
+    # File-based sources (sprint-status, events.jsonl) live under whatever
+    # project the *session* points at, which may not match the env-bound
+    # `settings.target_project`. Resolve through the project registry so
+    # `virgil run --project antares` shows antares' progress even when env
+    # still says odyssey (the active --project-vs-env bug).
+    effective = _resolve_settings_for_project(settings, snap.project)
+
+    try:
+        progress = read_sprint_progress(effective)
+    except Exception:
+        progress = None
+    if progress is not None:
+        snap.progress_done = progress.done
+        snap.progress_total = progress.total
+        snap.ready_next = progress.ready_next
+        snap.done_recent = progress.done_recent
+
+    if snap.wave:
+        try:
+            snap.workers = read_active_workers(effective, snap.wave)
+        except Exception:
+            snap.workers = []
+        try:
+            snap.events_tail = read_events_tail(effective, snap.wave)
+        except Exception:
+            snap.events_tail = []
+
+    snap.agent_thinking = derive_agent_thinking(snap.status, snap.workers)
+    return snap
+
+
+def _resolve_settings_for_project(
+    settings: Settings, project_slug: str | None
+) -> Settings:
+    """Return Settings with target_project pointed at `project_slug`'s path.
+
+    Falls back to the original `settings` when:
+      - `project_slug` is None or matches `settings.target_project.name`
+      - the registry has no entry (graceful degrade — we just read from the
+        env-bound project, which is wrong but doesn't crash).
+    """
+    if not project_slug or project_slug == settings.target_project.name:
+        return settings
+    try:
+        reg_path = registry_path(orchestrator_home=settings.orchestrator_home)
+        reg = load_registry(reg_path)
+    except Exception:
+        return settings
+    entry = reg.projects.get(project_slug)
+    if entry is None:
+        return settings
+    return settings.model_copy(update={"target_project": entry.path})
 
 
 # ── run ──────────────────────────────────────────────────────────────────────
