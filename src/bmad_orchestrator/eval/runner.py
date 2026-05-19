@@ -35,7 +35,10 @@ from bmad_orchestrator.runtime.worker_spawn import spawn_worker, tail_jsonl_even
 
 
 def load_cases(manifest_path: Path) -> list[dict[str, Any]]:
-    """Parse ``cases.yaml`` → list of case dicts. Validates required keys."""
+    """Parse ``cases.yaml`` → list of case dicts. Validates required keys.
+
+    Optional keys (passed through unchanged): ``tags`` (list[str]), ``may_emit``.
+    """
     raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     cases = raw.get("cases", []) if isinstance(raw, dict) else []
     if not isinstance(cases, list):
@@ -44,7 +47,26 @@ def load_cases(manifest_path: Path) -> list[dict[str, Any]]:
         for k in ("id", "level", "story_id", "story_path", "expected"):
             if k not in c:
                 raise ValueError(f"case {c.get('id', '?')} missing required key {k!r}")
+        tags = c.get("tags")
+        if tags is not None and not isinstance(tags, list):
+            raise ValueError(
+                f"case {c.get('id', '?')} 'tags' must be a list of strings, got {type(tags).__name__}"
+            )
     return cases
+
+
+def filter_cases_by_tags(
+    cases: list[dict[str, Any]], tags: list[str] | None
+) -> list[dict[str, Any]]:
+    """Keep cases that have at least one tag in ``tags`` (OR semantics).
+
+    Empty/None ``tags`` → return all cases unchanged. Cases without a ``tags``
+    field never match a non-empty filter.
+    """
+    if not tags:
+        return cases
+    wanted = set(tags)
+    return [c for c in cases if wanted.intersection(set(c.get("tags") or []))]
 
 
 async def _run_one_case(
@@ -135,6 +157,9 @@ async def run_eval_suite(
     case_filter: str | None = None,
     mode: str = "mock",
     repeat: int = 1,
+    cases_dir: Path | None = None,
+    project_root: Path | None = None,
+    tags: list[str] | None = None,
 ) -> tuple[list[CaseResult], AggregateMetrics, dict[str, Any]]:
     """Run every case in ``evals_root/cases.yaml``; aggregate; return results + metrics.
 
@@ -142,6 +167,15 @@ async def run_eval_suite(
         repeat: number of times to run each case. When > 1, pass@k and pass^k
             metrics are computed over all repetitions and included in the extra
             metrics dict returned as the third element of the tuple.
+        cases_dir: when provided, read ``<cases_dir>/cases.yaml`` instead of
+            ``<evals_root>/cases.yaml``. Used by Phase 3 Step B real-mode runs
+            that keep their manifest under ``evals/cases/real/``.
+        project_root: when provided AND ``mode == "real"``, ``ORCHESTRATOR_TARGET_PROJECT``
+            is pinned to this path so workers spawn inside a real BMad target
+            project rather than the per-eval worktree root. In mock mode the
+            arg is ignored.
+        tags: optional OR-filter — keep only cases whose ``tags`` list shares
+            at least one entry with this filter.
 
     Returns:
         (results, aggregate, extra_metrics) where ``extra_metrics`` is empty when
@@ -153,18 +187,27 @@ async def run_eval_suite(
     if repeat < 1:
         raise ValueError(f"repeat must be >= 1, got {repeat}")
 
-    manifest = evals_root / "cases.yaml"
+    manifest = (cases_dir or evals_root) / "cases.yaml"
     cases = load_cases(manifest)
     if case_filter:
         cases = [c for c in cases if c["id"] == case_filter]
         if not cases:
             raise ValueError(f"case_filter={case_filter!r} matched zero cases")
+    if tags:
+        cases = filter_cases_by_tags(cases, tags)
+        if not cases:
+            raise ValueError(f"tags={tags!r} matched zero cases")
 
     # Reset target_project env so worker_jsonl_path lands inside the eval root.
-    # Each case's worktree is its own jsonl namespace.
+    # Each case's worktree is its own jsonl namespace. In real-mode the caller
+    # may override with --project-root so the worker operates on a real BMad
+    # checkout instead of the synthetic worktree.
     saved = os.environ.get("ORCHESTRATOR_TARGET_PROJECT")
     saved_wave = os.environ.get("BMAD_CURRENT_WAVE")
-    os.environ["ORCHESTRATOR_TARGET_PROJECT"] = str(worktree_root)
+    if mode == "real" and project_root is not None:
+        os.environ["ORCHESTRATOR_TARGET_PROJECT"] = str(project_root)
+    else:
+        os.environ["ORCHESTRATOR_TARGET_PROJECT"] = str(worktree_root)
     os.environ["BMAD_CURRENT_WAVE"] = "eval"
     try:
         results: list[CaseResult] = []
@@ -235,6 +278,9 @@ def run_eval_suite_sync(
     case_filter: str | None = None,
     mode: str = "mock",
     repeat: int = 1,
+    cases_dir: Path | None = None,
+    project_root: Path | None = None,
+    tags: list[str] | None = None,
 ) -> tuple[list[CaseResult], AggregateMetrics, dict[str, Any]]:
     return asyncio.run(
         run_eval_suite(
@@ -243,6 +289,9 @@ def run_eval_suite_sync(
             case_filter=case_filter,
             mode=mode,
             repeat=repeat,
+            cases_dir=cases_dir,
+            project_root=project_root,
+            tags=tags,
         )
     )
 

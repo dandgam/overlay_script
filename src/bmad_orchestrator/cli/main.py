@@ -123,6 +123,31 @@ def eval_run(
             "Default: print both pass@k and pass^k when --repeat > 1."
         ),
     ),
+    cases_dir: str | None = typer.Option(
+        None,
+        "--cases-dir",
+        help=(
+            "Directory containing a cases.yaml manifest. Overrides "
+            "--evals-root/cases.yaml. Used by Phase 3 Step B real-mode runs "
+            "(e.g. evals/cases/real/)."
+        ),
+    ),
+    project_root: str | None = typer.Option(
+        None,
+        "--project-root",
+        help=(
+            "Path to a real BMad target project. In --mode real, workers "
+            "spawn inside this project; ignored in mock mode."
+        ),
+    ),
+    tag: list[str] | None = typer.Option(  # noqa: B008 — typer marker, idiomatic
+        None,
+        "--tag",
+        help=(
+            "Filter cases by tag (OR semantics, repeatable). Cases without "
+            "the tag field never match."
+        ),
+    ),
 ) -> None:
     """Run the eval suite, print a table, save JSON report, exit-code = gate."""
     import time as _time
@@ -137,6 +162,19 @@ def eval_run(
     worktree_root = evals_root_path / ".worktrees-eval"
     worktree_root.mkdir(parents=True, exist_ok=True)
 
+    cases_dir_path = Path(cases_dir) if cases_dir else None
+    if cases_dir_path is not None and not cases_dir_path.is_dir():
+        console.print(f"[red]--cases-dir not found: {cases_dir_path}[/red]")
+        raise typer.Exit(2)
+
+    project_root_path = Path(project_root) if project_root else None
+    if project_root_path is not None and not project_root_path.is_dir():
+        console.print(f"[red]--project-root not found: {project_root_path}[/red]")
+        raise typer.Exit(2)
+    if mode == "real" and project_root_path is None:
+        console.print("[red]--project-root is required in --mode real[/red]")
+        raise typer.Exit(2)
+
     try:
         results, aggregate, extra_metrics = run_eval_suite_sync(
             evals_root=evals_root_path,
@@ -144,6 +182,9 @@ def eval_run(
             case_filter=case,
             mode=mode,
             repeat=repeat,
+            cases_dir=cases_dir_path,
+            project_root=project_root_path,
+            tags=list(tag) if tag else None,
         )
     except (ValueError, FileNotFoundError) as exc:
         console.print(f"[red]eval failed: {exc}[/red]")

@@ -626,6 +626,9 @@ async def test_w1_max_spend_usd_halts_pilot(
 ) -> None:
     """Tiny ``max_spend_usd`` → halt before first spawn (reserve > cap)."""
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
+    # S6 (#6 P2) — subscription auto-disable would otherwise skip $-gates.
+    # The W1 cap test asserts on a $-gate firing, so pin auth=API-key.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-w1-cap")
     target = _make_target_with_stories(tmp_path, "s1", "s2", "s3")
     monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(target))
 
@@ -662,6 +665,8 @@ async def test_w1_max_spend_usd_emits_budget_threshold_hit(
 ) -> None:
     """The halt path emits ``BUDGET_THRESHOLD_HIT`` with reason=max_spend_usd_cap."""
     monkeypatch.delenv("BMAD_REQUIRE_SANDBOX", raising=False)
+    # S6 (#6 P2) — see sibling test for rationale.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-w1-emit")
     target = _make_target_with_stories(tmp_path, "s1")
     monkeypatch.setenv("ORCHESTRATOR_TARGET_PROJECT", str(target))
 

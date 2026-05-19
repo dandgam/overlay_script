@@ -47,6 +47,42 @@ class EventType(StrEnum):
     MONTHLY_REVIEW_SCHEDULED = "monthly_review_scheduled"
     VOICE_MESSAGE_RECEIVED = "voice_message_received"
     STORY_SPLIT_TRIGGERED = "story_split_triggered"
+    # Initiative pilot_findings_closure S3 (#3 rycag 2): emitted by
+    # ``runtime/decomposer_subscriber.py`` when a WORKER_HALT_FILE arrives with
+    # ``halt_reason="loc_cap_exceeded"`` and the auto-split decomposer is
+    # invoked. Distinct from STORY_SPLIT_TRIGGERED (heuristic-only); this fires
+    # on the recovery path after Sonnet hit the 300-LOC diff cap.
+    STORY_AUTO_SPLIT = "story_auto_split"
+    # Initiative pilot_findings_closure S4 (#4 R1): emitted by
+    # ``runtime/worker_cancellation.cancel_worker`` after a per-worker
+    # cancellation token is tripped. Payload carries ``worker_id``, ``reason``
+    # and ``cancelled_by`` (supervisor | user | timeout) so the audit trail and
+    # downstream subscribers can attribute kills.
+    WORKER_CANCELLED = "worker_cancelled"
+    # Initiative pilot_findings_closure S5 (#5 R2): emitted by
+    # :func:`runtime.worker_spawn.spawn_worker` when the pre-spawn MCP
+    # readiness probe (``runtime/mcp_readiness.poll_mcp_ready``) reports
+    # one or more required MCP tools as unauthenticated within 30s. Payload
+    # carries ``story_id``, ``missing`` (list[str]), ``elapsed_ms`` and
+    # ``last_error`` so the orchestrator can halt the story instead of
+    # spawning a worker that would die later on ``tool not found``.
+    MCP_NOT_READY = "mcp_not_ready"
+    # Initiative pilot_findings_closure S6 (#6 P2): emitted by
+    # :mod:`runtime.budget_autodetect` the first time a pilot run detects
+    # subscription auth mode (no ANTHROPIC_API_KEY) and auto-skips the
+    # $-budget gates. One emission per run (idempotent). Payload carries
+    # ``reason`` (always ``"subscription_mode"`` for now) so audit consumers
+    # can distinguish auto-disable from the manual ``BMAD_DISABLE_BUDGET=1``
+    # path (which does NOT emit this event).
+    BUDGET_AUTO_DISABLED = "budget_auto_disabled"
+    # Initiative pilot_findings_closure S6 (#7 P2): emitted by
+    # :func:`runtime.worker_spawn.spawn_worker` when a pre-spawn check
+    # detects ``<worktree>/_bmad/auto-dev-state/halt-reason.txt`` from a
+    # prior run. Default behaviour skips spawn and raises
+    # :class:`runtime.worker_spawn.WorkerHaltPrespawnError`. With
+    # ``auto_clear_halt=True`` (e.g. CLI ``--resume``) the file is removed
+    # and the spawn proceeds without emitting this event.
+    WORKER_HALT_PRESPAWN = "worker_halt_prespawn"
     SUB_STORY_STARTED = "sub_story_started"
     SUB_STORY_COMPLETED = "sub_story_completed"
     SUB_STORY_SQUASH_DONE = "sub_story_squash_done"

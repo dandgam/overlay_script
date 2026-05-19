@@ -49,12 +49,28 @@ from bmad_orchestrator.runtime.embedded_skills import (
     ApplyResult,
     apply_embedded_skills,
 )
+from bmad_orchestrator.runtime.mcp_readiness import (
+    DEFAULT_INTERVAL_MS as MCP_READINESS_DEFAULT_INTERVAL_MS,
+)
+from bmad_orchestrator.runtime.mcp_readiness import (
+    DEFAULT_TIMEOUT_S as MCP_READINESS_DEFAULT_TIMEOUT_S,
+)
+from bmad_orchestrator.runtime.mcp_readiness import (
+    ReadinessResult,
+    poll_mcp_ready,
+)
 from bmad_orchestrator.runtime.sandbox import (
     DEFAULT_CGROUP_LIMITS,
     NetworkPolicy,
     NoSandbox,
     Sandbox,
     detect_sandbox,
+)
+from bmad_orchestrator.runtime.worker_cancellation import (
+    CancellationToken,
+    build_worker_id,
+    register_worker,
+    unregister_worker,
 )
 
 log = logging.getLogger(__name__)
@@ -121,6 +137,80 @@ def _build_worker_env(extra: dict[str, str] | None) -> dict[str, str]:
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 
 
+class MCPNotReadyError(RuntimeError):
+    """Pre-spawn MCP readiness probe found unauthenticated required tools.
+
+    Initiative pilot_findings_closure S5 (#5 R2). The orchestrator should catch
+    this and convert it into a halt-before-spawn for the affected story.
+    """
+
+    def __init__(
+        self,
+        *,
+        story_id: str,
+        missing: list[str],
+        elapsed_ms: int,
+        last_error: str | None,
+    ) -> None:
+        self.story_id = story_id
+        self.missing = list(missing)
+        self.elapsed_ms = elapsed_ms
+        self.last_error = last_error
+        joined = ", ".join(self.missing)
+        super().__init__(
+            f"mcp_not_ready story={story_id} missing=[{joined}] "
+            f"elapsed_ms={elapsed_ms} last_error={last_error!r}"
+        )
+
+
+# Initiative pilot_findings_closure S6 (#7 P2) — worktree path of the halt
+# marker written by the BMad auto-dev runner. Mirrors Patch BB orphan-story
+# pre-flight in spirit: a stale halt-reason from a prior run causes silent
+# Stage 0 failures in every spawned worker. The pre-spawn gate refuses to
+# spawn until either the file is cleared manually or ``auto_clear_halt=True``
+# is passed (CLI ``--resume``).
+HALT_REASON_RELPATH = Path("_bmad") / "auto-dev-state" / "halt-reason.txt"
+
+
+class WorkerHaltPrespawnError(RuntimeError):
+    """Pre-spawn gate detected ``halt-reason.txt`` and ``auto_clear_halt`` was False.
+
+    Initiative pilot_findings_closure S6 (#7 P2). Carries the worktree path,
+    the story id, and the first line of the halt reason so the orchestrator
+    can surface an actionable error to the operator.
+    """
+
+    def __init__(
+        self,
+        *,
+        story_id: str,
+        worktree: str,
+        halt_path: str,
+        reason: str,
+    ) -> None:
+        self.story_id = story_id
+        self.worktree = worktree
+        self.halt_path = halt_path
+        self.reason = reason
+        super().__init__(
+            f"worker_halt_prespawn story={story_id} halt_path={halt_path} "
+            f"reason={reason!r} (pass auto_clear_halt=True / CLI --resume to clear)"
+        )
+
+
+def _read_halt_reason(halt_path: Path) -> str:
+    """Read first non-empty line from halt-reason.txt. Tolerant to noise."""
+    try:
+        raw = halt_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:512]
+    return ""
+
+
 @dataclass(slots=True)
 class WorkerHandle:
     worktree: str
@@ -136,6 +226,12 @@ class WorkerHandle:
     base_sha: str | None = None
     isolated_home_path: str | None = None
     cgroup_limits_applied: dict[str, str] | None = None
+    # Initiative pilot_findings_closure S4 (#4 R1): per-worker cancellation
+    # token registered in :mod:`runtime.worker_cancellation`. The supervisor
+    # can flip this token via the ``cancel_worker`` action to kill a stuck
+    # worker without waiting for the orchestrator-wide timeout.
+    worker_id: str | None = None
+    cancellation_token: CancellationToken | None = None
 
 
 # Initiative #1 Task 1.4 — per-worker HOME snapshot.
@@ -452,6 +548,7 @@ async def _wait_and_finalize(
     story_id: str,
     *,
     isolated_home_overlay: Path | None = None,
+    worker_id: str | None = None,
 ) -> None:
     """Wait for subprocess exit; append final worker_completed event.
 
@@ -497,6 +594,8 @@ async def _wait_and_finalize(
         },
     )
     _cleanup_isolated_home(isolated_home_overlay)
+    if worker_id is not None:
+        unregister_worker(worker_id)
 
 
 async def spawn_worker(
@@ -517,6 +616,10 @@ async def spawn_worker(
     base_sha: str | None = None,
     isolated_home: bool = False,
     cgroup_limits: dict[str, str] | None = None,
+    required_mcp_tools: list[str] | None = None,
+    mcp_readiness_timeout_s: int = MCP_READINESS_DEFAULT_TIMEOUT_S,
+    mcp_readiness_interval_ms: int = MCP_READINESS_DEFAULT_INTERVAL_MS,
+    auto_clear_halt: bool = False,
 ) -> WorkerHandle:
     """Spawn a worker. `mock=None` → auto-detect (mock-mode if claude binary absent).
 
@@ -545,6 +648,86 @@ async def spawn_worker(
     wt_path = Path(worktree)
     if not wt_path.exists():
         raise FileNotFoundError(f"worktree path missing: {worktree}")
+
+    # Initiative pilot_findings_closure S6 (#7 P2): halt-reason pre-flight.
+    # Spawning a worker into a worktree that still has the prior run's
+    # halt-reason.txt produces a silent Stage 0 failure (the runner refuses
+    # to start). Detect the marker before any heavier work (MCP probe,
+    # sandbox setup) so the orchestrator can surface a real error or, with
+    # ``auto_clear_halt=True`` (CLI ``--resume``), wipe the marker and
+    # proceed exactly as a fresh spawn would.
+    halt_path = wt_path / HALT_REASON_RELPATH
+    if halt_path.is_file():
+        reason = _read_halt_reason(halt_path)
+        if auto_clear_halt:
+            try:
+                halt_path.unlink()
+            except OSError as exc:
+                log.warning(
+                    "halt_reason_clear_failed path=%s error=%s",
+                    str(halt_path),
+                    str(exc),
+                )
+            else:
+                log.info(
+                    "halt_reason_cleared path=%s story_id=%s reason=%r",
+                    str(halt_path),
+                    story_id,
+                    reason,
+                )
+        else:
+            prespawn_jsonl_path = worker_jsonl_path(worktree)
+            prespawn_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            _emit(
+                prespawn_jsonl_path,
+                {
+                    "event_type": "worker_halt_prespawn",
+                    "worktree": worktree,
+                    "story_id": story_id,
+                    "halt_path": str(halt_path),
+                    "reason": reason,
+                },
+            )
+            raise WorkerHaltPrespawnError(
+                story_id=story_id,
+                worktree=worktree,
+                halt_path=str(halt_path),
+                reason=reason,
+            )
+
+    # Initiative pilot_findings_closure S5 (#5 R2): MCP readiness gate.
+    # When ``required_mcp_tools`` is non-empty, poll ``claude mcp list --json``
+    # for up to ``mcp_readiness_timeout_s`` and refuse to spawn if any tool is
+    # not authenticated. Emit MCP_NOT_READY to the worker JSONL audit log so
+    # downstream subscribers can correlate the halt to a specific story.
+    if required_mcp_tools:
+        readiness: ReadinessResult = await poll_mcp_ready(
+            required_mcp_tools,
+            timeout_s=mcp_readiness_timeout_s,
+            interval_ms=mcp_readiness_interval_ms,
+        )
+        if not readiness.ok:
+            mcp_jsonl_path = worker_jsonl_path(worktree)
+            mcp_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            _emit(
+                mcp_jsonl_path,
+                {
+                    "event_type": "mcp_not_ready",
+                    "worktree": worktree,
+                    "story_id": story_id,
+                    "missing": list(readiness.missing),
+                    "required": list(required_mcp_tools),
+                    "elapsed_ms": readiness.elapsed_ms,
+                    "polls": readiness.polls,
+                    "last_error": readiness.last_error,
+                },
+            )
+            raise MCPNotReadyError(
+                story_id=story_id,
+                missing=list(readiness.missing),
+                elapsed_ms=readiness.elapsed_ms,
+                last_error=readiness.last_error,
+            )
 
     skills_result: ApplyResult | None = None
     if embedded_skills_root is not None:
@@ -634,6 +817,19 @@ async def spawn_worker(
                 "review_iteration": _read_review_iteration(worktree, story_id),
             },
         )
+        mock_worker_id = build_worker_id(story_id=story_id, branch=branch, pid=0)
+        mock_token = register_worker(
+            worker_id=mock_worker_id,
+            story_id=story_id,
+            worktree=worktree,
+            branch=branch,
+            jsonl_path=jsonl_path,
+            process=None,
+        )
+        # Mock workers exit synchronously above, so deregister immediately —
+        # the token stays available on the handle for tests that want to flip
+        # it post-hoc, but the registry no longer points to it.
+        unregister_worker(mock_worker_id)
         return WorkerHandle(
             worktree=worktree,
             story_id=story_id,
@@ -646,6 +842,8 @@ async def spawn_worker(
             real_requested=real_requested,
             sandbox_kind=sandbox_kind,
             base_sha=base_sha,
+            worker_id=mock_worker_id,
+            cancellation_token=mock_token,
         )
 
     # Real-mode subprocess.
@@ -713,6 +911,15 @@ async def spawn_worker(
     )
 
     pid = process.pid
+    worker_id = build_worker_id(story_id=story_id, branch=branch, pid=pid)
+    cancellation_token = register_worker(
+        worker_id=worker_id,
+        story_id=story_id,
+        worktree=worktree,
+        branch=branch,
+        jsonl_path=jsonl_path,
+        process=process,
+    )
 
     _emit(
         jsonl_path,
@@ -745,6 +952,7 @@ async def spawn_worker(
         _wait_and_finalize(
             process, jsonl_path, worktree, story_id,
             isolated_home_overlay=overlay_path,
+            worker_id=worker_id,
         ),
         name=f"worker_wait_{pid}",
     )
@@ -763,6 +971,8 @@ async def spawn_worker(
         base_sha=base_sha,
         isolated_home_path=str(overlay_path) if overlay_path else None,
         cgroup_limits_applied=dict(cgroup_limits) if cgroup_limits else None,
+        worker_id=worker_id,
+        cancellation_token=cancellation_token,
     )
 
 
@@ -814,6 +1024,9 @@ __all__ = [
     "DEFAULT_CGROUP_LIMITS",
     "DEFAULT_MODEL",
     "DEFAULT_SKILL_INVOCATION",
+    "HALT_REASON_RELPATH",
+    "MCPNotReadyError",
+    "WorkerHaltPrespawnError",
     "WorkerHandle",
     "spawn_worker",
     "tail_jsonl_events",

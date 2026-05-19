@@ -75,7 +75,12 @@ from bmad_orchestrator.runtime.auto_split import (
     auto_split_and_execute,
     auto_split_enabled,
 )
+from bmad_orchestrator.runtime.bmad_format import resolve_sprint_status_key
 from bmad_orchestrator.runtime.budget import TokenUsage, usd_cost
+from bmad_orchestrator.runtime.budget_autodetect import (
+    BudgetAutoDisableState,
+    evaluate_budget_disabled,
+)
 from bmad_orchestrator.runtime.build_check import build_check_subscriber
 from bmad_orchestrator.runtime.commit_recovery import recover_pre_merge
 from bmad_orchestrator.runtime.cost_tracker import WorkerCostTracker
@@ -138,6 +143,7 @@ from bmad_orchestrator.runtime.supervisor_subscriber import (
 from bmad_orchestrator.runtime.supervisor_subscriber import (
     make_supervisor_subscriber,
 )
+from bmad_orchestrator.runtime.verdict_fallback import parse_runner_review_log
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
     tail_jsonl_events,
@@ -1017,6 +1023,11 @@ async def _run_real_pilot_body(
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []
+    # Spec #1 + #9 (pilot findings closure 2026-05-19) — track terminal outcome
+    # per spawned story so mark-done only flips successful ones and
+    # ``real_pilot_done`` can break out spawned vs succeeded vs failed counters.
+    succeeded: list[str] = []
+    failed: list[str] = []
     rounds = 0
     max_rounds = 6
 
@@ -1084,6 +1095,11 @@ async def _run_real_pilot_body(
     bus.start_backstop_task()
 
     daily_halt_reached = False
+    # Initiative pilot_findings_closure S6 (#6 P2) — one auto-disable state
+    # per pilot run. evaluate_budget_disabled keeps the BUDGET_AUTO_DISABLED
+    # emission idempotent across spawn rounds and across stories within a
+    # round.
+    budget_autodisable_state = BudgetAutoDisableState()
     while (
         rounds < max_rounds
         and not daily_halt_reached
@@ -1127,10 +1143,13 @@ async def _run_real_pilot_body(
             projected_daily = daily_spent_usd + story_reserve
 
             # Subscription-mode bypass: на Claude subscription нет per-token
-            # billing'а — $ метрика фантомная. BMAD_DISABLE_BUDGET=1 skip'ает
-            # все $$ гейты (cap, daily, story alarm) сохраняя token tracking
-            # для observability. См. feedback_no_anthropic_api.
-            _budget_disabled = os.environ.get("BMAD_DISABLE_BUDGET") == "1"
+            # billing'а — $ метрика фантомная. Initiative pilot_findings_closure
+            # S6 (#6 P2) — теперь авто-детект: отсутствие ANTHROPIC_API_KEY
+            # эквивалентно ручному BMAD_DISABLE_BUDGET=1, но с одноразовым
+            # BUDGET_AUTO_DISABLED event для аудита. Manual flag не event'ится.
+            _budget_disabled = await evaluate_budget_disabled(
+                budget_autodisable_state, bus
+            )
 
             # Local user-supplied hard cap (W1.2 --max-spend-usd).
             if not _budget_disabled and projected_daily > max_spend_usd:
@@ -1273,6 +1292,9 @@ async def _run_real_pilot_body(
                         squashed_sha=squashed_sha,
                     )
                     spawned.append(story["id"])
+                    # Auto-split squash already verified — count as success so
+                    # mark-done flips this story to "done" (Spec #9).
+                    succeeded.append(story["id"])
                     log.info(
                         "auto_split_completed",
                         story_id=story["id"],
@@ -1302,7 +1324,10 @@ async def _run_real_pilot_body(
             spawned.append(story["id"])
 
         if handles:
-            await asyncio.gather(
+            # Spec #9 — bucket each round's worker outcomes so mark-done flips
+            # only verified successes and the post-pilot counter splits
+            # spawned/succeeded/failed.
+            outcomes = await asyncio.gather(
                 *[
                     _tail_and_emit_completion(
                         h, bus, budget=budget, model=worker_model
@@ -1310,12 +1335,42 @@ async def _run_real_pilot_body(
                     for h in handles
                 ]
             )
+            for h, outcome in zip(handles, outcomes, strict=True):
+                if outcome == "completed":
+                    succeeded.append(h.story_id)
+                else:
+                    failed.append(h.story_id)
 
+        # Spec #1 — resolve dotted spawned ids ("1.3") to the kebab keys
+        # actually present in sprint-status ("1-3-fastapi-..."). Without
+        # resolve_sprint_status_key the mark-done lookup misses and resume
+        # re-spawns already-done stories.
         snap = read_sprint_status_yaml()
-        for sid in spawned:
-            for epic_block in (snap.get("epics") or {}).values():
-                if isinstance(epic_block, dict) and sid in (epic_block.get("stories") or {}):
-                    epic_block["stories"][sid] = "done"
+        epics_block = snap.get("epics") or {}
+        for sid in succeeded:
+            for epic_block in epics_block.values():
+                if not isinstance(epic_block, dict):
+                    continue
+                stories = epic_block.get("stories") or {}
+                if not isinstance(stories, dict):
+                    continue
+                resolved = resolve_sprint_status_key(sid, stories.keys())
+                if resolved is None:
+                    continue
+                stories[resolved] = "done"
+                log.info(
+                    "pilot_mark_done",
+                    spawned_id=sid,
+                    resolved_key=resolved,
+                    epic_keys_sample=list(stories.keys())[:3],
+                )
+                break
+            else:
+                log.warning(
+                    "pilot_mark_done_unresolved",
+                    spawned_id=sid,
+                    reason="no matching sprint-status key in any epic block",
+                )
         write_sprint_status_yaml(snap)
         planner.reload()
         rounds += 1
@@ -1334,8 +1389,10 @@ async def _run_real_pilot_body(
         EventType.WAVE_BOUNDARY_REACHED,
         wave=wave,
         spawned=spawned,
+        succeeded=succeeded,
+        failed=failed,
         rounds=rounds,
-        completed_stories=len(spawned),
+        completed_stories=len(succeeded),
     )
 
     # P1-5 — persist a fresh project_memory snapshot so the next pilot of the
@@ -1360,6 +1417,11 @@ async def _run_real_pilot_body(
 
     log.info(
         "real_pilot_done",
+        spawned=len(spawned),
+        succeeded=len(succeeded),
+        failed=len(failed),
+        # Spec #9 — keep legacy `stories` key for backwards-compat with
+        # downstream parsers (operators have grep'd the old line for months).
         stories=len(spawned),
         rounds=rounds,
         daily_spent_usd=daily_spent_usd,
@@ -1636,8 +1698,18 @@ async def _tail_and_emit_completion(
     *,
     budget: BudgetGuard | None = None,
     model: str | None = None,
-) -> None:
+) -> str:
     """Tail a worker's JSONL until terminal event; bridge to bus.
+
+    Returns a terminal-outcome tag for callers that want to bucket workers by
+    success/failure (pilot mark-done #1, real_pilot_done counter split #9):
+
+    * ``"completed"`` — ``worker_completed`` with exit_code 0 AND new commits
+      (or no base_sha to verify, e.g., mock paths).
+    * ``"silent_failure"`` — ``worker_completed`` exit_code 0 but zero new
+      commits on integration branch (caught as halt downstream).
+    * ``"halted"`` — explicit ``worker_halt_file`` event from the worker.
+    * ``"failed"`` — ``worker_completed`` with non-zero exit_code.
 
     The generator returns after seeing ``worker_completed`` or
     ``worker_halt_file``. We re-emit only the success / failure terminal to
@@ -1707,7 +1779,7 @@ async def _tail_and_emit_completion(
                         jsonl=str(handle.jsonl_path),
                         reason="silent_failure_zero_commits",
                     )
-                    return
+                    return "silent_failure"
             await bus.emit(
                 EventType.WORKER_COMPLETED,
                 story_id=handle.story_id,
@@ -1718,7 +1790,7 @@ async def _tail_and_emit_completion(
                 mock=False,
                 review_iteration=int(ev.get("review_iteration", 1) or 1),
             )
-            return
+            return "completed" if exit_code == 0 else "failed"
         if event_type == "worker_halt_file":
             if tracker is not None and budget is not None:
                 if subscription_mode and _tracker_has_no_usage(tracker):
@@ -1734,7 +1806,8 @@ async def _tail_and_emit_completion(
                 worktree=handle.worktree,
                 jsonl=str(handle.jsonl_path),
             )
-            return
+            return "halted"
+    return "halted"
 
 
 def _emit_worker_cost_final(tracker: WorkerCostTracker, story_id: str) -> None:
@@ -3044,6 +3117,27 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         worktree=worktree, story_id=story_id, wave=wave, bus=bus
     )
 
+    # ── S2 (spec_pilot_findings_closure §1 #2) — runner-log fallback.
+    # When the merge-gate spec worker fails to surface a parseable verdict
+    # event (JSONL stream had no `verdict: ...` token), fall back to reading
+    # the bmad-auto-dev runner's own Stage 6 review log from the worktree.
+    # The runner records PASS / NEEDS-FIX / BLOCKED there — re-use that signal
+    # instead of escalating every event-stream miss to a human.
+    verdict_source = "merge_gate_spec"
+    if spec_verdict == "error":
+        fallback = parse_runner_review_log(worktree, story_id)
+        if fallback is not None:
+            fb_verdict, fb_summary = fallback
+            log.info(
+                "code_review_runner_log_fallback",
+                story_id=story_id,
+                worktree=worktree,
+                fallback_verdict=fb_verdict,
+            )
+            spec_verdict = fb_verdict
+            spec_summary = fb_summary
+            verdict_source = "runner_log_fallback"
+
     if spec_verdict != "approve":
         # Spec stage failed — skip quality stage entirely (saves cost).
         log.info(
@@ -3059,6 +3153,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
             worktree=worktree,
             review_iteration=review_iteration,
             gate_stage="spec",
+            source=verdict_source,
         )
         if spec_metrics is not None and cfg is not None and cfg.budget is not None:
             gates_for_tuning = _load_review_gates(cfg)
@@ -3236,6 +3331,7 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         "worktree": worktree,
         "review_jsonl": handle_jsonl_str,
         "review_iteration": review_iteration,
+        "source": verdict_source,
     }
     if gate_reasons:
         emit_payload["gate_reasons"] = gate_reasons

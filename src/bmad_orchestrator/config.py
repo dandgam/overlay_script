@@ -173,6 +173,13 @@ class Settings(BaseSettings):
     # When False (default), only STORY_COMPLETED triggers aggregation via stop_hook_subscriber.
     cost_tracker_debug_mode: bool = False
 
+    # Initiative pilot_findings_closure S5 (#5 R2) — MCP readiness gating.
+    # When non-empty, :func:`runtime.worker_spawn.spawn_worker` polls
+    # ``claude mcp list --json`` for up to 30s and halts the story (emits
+    # ``MCP_NOT_READY``) if any listed tool is not authenticated. Project-wide
+    # baseline; per-story override via story frontmatter ``requires_mcp:`` list.
+    required_mcp_tools: list[str] = Field(default_factory=list)
+
     locale: str = "ru"
 
 

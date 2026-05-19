@@ -25,8 +25,8 @@ import pytest
 from bmad_orchestrator.agent.tools.correct_course import spawn_correct_course_worktree
 from bmad_orchestrator.agent.tools.investigate import (
     RETRY_THRESHOLD,
-    spawn_investigate_worktree,
     should_investigate,
+    spawn_investigate_worktree,
 )
 from bmad_orchestrator.agent.tools.sprint_planning import (
     SprintStatusMissingError,
@@ -35,7 +35,6 @@ from bmad_orchestrator.agent.tools.sprint_planning import (
     spawn_sprint_planning_worktree,
 )
 from bmad_orchestrator.skills_repo import EMBEDDED_SKILL_NAMES
-
 
 SAMPLE_EPICS_MD = """\
 # Wave 1 — Foundations
