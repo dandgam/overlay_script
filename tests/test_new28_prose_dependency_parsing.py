@@ -93,3 +93,38 @@ def test_stray_unresolvable_token_is_dropped() -> None:
     g = build_graph(stories)
     assert g.has_edge("1.3", "1.4")
     assert "9.9" not in g
+
+
+# ── build_graph — cycle tolerance (NEW-28) ──────────────────────────────────
+
+
+def test_cyclic_prose_does_not_raise() -> None:
+    """Inconsistent story prose forming a cycle must be broken, not crash.
+
+    76 real BMad stories cross-reference each other imprecisely; a strict
+    raise-on-cycle would crash every pilot.
+    """
+    import networkx as nx
+
+    stories = [
+        {"id": "a", "depends_on": ["c"]},
+        {"id": "b", "depends_on": ["a"]},
+        {"id": "c", "depends_on": ["b"]},  # a → b → c → a
+    ]
+    g = build_graph(stories)
+    assert nx.is_directed_acyclic_graph(g), "build_graph must return an acyclic graph"
+
+
+def test_cycle_break_prefers_dropping_a_blocks_edge() -> None:
+    """When a cycle has a ``blocks`` edge, that one is dropped first."""
+    # a depends_on b  (edge b->a, kind=depends_on)
+    # b blocks a      (edge b->a already exists) — instead make a real cycle:
+    # a depends_on b (b->a), b depends_on a via 'blocks' on a (a blocks b => a->b)
+    stories = [
+        {"id": "a", "depends_on": ["b"], "blocks": ["b"]},
+        {"id": "b"},
+    ]
+    g = build_graph(stories)
+    # depends_on edge b->a must survive; the blocks edge a->b is the weak one.
+    assert g.has_edge("b", "a")
+    assert not g.has_edge("a", "b")

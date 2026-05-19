@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import networkx as nx
+import structlog
 
 from bmad_orchestrator.agent.tools._common import (
     list_stories,
@@ -26,6 +27,8 @@ from bmad_orchestrator.runtime.bmad_format import (
     normalize_story_id,
     parse_sprint_status_bmad,
 )
+
+log = structlog.get_logger(__name__)
 
 
 def _ensure_sprint_status_via_skill() -> None:
@@ -76,15 +79,49 @@ def build_graph(stories: list[dict[str, Any]]) -> nx.DiGraph:
         for dep in story.get("depends_on") or []:
             resolved = _resolve(str(dep))
             if resolved is not None and resolved != sid:
-                g.add_edge(resolved, sid)
+                g.add_edge(resolved, sid, kind="depends_on")
         for blocked in story.get("blocks") or []:
             resolved = _resolve(str(blocked))
             if resolved is not None and resolved != sid:
-                g.add_edge(sid, resolved)
-    if not nx.is_directed_acyclic_graph(g):
-        cycles = list(nx.simple_cycles(g))
-        raise ValueError(f"cycle in DAG: {cycles!r}")
+                # Do not let a ``blocks`` edge overwrite a ``depends_on`` edge.
+                if not g.has_edge(sid, resolved):
+                    g.add_edge(sid, resolved, kind="blocks")
+
+    # NEW-28 — real BMad story prose is not a guaranteed-acyclic dependency
+    # declaration: 76 Antares stories cross-reference each other in prose and
+    # form cycles (imprecise "Блокирует все Epic N stories"-style statements,
+    # mutual references). Raising would crash every real pilot. Instead break
+    # each cycle by dropping its weakest edge — prefer a ``blocks``-derived
+    # edge (the reverse relation, extracted from broader prose) over a
+    # ``depends_on`` edge (the dependent side states its needs precisely).
+    _break_cycles(g)
     return g
+
+
+def _break_cycles(g: nx.DiGraph) -> None:
+    """Make ``g`` acyclic in place by removing the weakest edge of each cycle.
+
+    Iterates until acyclic. For each cycle, drops a ``blocks``-kind edge if the
+    cycle has one, else any edge. Logs every removal so an operator can see
+    that the source story prose is inconsistent.
+    """
+    guard = 0
+    while not nx.is_directed_acyclic_graph(g):
+        guard += 1
+        if guard > 10_000:  # pathological — bail rather than spin forever
+            raise ValueError("DAG cycle-breaking did not converge")
+        cycle_edges = nx.find_cycle(g)  # list[(u, v)] of one cycle
+        victim = next(
+            (e for e in cycle_edges if g.edges[e[0], e[1]].get("kind") == "blocks"),
+            cycle_edges[0],
+        )
+        log.warning(
+            "dag_cycle_edge_dropped",
+            edge=f"{victim[0]} -> {victim[1]}",
+            kind=g.edges[victim[0], victim[1]].get("kind"),
+            note="inconsistent story prose dependency — edge removed to break cycle",
+        )
+        g.remove_edge(victim[0], victim[1])
 
 
 def filter_wave(

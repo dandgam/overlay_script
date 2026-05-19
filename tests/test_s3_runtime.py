@@ -296,13 +296,18 @@ def test_dag_planner_find_ready_respects_mutex() -> None:
     planner.release(s)
 
 
-def test_dag_build_graph_detects_cycle() -> None:
+def test_dag_build_graph_breaks_cycle() -> None:
+    """NEW-28 — build_graph tolerates cyclic prose: it breaks the cycle rather
+    than raising (76 real BMad stories cross-reference imprecisely; a raise
+    would crash every pilot)."""
+    import networkx as nx
+
     stories = [
         {"id": "a", "depends_on": ["b"], "touches_files": [], "touches_shared": []},
         {"id": "b", "depends_on": ["a"], "touches_files": [], "touches_shared": []},
     ]
-    with pytest.raises(ValueError, match="cycle"):
-        build_graph(stories)
+    g = build_graph(stories)
+    assert nx.is_directed_acyclic_graph(g)
 
 
 def test_dag_ready_stories_skips_mutex_overlap() -> None:
