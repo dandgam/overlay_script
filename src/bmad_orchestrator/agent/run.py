@@ -3426,6 +3426,39 @@ def _extract_verdict_from_event(ev: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
+def _ensure_review_skill_in_worktree(worktree: str) -> None:
+    """NEW-25 — make ``/bmad-code-review`` resolvable to the review spawn.
+
+    The target project's ``.claude/skills/`` is gitignored, so ``git worktree
+    add`` leaves the worktree's ``.claude/skills/`` empty; the ``isolated_home``
+    overlay only carries ``~/.claude/skills/`` which lacks ``bmad-code-review``.
+    Without the skill the inner ``claude -p`` aborts with ``Unknown command:
+    /bmad-code-review`` → ``verdict=error`` every run.
+
+    Copy the orchestrator's embedded ``skills/upstream/bmad-code-review`` into
+    the worktree as a project-level skill (claude resolves slash commands from
+    the CWD upward). Project-agnostic — does not rely on the target machine's
+    ``~/.claude/skills/``. Idempotent: skips if the skill is already present.
+    """
+    # run.py → agent → bmad_orchestrator → src → project root
+    package_root = Path(__file__).parent.parent.parent.parent
+    src_skill = package_root / "skills" / "upstream" / "bmad-code-review"
+    if not src_skill.is_dir():
+        log.warning("review_skill_source_missing", path=str(src_skill))
+        return
+    dest = Path(worktree) / ".claude" / "skills" / "bmad-code-review"
+    if dest.exists():
+        return
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src_skill, dest)
+        log.info(
+            "review_skill_injected", worktree=worktree, skill="bmad-code-review"
+        )
+    except OSError as exc:
+        log.warning("review_skill_inject_failed", worktree=worktree, error=str(exc))
+
+
 async def _spawn_code_review_worker(
     *,
     worktree: str,
@@ -3442,6 +3475,7 @@ async def _spawn_code_review_worker(
     """
     original_wave = os.environ.get("BMAD_CURRENT_WAVE")
     os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__review_{story_id}"
+    _ensure_review_skill_in_worktree(worktree)  # NEW-25
     try:
         handle = await runtime_spawn_worker(
             worktree=worktree,
@@ -3555,6 +3589,7 @@ async def _spawn_merge_gate_spec_worker(
     """Spawn spec-stage review worker (AC coverage + story completeness)."""
     original_wave = os.environ.get("BMAD_CURRENT_WAVE")
     os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__gate_spec_{story_id}"
+    _ensure_review_skill_in_worktree(worktree)  # NEW-25
     try:
         handle = await runtime_spawn_worker(
             worktree=worktree,
@@ -3584,6 +3619,7 @@ async def _spawn_merge_gate_quality_worker(
     """Spawn quality-stage review worker (lints, tests, security, perf)."""
     original_wave = os.environ.get("BMAD_CURRENT_WAVE")
     os.environ["BMAD_CURRENT_WAVE"] = f"{wave}__gate_quality_{story_id}"
+    _ensure_review_skill_in_worktree(worktree)  # NEW-25
     try:
         handle = await runtime_spawn_worker(
             worktree=worktree,

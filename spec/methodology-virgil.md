@@ -561,6 +561,41 @@ fallback), но merge упал на новом баге.
   становятся настоящей страховкой, а не основным путём. +4 tests
   (`test_new24_review_network.py`).
 
+- ✅ **NEW-25 (P1, КОРЕНЬ #2) · Тип: 🐛 Баг — review-спавн: `Unknown command: /bmad-code-review`**
+  — DONE 2026-05-20 (прямой фикс). После NEW-24 (сеть появилась) review-спавн на
+  spec-stage больше не падает `ConnectionRefused`, но `claude -p` отвечает
+  `Unknown command: /bmad-code-review` → review не выполняется → `verdict=error` (спасает
+  fallback). Причина: skill `bmad-code-review` review-спавну недоступен ниоткуда:
+  (1) `<target>/.claude/skills/` gitignored в target-проекте → `git worktree add` его не
+  несёт, worktree `.claude/skills/` пуст; (2) `isolated_home` overlay копирует `~/.claude/`,
+  но в `~/.claude/skills/` есть только `bmad-security-review`, нет `bmad-code-review`. Skill
+  реально есть в Virgil embedded `skills/upstream/bmad-code-review` (+ в
+  `Antares/.claude/skills/`). Все 4 review-спавна используют `/bmad-code-review`
+  (`CODE_REVIEW_SKILL_INVOCATION`/`MERGE_GATE_SPEC_SKILL`/`MERGE_GATE_QUALITY_SKILL`).
+  **Fix-направление:** перед review-спавном инжектить embedded
+  `skills/upstream/bmad-code-review` в `<worktree>/.claude/skills/` (project-level, claude
+  резолвит из CWD) ИЛИ в isolated_home overlay. Project-agnostic — нельзя полагаться на
+  `~/.claude/skills/` target-машины. **Применённый fix:** helper
+  `_ensure_review_skill_in_worktree` (`agent/run.py`) копирует embedded
+  `skills/upstream/bmad-code-review` в `<worktree>/.claude/skills/bmad-code-review` перед
+  3 review-спавнами (code-review/merge-gate spec+quality); идемпотентно; лог
+  `review_skill_injected`. +3 tests (`test_new25_review_skill_injection.py`).
+
+- ⬜ **NEW-26 (P1, КОРЕНЬ #3) · Тип: 🐛 Баг — review skill даёт интерактивный вопрос вместо
+  verdict** — DIAGNOSED 2026-05-20, фикс НЕ применён. После NEW-24+NEW-25 review-спавн
+  наконец отрабатывает по-настоящему (сеть ✅, skill ✅) — но `verdict=error` всё равно.
+  Причина: skill `bmad-code-review` написан под **интерактивный** режим — ревьюер находит
+  замечания и завершает вывод вопросом пользователю с вариантами («findings #1-6 — реальные
+  CI-блокеры, рекомендую вариант 1. Ответь номером.»), вместо machine-readable verdict.
+  В headless `claude -p` ответа нет → процесс выходит `exit_code=0` без verdict-строки →
+  merge_gate не находит verdict → `verdict=error` (спасает fallback). Это поведенческая
+  проблема, не инфраструктурная. **Fix-направление:** либо headless-вариант skill
+  `bmad-code-review` (директива «выдай verdict-строку `VERDICT: approve|reject`, НЕ задавай
+  вопросов»), либо обёртка review-спавна directive-prompt'ом, требующим финальный verdict
+  (ср. memory [[feedback_directive_prompt_over_slash_command]],
+  [[feedback_llm_worker_overthinks_skills]]). До закрытия NEW-26 ревью в pipeline опирается
+  на runner-log fallback — это страховка, а не реальный verdict.
+
 ---
 
 ## 6. References
