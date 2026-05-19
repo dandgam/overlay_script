@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field, ValidationError
 from bmad_orchestrator.agent.tools._common import parse_story_md
 from bmad_orchestrator.runtime.bmad_format import normalize_story_id
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
+from bmad_orchestrator.runtime.verdict_fallback import parse_security_runner_fallback
 from bmad_orchestrator.skills_repo import PolicyInvalidError, PolicyNotFoundError
 
 log = structlog.get_logger(__name__)
@@ -444,6 +445,25 @@ async def security_review_subscriber(
         )
         if not retrying:
             break
+
+    # NEW-20: a persistent verdict=error is a *technical* failure of the
+    # security-review runner, not a security defect. Before escalating, try the
+    # shared Stage-6 runner-log fallback (symmetric to NEW-15 for code_review):
+    # a holistic PASS/NEEDS-FIX/BLOCKED signal recovers a real verdict so the
+    # merge is not blocked unconditionally on a runner glitch. Only when no
+    # signal exists at all does the story escalate to a human.
+    if verdict == VERDICT_ERROR:
+        fallback = parse_security_runner_fallback(worktree, story_id)
+        if fallback is not None:
+            fb_verdict, fb_summary = fallback
+            log.info(
+                "security_review_runner_log_fallback",
+                story_id=story_id,
+                worktree=str(worktree),
+                fallback_verdict=fb_verdict,
+            )
+            verdict = fb_verdict
+            findings_text = fb_summary
 
     log.info(
         "security_review_dispatched",

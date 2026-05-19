@@ -3449,6 +3449,12 @@ async def _spawn_code_review_worker(
             branch=f"feature/{story_id}",
             skill_invocation=CODE_REVIEW_SKILL_INVOCATION,
             sandbox_network="none",
+            # NEW-21: review workers MUST get a writable HOME snapshot. Without
+            # it the sandbox bind-mounts the host ``~/.claude.json`` such that
+            # the inner ``claude -p`` aborts on startup with
+            # ``EROFS: read-only file system`` — num_turns=0, is_error, and the
+            # event stream carries no verdict → verdict=error every run.
+            isolated_home=True,
         )
     finally:
         if original_wave is None:
@@ -3481,6 +3487,8 @@ async def _spawn_security_review_worker(
             branch=f"feature/{story_id}",
             skill_invocation=SECURITY_REVIEW_SKILL_INVOCATION,
             sandbox_network="none",
+            # NEW-21: writable HOME snapshot — see _spawn_code_review_worker.
+            isolated_home=True,
         )
     finally:
         if original_wave is None:
@@ -3547,6 +3555,8 @@ async def _spawn_merge_gate_spec_worker(
             branch=f"feature/{story_id}",
             skill_invocation=MERGE_GATE_SPEC_SKILL,
             sandbox_network="none",
+            # NEW-21: writable HOME snapshot — see _spawn_code_review_worker.
+            isolated_home=True,
         )
     finally:
         if original_wave is None:
@@ -3572,6 +3582,8 @@ async def _spawn_merge_gate_quality_worker(
             branch=f"feature/{story_id}",
             skill_invocation=MERGE_GATE_QUALITY_SKILL,
             sandbox_network="none",
+            # NEW-21: writable HOME snapshot — see _spawn_code_review_worker.
+            isolated_home=True,
         )
     finally:
         if original_wave is None:
@@ -3587,12 +3599,15 @@ async def _run_merge_gate_spec_stage(
     story_id: str,
     wave: str,
     bus: EventLoop,
-) -> tuple[str, str, ReviewMetrics | None]:
+) -> tuple[str, str, ReviewMetrics | None, str]:
     """Run Stage 1 (spec) of two-stage merge gate.
 
-    Returns ``(verdict, summary, metrics)``.
-    On spawn failure returns ``("error", reason, None)`` and does NOT emit — caller
-    emits the final CODE_REVIEW_VERDICT.
+    Returns ``(verdict, summary, metrics, jsonl_path)``. ``jsonl_path`` is the
+    review worker's events.jsonl (NEW-21 observability — surfaced into the
+    ``review_jsonl`` log/event field so an empty-stream diagnosis is visible);
+    ``""`` when the worker never spawned.
+    On spawn failure returns ``("error", reason, None, "")`` and does NOT emit —
+    caller emits the final CODE_REVIEW_VERDICT.
     """
     try:
         handle = await _spawn_merge_gate_spec_worker(
@@ -3602,7 +3617,12 @@ async def _run_merge_gate_spec_stage(
         log.exception(
             "merge_gate_spec_spawn_failed", story_id=story_id, worktree=worktree
         )
-        return "error", f"spec stage spawn failed: {type(exc).__name__}: {exc}", None
+        return (
+            "error",
+            f"spec stage spawn failed: {type(exc).__name__}: {exc}",
+            None,
+            "",
+        )
 
     verdict = "error"
     summary = ""
@@ -3626,8 +3646,9 @@ async def _run_merge_gate_spec_stage(
         "merge_gate_spec_stage_done",
         story_id=story_id,
         verdict=verdict,
+        review_jsonl=str(handle.jsonl_path),
     )
-    return verdict, summary, metrics
+    return verdict, summary, metrics, str(handle.jsonl_path)
 
 
 async def _run_merge_gate_quality_stage(
@@ -3636,10 +3657,11 @@ async def _run_merge_gate_quality_stage(
     story_id: str,
     wave: str,
     bus: EventLoop,
-) -> tuple[str, str, ReviewMetrics | None]:
+) -> tuple[str, str, ReviewMetrics | None, str]:
     """Run Stage 2 (quality) of two-stage merge gate.
 
-    Returns ``(verdict, summary, metrics)``.
+    Returns ``(verdict, summary, metrics, jsonl_path)`` (see
+    :func:`_run_merge_gate_spec_stage` for the ``jsonl_path`` contract).
     Called ONLY when spec stage verdict == "approve".
     """
     try:
@@ -3650,7 +3672,12 @@ async def _run_merge_gate_quality_stage(
         log.exception(
             "merge_gate_quality_spawn_failed", story_id=story_id, worktree=worktree
         )
-        return "error", f"quality stage spawn failed: {type(exc).__name__}: {exc}", None
+        return (
+            "error",
+            f"quality stage spawn failed: {type(exc).__name__}: {exc}",
+            None,
+            "",
+        )
 
     verdict = "error"
     summary = ""
@@ -3674,8 +3701,9 @@ async def _run_merge_gate_quality_stage(
         "merge_gate_quality_stage_done",
         story_id=story_id,
         verdict=verdict,
+        review_jsonl=str(handle.jsonl_path),
     )
-    return verdict, summary, metrics
+    return verdict, summary, metrics, str(handle.jsonl_path)
 
 
 def _code_review_error_retry_max() -> int:
@@ -3710,6 +3738,9 @@ class _MergeGateStageResult:
     verdict_source: str
     spec_only: bool
     fallback_verdict: str | None
+    jsonl_path: str
+    """Review worker events.jsonl (NEW-21). The last stage that ran — quality
+    when both ran, spec when quality was skipped. ``""`` if no worker spawned."""
 
 
 async def _run_merge_gate_two_stage(
@@ -3721,7 +3752,7 @@ async def _run_merge_gate_two_stage(
     a ``verdict=error`` retry loop (NEW-15) and emits once a non-error verdict
     is reached, or escalates the story via HUMAN_QUERY after retries exhaust.
     """
-    spec_verdict, spec_summary, spec_metrics = await _run_merge_gate_spec_stage(
+    spec_verdict, spec_summary, spec_metrics, spec_jsonl = await _run_merge_gate_spec_stage(
         worktree=worktree, story_id=story_id, wave=wave, bus=bus
     )
 
@@ -3760,10 +3791,16 @@ async def _run_merge_gate_two_stage(
             verdict_source=verdict_source,
             spec_only=True,
             fallback_verdict=fallback_verdict,
+            jsonl_path=spec_jsonl,
         )
 
     # ── Stage 2: quality (lints, tests, security, perf).
-    quality_verdict, quality_summary, quality_metrics = await _run_merge_gate_quality_stage(
+    (
+        quality_verdict,
+        quality_summary,
+        quality_metrics,
+        quality_jsonl,
+    ) = await _run_merge_gate_quality_stage(
         worktree=worktree, story_id=story_id, wave=wave, bus=bus
     )
 
@@ -3797,6 +3834,7 @@ async def _run_merge_gate_two_stage(
         verdict_source=verdict_source,
         spec_only=False,
         fallback_verdict=fallback_verdict,
+        jsonl_path=quality_jsonl or spec_jsonl,
     )
 
 
@@ -3930,8 +3968,10 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
 
     metrics: ReviewMetrics | None = stage_result.metrics
 
-    # Dummy handle reference for review_jsonl field in emit (quality stage is last).
-    handle_jsonl_str = ""
+    # NEW-21: real review worker events.jsonl path (was hardcoded "" — every
+    # `code_review_dispatched` log + CODE_REVIEW_VERDICT event reported an empty
+    # `review_jsonl=`, blinding any empty-stream / verdict=error diagnosis).
+    handle_jsonl_str = stage_result.jsonl_path
 
     gates = _load_review_gates(cfg)
 

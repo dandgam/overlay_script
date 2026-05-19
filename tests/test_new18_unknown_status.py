@@ -41,12 +41,19 @@ def test_unknown_status_emits_structured_warning(
     assert result["epics"]["7"]["stories"]["7.3"] == "backlog"
 
     unknown = [
-        r for r in caplog.records if "unknown_status" in r.message
+        r for r in caplog.records if "unknown_status" in r.getMessage()
     ]
     assert len(unknown) == 1
     rec = unknown[0]
-    # structured message + fields — no opaque dotted key, no raw print.
-    assert rec.message == "bmad_format_unknown_status"
+    # NEW-22: fields are interpolated into the rendered message itself (the
+    # stdlib default formatter does not render `extra=` attributes), so the
+    # operator no longer sees a bare opaque `bmad_format_unknown_status` key.
+    msg = rec.getMessage()
+    assert msg.startswith("bmad_format_unknown_status ")
+    assert "story_id=7-3-weird" in msg
+    assert "raw_status=frobnicating" in msg
+    assert "layout=bmad" in msg
+    # `extra=` attributes are kept for structured-log aggregators.
     assert getattr(rec, "story_id") == "7-3-weird"
     assert getattr(rec, "raw_status") == "frobnicating"
     assert getattr(rec, "layout") == "bmad"

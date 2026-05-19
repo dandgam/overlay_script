@@ -490,25 +490,39 @@ Validated вживую ✅:
 
 Почему 1.5 НЕ смержена + новые баги:
 
-- ⬜ **NEW-20 (P1) · Тип: 🐛 Баг — security_review verdict=error без fallback (асимметрия с
-  code_review)** — `security_review_dispatched verdict=error trigger=keyword` → `supervisor_escalated
-  HUMAN_QUERY` ×2 → `failed=1`, story не смержена. code_review при `verdict=error` получает
-  fallback→approve (NEW-15), security_review — только escalate-story (NEW-13), без fallback.
-  Технический сбой раннера ревью не должен блокировать merge безусловно. Fix — симметрично
-  NEW-15: security_review `verdict=error` после retry → fallback-путь (approve или human
-  checkpoint без блокировки merge), не безусловный escalate.
-- ⬜ **NEW-21 (P1, КОРЕНЬ) · Тип: 🐛 Баг — review runner систематически возвращает verdict=error
-  (пустой review_jsonl)** — `review_jsonl=` пустой во ВСЕХ событиях code_review/security_review
-  всех прогонов (#4/#5/replay/1.5). Reviewer (`claude -p` Opus) не пишет review-jsonl файл →
-  verdict всегда `error`. NEW-13/15/20 чинят симптом (обработка error verdict); корень —
-  почему раннер ревью не отрабатывает — НЕ закрыт. Диагностировать: путь review_jsonl,
-  аргументы `claude -p` reviewer, права на запись, формат вывода. Закрытие NEW-21 делает
-  NEW-13/15/20 fallback'ами «на крайний случай», а не основным путём.
-- ⬜ **NEW-22 (P2) · Тип: 🐛 Баг — `bmad_format_unknown_status` всё ещё голый stdout** —
-  строки 8/9/15/16 лога: `bmad_format_unknown_status` печатается голым stdout без `story_id`/
-  `raw_status` (NEW-18 сделал structured warning, но эти 4 вызова идут из другого места —
-  вероятно top-level scan до `_canonical_status`). Найти оставшийся raw-print, привести к
-  structured warning.
+- ✅ **NEW-20 (P1) · Тип: 🐛 Баг — security_review verdict=error без fallback (асимметрия с
+  code_review)** — DONE 2026-05-19 (`integration/pilot_findings_closure_v7` S2). Симметрично
+  NEW-15: `security_review_subscriber` после исчерпания retry на `verdict=error` вызывает
+  shared Stage-6 runner-log fallback (`parse_security_runner_fallback` → переиспользует
+  `parse_runner_review_log` — общий log-reading core code_review + security_review). Holistic
+  verdict восстановлен (PASS→approve / NEEDS-FIX→merge_with_fixes / BLOCKED→block): approve/
+  merge_with_fixes → `SECURITY_REVIEW_PASSED` без мутации payload в reject, merge не блокируется;
+  block → halt как раньше; нет сигнала вообще → одиночная HUMAN_QUERY escalate-story. +5 tests
+  (`test_new20_security_review_fallback.py`). NB: после NEW-21 (`isolated_home=True` и для
+  security-спавна) security review runner реально отрабатывает — этот fallback стал страховкой.
+- ✅ **NEW-21 (P1, КОРЕНЬ) · Тип: 🐛 Баг — review runner систематически возвращает verdict=error**
+  — DONE 2026-05-19 (`integration/pilot_findings_closure_v7` S1). **Root cause найден по
+  on-disk артефакту** `1a__gate_spec_1.5/wt-1.5.events.jsonl`: единственный claude_event =
+  `{type:result, subtype:error_during_execution, is_error:true, num_turns:0,
+  errors:["EROFS: read-only file system, open '/home/server/.claude.json'"]}`. Reviewer
+  `claude -p` **падал на старте** — sandbox не давал писать `~/.claude.json`, claude не делал
+  ни одного turn → в потоке нет verdict → verdict=error. Не H1 (path) и не H2 (формат) — H3
+  (read-only HOME). Dev workers выживали, т.к. спавнятся с `isolated_home=True` (writable HOME
+  snapshot); review/security/merge-gate workers спавнились с дефолтом `isolated_home=False`.
+  Fix — `isolated_home=True` на всех 4 review-спавнах (`_spawn_code_review_worker`,
+  `_spawn_security_review_worker`, `_spawn_merge_gate_spec_worker`,
+  `_spawn_merge_gate_quality_worker`). Observability — `jsonl_path` протянут через
+  `_MergeGateStageResult` (`review_jsonl=` в логах был захардкожен `""`). +5 tests
+  (`test_new21_review_jsonl.py`). NEW-13/15/20 теперь страховка, а не основной путь.
+- ✅ **NEW-22 (P2) · Тип: 🐛 Баг — `bmad_format_unknown_status` голый stdout** — DONE
+  2026-05-19 (`integration/pilot_findings_closure_v7` S2). **Гипотеза «4 вызова из top-level
+  scan, отдельно от `_canonical_status`» — ОПРОВЕРГНУТА.** Callsite ровно один —
+  `bmad_format._canonical_status:246`, и он уже structured через `extra={}`. Реальная причина:
+  `bmad_format` использует stdlib `logging` (не structlog) — дефолтный форматтер НЕ рендерит
+  `extra=` атрибуты записи, поэтому в stdout печатался голый ключ `bmad_format_unknown_status`
+  («4×» = 4 истории с нераспознанным статусом за прогон, один и тот же callsite). Fix — поля
+  `story_id`/`raw_status`/`token`/`layout` интерполируются в саму message-строку (`%s`-args);
+  `extra=` сохранён для structured-log аггрегаторов. +2 tests (`test_new22_unknown_status_log.py`).
 
 **Recommended next initiative:** `pilot_findings_closure_v7` — 3 items (NEW-20/21/22), 2×P1.
 **NEW-21 — корневой:** закрыть первым, он объясняет всю серию NEW-13/15/20 (review runner не

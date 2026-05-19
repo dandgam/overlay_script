@@ -118,6 +118,41 @@ def parse_runner_review_log(
     return None
 
 
+# ── NEW-20: security-verdict view of the shared Stage-6 runner log ──────────
+# The runner Stage-6 review log is a holistic PASS/NEEDS-FIX/BLOCKED signal for
+# the whole story. ``code_review`` reads it via ``parse_runner_review_log``;
+# ``security_review`` needs the same holistic signal but in its own verdict
+# vocabulary (approve | merge_with_fixes | block). Both fallbacks therefore
+# share the single log-reading core — only the final token mapping differs.
+_CODE_TO_SECURITY: dict[Verdict, str] = {
+    "approve": "approve",
+    "request_changes": "merge_with_fixes",
+    "reject": "block",
+}
+
+
+def parse_security_runner_fallback(
+    worktree: str | Path, story_id: str
+) -> tuple[str, str] | None:
+    """Security-verdict fallback over the shared Stage-6 runner review log.
+
+    Reuses :func:`parse_runner_review_log` (the shared log-reading core) and
+    maps its code-review verdict onto the security verdict vocabulary so a
+    technical ``verdict=error`` from the security-review runner can recover a
+    holistic story signal instead of unconditionally blocking the merge
+    (NEW-20 — symmetric to the code_review fallback added in NEW-15).
+
+    Returns ``(security_verdict, summary)`` where ``security_verdict`` is one of
+    ``approve`` | ``merge_with_fixes`` | ``block``, or None when no parseable
+    Stage-6 log exists (caller then escalates to a human).
+    """
+    result = parse_runner_review_log(worktree, story_id)
+    if result is None:
+        return None
+    code_verdict, summary = result
+    return _CODE_TO_SECURITY[code_verdict], summary
+
+
 def read_runner_verdict(worktree: str | Path, story_id: str) -> Verdict | None:
     """Return just the runner Stage 6 verdict string for ``story_id``, or None.
 
@@ -136,4 +171,9 @@ def read_runner_verdict(worktree: str | Path, story_id: str) -> Verdict | None:
     return result[0]
 
 
-__all__ = ["Verdict", "parse_runner_review_log", "read_runner_verdict"]
+__all__ = [
+    "Verdict",
+    "parse_runner_review_log",
+    "parse_security_runner_fallback",
+    "read_runner_verdict",
+]
