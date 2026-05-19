@@ -425,8 +425,16 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     #   INTEGRATION_MERGE_SKIPPED → 35 + 1 = 36.
     # 2026-05-19 spec_pilot_findings_closure_v5 S2 NEW-13 adds
     #   SECURITY_REVIEW_ERROR → 36 + 1 = 37.
-    assert len(ALL_EVENT_TYPES) == 37, (
-        f"Expected 37 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # 2026-05-19 spec_pilot_findings_closure_v6 S1 NEW-19 adds
+    #   REPLAY_MODE_STARTED → 37 + 1 = 38.
+    # 2026-05-19 spec_pilot_findings_closure_v6 S2 NEW-15 adds
+    #   CODE_REVIEW_ERROR → 38 + 1 = 39.
+    # 2026-05-19 spec_pilot_findings_closure_v6 S3 NEW-16 adds
+    #   INTEGRATION_MERGE_COMPLETED → 39 + 1 = 40.
+    # 2026-05-19 spec_pilot_findings_closure_v6 S3 NEW-17 adds
+    #   WORKER_EXIT_UNCOMMITTED → 40 + 1 = 41.
+    assert len(ALL_EVENT_TYPES) == 41, (
+        f"Expected 41 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 

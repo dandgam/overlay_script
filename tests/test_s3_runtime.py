@@ -117,10 +117,22 @@ def test_event_loop_has_all_spec_types() -> None:
         # 2026-05-19 spec_pilot_findings_closure_v5 S2 NEW-13 — security_review
         # technical-error audit signal (retry + escalate-story, no abort).
         "security_review_error",
+        # 2026-05-19 spec_pilot_findings_closure_v6 S1 NEW-19 — replay-from-
+        # worktree mode start signal (post-dev pipeline tail, no spawn).
+        "replay_mode_started",
+        # 2026-05-19 spec_pilot_findings_closure_v6 S2 NEW-15 — code_review
+        # technical-error audit signal (retry + escalate-story, no abort).
+        "code_review_error",
+        # 2026-05-19 spec_pilot_findings_closure_v6 S3 NEW-16 — successful
+        # fast-forward merge into integration (honest `succeeded` metric).
+        "integration_merge_completed",
+        # 2026-05-19 spec_pilot_findings_closure_v6 S3 NEW-17 — silent worker
+        # exit with uncommitted changes and no stage5 recovery.
+        "worker_exit_uncommitted",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 37
+    assert len(ALL_EVENT_TYPES) == 41
 
 
 @pytest.mark.asyncio

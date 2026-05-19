@@ -36,6 +36,7 @@ from pathlib import Path
 import structlog
 
 from bmad_orchestrator.runtime.file_list_parser import AllowList, partition_paths
+from bmad_orchestrator.runtime.git_env import _git_commit_env
 
 log = structlog.get_logger(__name__)
 
@@ -141,10 +142,13 @@ async def _git_commit(
     if signoff:
         args.append("--signoff")
     try:
+        # NEW-14: inject PRE_COMMIT_ALLOW_NO_CONFIG=1 so a config-less worktree's
+        # pre-commit hook does not abort this pre-merge recovery commit.
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=_git_commit_env(),
         )
     except (OSError, FileNotFoundError) as e:
         return False, str(e), ""

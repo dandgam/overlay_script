@@ -113,6 +113,7 @@ from bmad_orchestrator.runtime.live_tuning import (
     atomic_write_gates_yaml,
     evaluate_threshold,
 )
+from bmad_orchestrator.runtime.pilot_outcomes import partition_pilot_outcomes
 from bmad_orchestrator.runtime.project_memory import (
     ProjectMemoryError,
     ProjectMemoryInvalidError,
@@ -155,6 +156,7 @@ from bmad_orchestrator.runtime.worker_events import (
 )
 from bmad_orchestrator.runtime.worker_silent_failure import (
     decide_cleanup_recovery,
+    decide_uncommitted_exit,
     decide_worker_status,
     detect_reused_worktree_cleanup_failure,
     parse_inner_exit_code,
@@ -1004,6 +1006,225 @@ def _resolve_auto_clean_dirty_worktree(settings: Settings) -> bool:
     return settings.auto_clean_dirty_worktree
 
 
+def _wire_pipeline_subscribers(
+    bus: EventLoop, *, settings: Settings, wave: str
+) -> None:
+    """Wire the W4 gate context + full Phase-4 pipeline subscriber chain.
+
+    Extracted from ``_run_real_pilot_body`` so the NEW-19 replay path
+    (:func:`run_replay`) reuses the identical wiring. Registers, in
+    canonical cheapest-first order:
+
+      stage5 → build_check → deletion_safety → code_review → security_review
+      → merge_to_integration → quarterly_sweep
+
+    plus the elicitation / supervisor / self-learning / BMad-canonical
+    subscribers. Subscribers take ``(event, bus)`` while ``EventLoop``
+    dispatches with ``(event,)`` only, so ``partial`` binds the bus to satisfy
+    the ``EventCallback`` contract.
+    """
+    # W4 — share the gate context with code_review / merge subscribers so they
+    # know which target project + wave to merge into.
+    configure_code_review_gate(
+        target_project=settings.target_project,
+        wave=wave,
+        escalation_chat_id=getattr(getattr(settings, "bot", None), "escalation_chat_id", None),
+    )
+
+    # Final canonical-patches order (after P3 — stage5 → build → deletion →
+    # code_review → merge → quarterly_sweep). The two halters (build_check,
+    # deletion_safety) mutate ``payload['status']``; downstream gates
+    # (code_review, merge_to_integration) short-circuit on non-success status.
+    # Patch S: stage5_completeness runs FIRST (auto-stages Stage 5 residue).
+    # Patch N: build_check runs second (cheap pytest+ruff guard before Opus).
+    # Patch C: deletion_safety runs third (unsafe-deletion halt before review).
+    # Patch Q: diff size gate embedded INSIDE code_review_subscriber.
+    # Patch R: commit recovery embedded INSIDE merge_to_integration_subscriber.
+    # Patch X: security_review sits AFTER code_review and BEFORE merge.
+    bus.on(cast(EventCallback, partial(stage5_completeness_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(build_check_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(deletion_safety_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
+    bus.on(
+        cast(
+            EventCallback,
+            partial(
+                security_review_subscriber,
+                bus=bus,
+                runner=_real_security_review_runner,
+            ),
+        )
+    )
+    bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
+
+    # Auto-elicitation engine (Phase 3 — P2 Routing). ``bus`` bound via a
+    # positional closure (a keyword bind tripped mypy ``call-arg``).
+    elicitation_policy_path = getattr(settings, "elicitation_policy_path", None)
+    elicitation_engine = _load_elicitation_engine(elicitation_policy_path)
+    _elicitation_sub = make_elicitation_subscriber(elicitation_engine)
+    bus.on(lambda e: _elicitation_sub(e, bus))
+
+    # Supervisor LLM-loop (Phase 4 #9 — P4 Orchestrator-Workers + P2 Routing).
+    supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
+    supervisor_engine = _load_supervisor_engine(supervisor_policy_path)
+    _supervisor_sub = make_supervisor_subscriber(supervisor_engine)
+    bus.on(lambda e: _supervisor_sub(e, bus))
+
+    # Self-learning consolidation loop (Phase 5 — P5 Evaluator-Optimizer).
+    self_learning_policy_path = getattr(settings, "self_learning_policy_path", None)
+    sl_config = _load_self_learning_config(self_learning_policy_path)
+    sl_consolidator = Consolidator(config=sl_config)
+    _self_learning_sub = make_self_learning_subscriber(sl_consolidator)
+    bus.on(lambda e: _self_learning_sub(e, bus))
+
+    # BMad Phase 4 canonical-workflow subscribers (gap-closure 2026-05-19).
+    from bmad_orchestrator.runtime.phase4_subscribers import (
+        correct_course_subscriber,
+        investigate_subscriber,
+    )
+    bus.on(cast(EventCallback, partial(correct_course_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(investigate_subscriber, bus=bus)))
+
+
+async def run_replay(
+    *,
+    worktree: Path,
+    story_id: str,
+    integration_branch: str,
+    settings: Settings,
+    auto_commit_dev: bool = False,
+    bus: EventLoop | None = None,
+    wire_subscribers: bool = True,
+) -> dict[str, Any]:
+    """NEW-19 — replay the post-dev pipeline tail against an existing worktree.
+
+    Skips ``spawn_worker`` entirely (the ~30-min worker-dev phase). Takes a
+    worktree that already carries a dev commit — or synthesizes one from a
+    dirty worktree when ``auto_commit_dev`` is set — and drives it through the
+    same chain a real pilot runs post-dev: stage5 → build-check → merge-gate →
+    reconcile → merge. Used to validate merge-gate / stage5 / metrics fixes in
+    seconds (spec_pilot_findings_closure_v6 §1).
+
+    ``wire_subscribers=False`` lets tests pre-register their own (stub)
+    subscribers on ``bus``; production callers leave it ``True`` so the real
+    Phase-4 pipeline subscribers run.
+
+    Returns a result dict: story_id, worktree, integration_branch, base_sha,
+    dev_commits (list), synthesized (bool), reconciled (list), verdict (str |
+    None — last CODE_REVIEW_VERDICT for the story), merge_skipped (bool),
+    story_merged (bool — git-verified ancestry of the dev work in the
+    integration branch), spawned_worker (always False).
+    """
+    from bmad_orchestrator.runtime.replay import (
+        commit_is_merged,
+        prepare_replay_worktree,
+    )
+
+    wave = integration_branch.removeprefix("integration/")
+    bus = bus or EventLoop()
+
+    rw = await prepare_replay_worktree(
+        worktree=worktree,
+        story_id=story_id,
+        integration_branch=integration_branch,
+        auto_commit_dev=auto_commit_dev,
+    )
+
+    if wire_subscribers:
+        _wire_pipeline_subscribers(bus, settings=settings, wave=wave)
+
+    log.info(
+        "replay_mode_active",
+        worktree=str(rw.path),
+        story=story_id,
+        integration_branch=integration_branch,
+        dev_commits=len(rw.dev_commits),
+        synthesized=rw.synthesized,
+    )
+    await bus.emit(
+        EventType.REPLAY_MODE_STARTED,
+        story_id=story_id,
+        worktree=str(rw.path),
+        integration_branch=integration_branch,
+        base_sha=rw.base_sha,
+        dev_commits=len(rw.dev_commits),
+        synthesized=rw.synthesized,
+    )
+
+    # Drive the post-dev tail: emit WORKER_COMPLETED (success) so the wired
+    # gate chain runs, drain it, then reconcile + drain — exactly the sequence
+    # ``_run_real_pilot_body`` runs after its workers finish.
+    await bus.emit(
+        EventType.WORKER_COMPLETED,
+        story_id=story_id,
+        worktree=str(rw.path),
+        jsonl="",
+        exit_code=0,
+        status="success",
+        mock=False,
+        replay=True,
+    )
+    dispatched = await bus.drain()
+
+    handle = WorkerHandle(
+        worktree=str(rw.path),
+        story_id=story_id,
+        branch=f"feature/{story_id}",
+        pid=0,
+        jsonl_path=Path(""),
+        process=None,
+        mock=False,
+        sandbox_kind="n/a-replay",
+        base_sha=rw.base_sha,
+    )
+    reconciled = await _reconcile_success_verdicts(
+        bus, succeeded=[story_id], handles=[handle], dispatched=dispatched
+    )
+    post = await bus.drain()
+
+    all_events = dispatched + post
+    verdict: str | None = None
+    merge_skipped = False
+    for ev in all_events:
+        ep = ev.payload or {}
+        if str(ep.get("story_id") or "") != story_id:
+            continue
+        if ev.type == EventType.CODE_REVIEW_VERDICT:
+            verdict = str(ep.get("verdict") or "") or verdict
+        elif ev.type == EventType.INTEGRATION_MERGE_SKIPPED:
+            merge_skipped = True
+
+    # Ground truth — is the dev work an ancestor of the integration branch?
+    story_merged = False
+    if rw.dev_commits:
+        story_merged = await commit_is_merged(
+            settings.target_project, rw.dev_commits[-1], integration_branch
+        )
+
+    log.info(
+        "replay_mode_done",
+        story=story_id,
+        verdict=verdict,
+        story_merged=story_merged,
+        merge_skipped=merge_skipped,
+        reconciled=reconciled,
+    )
+    return {
+        "story_id": story_id,
+        "worktree": str(rw.path),
+        "integration_branch": integration_branch,
+        "base_sha": rw.base_sha,
+        "dev_commits": list(rw.dev_commits),
+        "synthesized": rw.synthesized,
+        "reconciled": reconciled,
+        "verdict": verdict,
+        "merge_skipped": merge_skipped,
+        "story_merged": story_merged,
+        "spawned_worker": False,
+    }
+
+
 async def _run_real_pilot_body(
     bus: EventLoop,
     *,
@@ -1044,110 +1265,12 @@ async def _run_real_pilot_body(
     worktree_root = settings.target_project / ".worktrees"
     worktree_root.mkdir(parents=True, exist_ok=True)
 
-    # W4 — share the gate context with code_review / merge subscribers so they
-    # know which target project + wave to merge into. Subscribers are wired to
-    # the bus by caller-side startup code; configure_code_review_gate keeps the
-    # module-level config in sync per pilot run.
-    configure_code_review_gate(
-        target_project=settings.target_project,
-        wave=wave,
-        escalation_chat_id=getattr(getattr(settings, "bot", None), "escalation_chat_id", None),
-    )
-
-    # P0-1 — wire E5/W4/sweep subscribers into the live bus. Without these
-    # registrations real-mode pilots silently no-op on the entire self-learning
-    # pipeline (code review → ff-merge → quarterly sweep). Subscribers take
-    # ``(event, bus)`` while EventLoop dispatches with ``(event,)`` only, so
-    # ``partial`` binds the bus to satisfy the EventCallback contract.
-    #
-    # Final canonical-patches order (after P3 — stage5 → build → deletion →
-    # code_review → merge → quarterly_sweep). Each WORKER_COMPLETED gate is
-    # ordered cheapest-first so a halt skips the more expensive downstream
-    # steps. The two halters (build_check, deletion_safety) mutate
-    # ``payload['status']``; downstream gates (code_review,
-    # merge_to_integration) short-circuit on non-success status.
-    #
-    # Patch S (2026-05-18): stage5_completeness_subscriber runs FIRST so it
-    # auto-stages any Stage 5 residue BEFORE build_check / deletion_safety
-    # see the worktree (the residue would otherwise be silently lost when
-    # the worktree is cleaned post-merge).
-    # Patch N (2026-05-18): build_check_subscriber runs second so a broken
-    # build halts the chain before deletion_safety / code_review fire — the
-    # cheap pytest+ruff guard saves the ~$15 Opus review on broken code.
-    # Patch C (2026-05-18): deletion_safety_subscriber runs third so an
-    # unsafe-deletion halt mutates the WORKER_COMPLETED payload status
-    # BEFORE code_review_subscriber sees it.
-    # Patch Q (2026-05-18): diff size gate is embedded INSIDE
-    # code_review_subscriber (downgrades approve→reject on oversize diff,
-    # not a new subscriber — see _gate_diff_size below).
-    # Patch R (2026-05-18): commit recovery is embedded INSIDE
-    # merge_to_integration_subscriber (auto-commits residue before ff-merge,
-    # not a new subscriber).
-    # Patch X (2026-05-18): security_review_subscriber sits AFTER code_review
-    # and BEFORE merge — on CODE_REVIEW_VERDICT(approve) for security-critical
-    # stories it spawns the 4-hunter `/bmad-security-review`. BLOCK mutates
-    # verdict→reject + appends gate_reasons so the merge subscriber (next in
-    # chain) naturally skips.
-    bus.on(cast(EventCallback, partial(stage5_completeness_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(build_check_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(deletion_safety_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
-    bus.on(
-        cast(
-            EventCallback,
-            partial(
-                security_review_subscriber,
-                bus=bus,
-                runner=_real_security_review_runner,
-            ),
-        )
-    )
-    bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
-
-    # Auto-elicitation engine (Phase 3 — P2 Routing). Loads policy YAML (path
-    # configurable via Settings.elicitation_policy_path; falls back to
-    # examples/ default). Subscribes to WORKER_ELICITATION: low-risk auto-
-    # resolves are logged + delivered through the existing respond channel,
-    # high-risk / hard-override topics emit HUMAN_QUERY for the operator.
-    elicitation_policy_path = getattr(settings, "elicitation_policy_path", None)
-    elicitation_engine = _load_elicitation_engine(elicitation_policy_path)
-    # S4 finalize — bind ``bus`` via a closure rather than ``partial(fn, bus=bus)``.
-    # The factory return type is an unnamed ``Callable[[Event, EventLoop], ...]``,
-    # so a keyword bind tripped mypy ``call-arg``; a positional closure is clean.
-    _elicitation_sub = make_elicitation_subscriber(elicitation_engine)
-    bus.on(lambda e: _elicitation_sub(e, bus))
-
-    # Supervisor LLM-loop (Phase 4 #9 — P4 Orchestrator-Workers + P2 Routing).
-    # Listens on 5 high-level event types (HUMAN_QUERY, WORKER_HALT_FILE,
-    # BUDGET_THRESHOLD_HIT, WORKER_SILENT_FAILURE, COMPLIANCE_SWEEP_NEEDED),
-    # routes them through Tier 0 hard rules → Tier 1 LLM judge (stub by
-    # default; real Sonnet behind future flag) → Tier 2 fail-safe escalate.
-    # Filters out events with payload['source']='supervisor' to avoid loops.
-    supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
-    supervisor_engine = _load_supervisor_engine(supervisor_policy_path)
-    _supervisor_sub = make_supervisor_subscriber(supervisor_engine)
-    bus.on(lambda e: _supervisor_sub(e, bus))
-
-    # Self-learning consolidation loop (Phase 5 — P5 Evaluator-Optimizer).
-    # Listens on 4 trigger events (WAVE_BOUNDARY_REACHED, EPIC_BOUNDARY_REACHED,
-    # PHASE4_COMPLETE, MONTHLY_REVIEW_SCHEDULED). Filters out self-emitted events
-    # (source=self_learning). StubExtractor by default — no token cost.
-    self_learning_policy_path = getattr(settings, "self_learning_policy_path", None)
-    sl_config = _load_self_learning_config(self_learning_policy_path)
-    sl_consolidator = Consolidator(config=sl_config)
-    _self_learning_sub = make_self_learning_subscriber(sl_consolidator)
-    bus.on(lambda e: _self_learning_sub(e, bus))
-
-    # BMad Phase 4 canonical-workflow subscribers (gap-closure 2026-05-19).
-    # SPRINT_SCOPE_CHANGE_DETECTED → bmad-correct-course.
-    # FORENSIC_INVESTIGATION_NEEDED → bmad-investigate (with retry-count heuristic).
-    from bmad_orchestrator.runtime.phase4_subscribers import (
-        correct_course_subscriber,
-        investigate_subscriber,
-    )
-    bus.on(cast(EventCallback, partial(correct_course_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(investigate_subscriber, bus=bus)))
+    # W4 + P0-1 — wire the shared gate context + the full Phase-4 pipeline
+    # subscriber chain onto the live bus. Extracted into a module-level helper
+    # (_wire_pipeline_subscribers) so the NEW-19 replay path (run_replay)
+    # reuses the exact same wiring instead of duplicating it
+    # (spec_pilot_findings_closure_v6 §1).
+    _wire_pipeline_subscribers(bus, settings=settings, wave=wave)
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []
@@ -1552,7 +1675,14 @@ async def _run_real_pilot_body(
     await _reconcile_success_verdicts(
         bus, succeeded=succeeded, handles=spawned_handles, dispatched=dispatched
     )
-    await bus.drain()
+    post_drain = await bus.drain()
+
+    # NEW-16 — reclassify worker-completed stories by REAL integration-merge
+    # status. ``succeeded`` above only tracks workers that exited
+    # ``status=success``; it does not prove the work reached integration. The
+    # post-dev pipeline emits INTEGRATION_MERGE_COMPLETED / _SKIPPED — partition
+    # against those so the ``real_pilot_done`` metric is honest (spec §4).
+    pilot_outcomes = partition_pilot_outcomes(succeeded, dispatched + post_drain)
 
     # P1-5 — persist a fresh project_memory snapshot so the next pilot of the
     # same project boots with primed BudgetGuard windows (E7 prime_from_memory)
@@ -1577,8 +1707,14 @@ async def _run_real_pilot_body(
     log.info(
         "real_pilot_done",
         spawned=len(spawned),
-        succeeded=len(succeeded),
-        failed=len(failed),
+        # NEW-16 — `succeeded` now means "merged into integration", not merely
+        # "worker exited success". `worker_succeeded` keeps the old count for
+        # operators who need the pre-merge signal; `no_op` = success-with-zero-
+        # commits; `failed` aggregates spawn failures + stranded (not-merged).
+        succeeded=pilot_outcomes.succeeded_count,
+        worker_succeeded=len(succeeded),
+        no_op=len(pilot_outcomes.no_op),
+        failed=len(failed) + len(pilot_outcomes.failed),
         # Spec #9 — keep legacy `stories` key for backwards-compat with
         # downstream parsers (operators have grep'd the old line for months).
         stories=len(spawned),
@@ -1998,6 +2134,10 @@ async def _tail_and_emit_completion(
     # the terminal event, we can detect the runner's reused-worktree Stage 7
     # cleanup failure (``cannot delete branch ... used by worktree``).
     stdout_tail: list[str] = []
+    # NEW-17 — track whether a stage5 (commit recovery) marker appeared. If the
+    # worker exits silently (no terminal event), a missing commit is only a
+    # silent failure when stage5 never ran.
+    stage5_seen = False
 
     async for ev in tail_jsonl_events(handle.jsonl_path):
         if tracker is not None and budget is not None:
@@ -2017,6 +2157,8 @@ async def _tail_and_emit_completion(
                 # log does not go silent for the full worker lifetime.
                 stage = detect_stage_marker(text)
                 if stage is not None:
+                    if stage == "stage:5":
+                        stage5_seen = True
                     log.info(
                         "worker_stage_progress",
                         story_id=handle.story_id,
@@ -2154,6 +2296,35 @@ async def _tail_and_emit_completion(
                     exit_code=exit_code,
                     base_sha=handle.base_sha,
                 )
+                # NEW-17 — distinguish "worker did nothing" from "worker wrote
+                # files and lost them". The plain worker_silent_failure above
+                # is silent on which it is; if the worktree is dirty and no
+                # stage5 recovery ran, the worker produced work it never
+                # committed — surface that loudly (spec §5).
+                worktree_dirty = await _worktree_has_uncommitted_changes(
+                    handle.worktree
+                )
+                uncommitted = decide_uncommitted_exit(
+                    worktree_dirty=worktree_dirty, stage5_seen=stage5_seen
+                )
+                if uncommitted.emit:
+                    log.warning(
+                        "worker_exit_uncommitted",
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        reason=uncommitted.reason,
+                        note=(
+                            "worker exited with uncommitted changes and no "
+                            "stage5 recovery — work written but never committed"
+                        ),
+                    )
+                    await bus.emit(
+                        EventType.WORKER_EXIT_UNCOMMITTED,
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        jsonl=str(handle.jsonl_path),
+                        reason=uncommitted.reason,
+                    )
                 await bus.emit(
                     EventType.WORKER_HALT_FILE,
                     story_id=handle.story_id,
@@ -2221,6 +2392,28 @@ async def _tail_and_emit_completion(
             )
             return "halted"
     return "halted"
+
+
+async def _worktree_has_uncommitted_changes(worktree: str) -> bool:
+    """NEW-17 — True when ``git status --porcelain`` reports a dirty worktree.
+
+    Returns ``False`` on any git error or missing worktree — a detection helper
+    must never raise into the completion tailer.
+    """
+    if not worktree:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", worktree, "status", "--porcelain",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return False
+    return bool(stdout.decode(errors="replace").strip())
 
 
 def _emit_worker_cost_final(tracker: WorkerCostTracker, story_id: str) -> None:
@@ -3485,6 +3678,128 @@ async def _run_merge_gate_quality_stage(
     return verdict, summary, metrics
 
 
+def _code_review_error_retry_max() -> int:
+    """NEW-15: retry budget for a code-review ``verdict=error``.
+
+    A ``verdict=error`` is a *technical* failure of the review step (empty
+    review JSONL, spawn failure), not a story defect. ``0`` = no retry; total
+    attempts = value + 1. Default ``1`` (= 2 attempts), overridable via the
+    ``CODE_REVIEW_ERROR_RETRY_MAX`` env var. Mirrors
+    :attr:`SecurityReviewPolicy.error_retry_max`.
+    """
+    raw = os.environ.get("CODE_REVIEW_ERROR_RETRY_MAX", "1")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1
+
+
+@dataclass(slots=True, frozen=True)
+class _MergeGateStageResult:
+    """Outcome of one full two-stage merge-gate run (NEW-15).
+
+    ``spec_only`` is True when the spec stage did not approve and the quality
+    stage was skipped. ``fallback_verdict`` is set when the spec verdict came
+    from the bmad-auto-dev runner review log rather than the review event
+    stream.
+    """
+
+    verdict: str
+    summary: str
+    metrics: ReviewMetrics | None
+    verdict_source: str
+    spec_only: bool
+    fallback_verdict: str | None
+
+
+async def _run_merge_gate_two_stage(
+    *, worktree: str, story_id: str, wave: str, bus: EventLoop
+) -> _MergeGateStageResult:
+    """Run the two-stage merge gate once and return the merged outcome.
+
+    Does NOT emit the final ``CODE_REVIEW_VERDICT`` — the caller wraps this in
+    a ``verdict=error`` retry loop (NEW-15) and emits once a non-error verdict
+    is reached, or escalates the story via HUMAN_QUERY after retries exhaust.
+    """
+    spec_verdict, spec_summary, spec_metrics = await _run_merge_gate_spec_stage(
+        worktree=worktree, story_id=story_id, wave=wave, bus=bus
+    )
+
+    # ── S2 (spec_pilot_findings_closure §1 #2) — runner-log fallback.
+    # When the merge-gate spec worker fails to surface a parseable verdict
+    # event (JSONL stream had no `verdict: ...` token), fall back to reading
+    # the bmad-auto-dev runner's own Stage 6 review log from the worktree.
+    verdict_source = "merge_gate_spec"
+    fallback_verdict: str | None = None
+    if spec_verdict == "error":
+        fallback = parse_runner_review_log(worktree, story_id)
+        if fallback is not None:
+            fb_verdict, fb_summary = fallback
+            log.info(
+                "code_review_runner_log_fallback",
+                story_id=story_id,
+                worktree=worktree,
+                fallback_verdict=fb_verdict,
+            )
+            spec_verdict = fb_verdict
+            spec_summary = fb_summary
+            verdict_source = "runner_log_fallback"
+            fallback_verdict = fb_verdict
+
+    if spec_verdict != "approve":
+        # Spec stage failed — skip quality stage entirely (saves cost).
+        log.info(
+            "merge_gate_quality_stage_skipped",
+            story_id=story_id,
+            spec_verdict=spec_verdict,
+        )
+        return _MergeGateStageResult(
+            verdict=spec_verdict,
+            summary=spec_summary,
+            metrics=spec_metrics,
+            verdict_source=verdict_source,
+            spec_only=True,
+            fallback_verdict=fallback_verdict,
+        )
+
+    # ── Stage 2: quality (lints, tests, security, perf).
+    quality_verdict, quality_summary, quality_metrics = await _run_merge_gate_quality_stage(
+        worktree=worktree, story_id=story_id, wave=wave, bus=bus
+    )
+
+    # NEW-15 sub-bug (b): a runner-log fallback verdict is a holistic PASS /
+    # NEEDS-FIX signal for the WHOLE story. When the spec stage came from the
+    # fallback and the quality stage yields a *technical* error, the fallback
+    # verdict must carry through to the final verdict instead of being
+    # worst-wins-merged into `error` (which would silently block the merge).
+    if (
+        quality_verdict == "error"
+        and fallback_verdict is not None
+        and fallback_verdict != "error"
+    ):
+        log.info(
+            "code_review_quality_error_fallback_applied",
+            story_id=story_id,
+            fallback_verdict=fallback_verdict,
+        )
+        verdict = fallback_verdict
+    else:
+        # Merge verdicts: worst wins.
+        verdict = _merge_verdicts(spec_verdict, quality_verdict)
+    summary = quality_summary if quality_summary else spec_summary
+    metrics: ReviewMetrics | None = (
+        quality_metrics if quality_metrics is not None else spec_metrics
+    )
+    return _MergeGateStageResult(
+        verdict=verdict,
+        summary=summary,
+        metrics=metrics,
+        verdict_source=verdict_source,
+        spec_only=False,
+        fallback_verdict=fallback_verdict,
+    )
+
+
 async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
     """On ``WORKER_COMPLETED(success)`` → run two-stage merge gate, emit verdict.
 
@@ -3525,49 +3840,82 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
         "BMAD_CURRENT_WAVE", "default"
     )
 
-    # ── Phase 4 hardening #5 — Stage 1: spec (AC coverage + story completeness).
-    spec_verdict, spec_summary, spec_metrics = await _run_merge_gate_spec_stage(
-        worktree=worktree, story_id=story_id, wave=wave, bus=bus
-    )
-
-    # ── S2 (spec_pilot_findings_closure §1 #2) — runner-log fallback.
-    # When the merge-gate spec worker fails to surface a parseable verdict
-    # event (JSONL stream had no `verdict: ...` token), fall back to reading
-    # the bmad-auto-dev runner's own Stage 6 review log from the worktree.
-    # The runner records PASS / NEEDS-FIX / BLOCKED there — re-use that signal
-    # instead of escalating every event-stream miss to a human.
-    verdict_source = "merge_gate_spec"
-    if spec_verdict == "error":
-        fallback = parse_runner_review_log(worktree, story_id)
-        if fallback is not None:
-            fb_verdict, fb_summary = fallback
-            log.info(
-                "code_review_runner_log_fallback",
-                story_id=story_id,
-                worktree=worktree,
-                fallback_verdict=fb_verdict,
-            )
-            spec_verdict = fb_verdict
-            spec_summary = fb_summary
-            verdict_source = "runner_log_fallback"
-
-    if spec_verdict != "approve":
-        # Spec stage failed — skip quality stage entirely (saves cost).
-        log.info(
-            "merge_gate_quality_stage_skipped",
-            story_id=story_id,
-            spec_verdict=spec_verdict,
+    # ── NEW-15: a verdict=error from the two-stage merge gate is a *technical*
+    #    failure of the review step (empty review JSONL, spawn failure), not a
+    #    story defect. Retry the gate up to CODE_REVIEW_ERROR_RETRY_MAX times
+    #    before escalating; emit CODE_REVIEW_ERROR per failing attempt for audit.
+    max_error_retries = _code_review_error_retry_max()
+    attempt = 0
+    while True:
+        attempt += 1
+        stage_result = await _run_merge_gate_two_stage(
+            worktree=worktree, story_id=story_id, wave=wave, bus=bus
         )
+        if stage_result.verdict != "error":
+            break
+        retrying = attempt <= max_error_retries
+        await bus.emit(
+            EventType.CODE_REVIEW_ERROR,
+            story_id=story_id,
+            worktree=worktree,
+            attempt=attempt,
+            max_retries=max_error_retries,
+            retrying=retrying,
+            gate_stage="spec" if stage_result.spec_only else "quality",
+        )
+        if not retrying:
+            break
+
+    # ── NEW-15: persistent error → escalate the single story via ONE
+    #    HUMAN_QUERY. Deliberately do NOT emit CODE_REVIEW_VERDICT(error): that
+    #    would feed the supervisor circuit breaker as a story escalation and
+    #    abort the whole pipeline after 3 in a row. The verdict /
+    #    review_verdict markers below are recognised by
+    #    SupervisorEngine._is_security_review_error so the breaker counter is
+    #    left untouched (NEW-13 pattern, generalised to code_review).
+    if stage_result.verdict == "error":
+        log.warning(
+            "code_review_persistent_error",
+            story_id=story_id,
+            worktree=worktree,
+            attempts=attempt,
+        )
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id if cfg is not None else None,
+            story_id=story_id,
+            worktree=worktree,
+            verdict="code_review_error",
+            review_verdict="error",
+            text=(
+                f"Code-review технически не смог вынести вердикт для story "
+                f"{story_id} после {attempt} попыток (verdict=error — пустой "
+                f"review JSONL или сбой spawn).\n\n"
+                f"Worktree: {worktree}\n"
+                f"Summary: {stage_result.summary}"
+            ),
+            actions=["retry_review", "abandon"],
+        )
+        return
+
+    verdict = stage_result.verdict
+    summary = stage_result.summary
+    verdict_source = stage_result.verdict_source
+
+    # ── Spec stage did not approve (reject / request_changes) — quality stage
+    #    was skipped; emit the verdict directly, skipping the approve-only gates.
+    if stage_result.spec_only:
         await bus.emit(
             EventType.CODE_REVIEW_VERDICT,
             story_id=story_id,
-            verdict=spec_verdict,
-            summary=spec_summary,
+            verdict=verdict,
+            summary=summary,
             worktree=worktree,
             review_iteration=review_iteration,
             gate_stage="spec",
             source=verdict_source,
         )
+        spec_metrics = stage_result.metrics
         if spec_metrics is not None and cfg is not None and cfg.budget is not None:
             gates_for_tuning = _load_review_gates(cfg)
             await _apply_live_tuning(
@@ -3580,18 +3928,9 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
             )
         return
 
-    # ── Stage 2: quality (lints, tests, security, perf).
-    quality_verdict, quality_summary, quality_metrics = await _run_merge_gate_quality_stage(
-        worktree=worktree, story_id=story_id, wave=wave, bus=bus
-    )
-
-    # Merge verdicts: worst wins.
-    verdict = _merge_verdicts(spec_verdict, quality_verdict)
-    summary = quality_summary if quality_summary else spec_summary
-    metrics: ReviewMetrics | None = quality_metrics if quality_metrics is not None else spec_metrics
+    metrics: ReviewMetrics | None = stage_result.metrics
 
     # Dummy handle reference for review_jsonl field in emit (quality stage is last).
-    # Use spec_summary for the combined summary if quality is empty.
     handle_jsonl_str = ""
 
     gates = _load_review_gates(cfg)
@@ -3948,6 +4287,17 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
         integration=integration_branch,
         sha=merge_sha,
     )
+    # NEW-16 — positive merge signal. ``partition_pilot_outcomes`` consumes
+    # this to compute the honest ``succeeded`` metric: a worker exiting
+    # ``status=success`` only proves dev work landed on the feature branch,
+    # NOT that it reached integration. Only a story with this event counts.
+    await bus.emit(
+        EventType.INTEGRATION_MERGE_COMPLETED,
+        story_id=story_id,
+        feature=feature_branch,
+        integration=integration_branch,
+        sha=merge_sha,
+    )
 
     if worktree:
         try:
@@ -4028,6 +4378,7 @@ __all__ = [
     "human_query_subscriber",
     "main",
     "run_orchestrator",
+    "run_replay",
 ]
 
 

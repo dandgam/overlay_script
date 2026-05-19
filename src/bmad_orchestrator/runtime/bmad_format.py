@@ -58,6 +58,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Canonical status tokens, all lowercase. ``_canonical_status`` lowercases the
+# parsed token before lookup so upstream BMad capitalised forms (``Done``,
+# ``Drafted``) match too (NEW-18 — pilot run #5 emitted 4 unknown_status lines
+# for capitalised / ``drafted`` Status fields the parser did not recognise).
 KNOWN_STATUSES: frozenset[str] = frozenset(
     {
         "done",
@@ -67,6 +71,9 @@ KNOWN_STATUSES: frozenset[str] = frozenset(
         "review",
         "deferred",
         "optional",
+        # NEW-18 — upstream BMad story lifecycle statuses the parser missed.
+        "drafted",
+        "approved",
     }
 )
 
@@ -213,20 +220,37 @@ def extract_status_token(value: Any) -> str:
     return parts[0] if parts else ""
 
 
-def _canonical_status(raw: Any, *, source_key: str) -> str:
+def _canonical_status(
+    raw: Any, *, source_key: str, layout: str = "unknown"
+) -> str:
     """Extract status token and map unknown values to ``"backlog"`` with a warning.
 
     Empty/None values are passed through as ``"backlog"`` silently — they appear
     in legacy fixtures and are not a parse error.
+
+    Matching is case-insensitive: upstream BMad sprint-status files capitalise
+    the Status field (``Done``, ``Drafted``) — the lowercased token is returned
+    so downstream comparisons against ``"done"`` keep working (NEW-18).
+
+    On a genuinely unknown token, emit a *structured* warning carrying
+    ``story_id`` + ``raw_status`` + ``layout`` so an operator can see exactly
+    which Status values fail to parse and in which sprint-status layout — the
+    pre-NEW-18 message logged only an opaque ``bmad_format.unknown_status`` key.
     """
     token = extract_status_token(raw)
     if not token:
         return "backlog"
-    if token in KNOWN_STATUSES:
-        return token
+    token_lc = token.lower()
+    if token_lc in KNOWN_STATUSES:
+        return token_lc
     logger.warning(
-        "bmad_format.unknown_status",
-        extra={"key": source_key, "raw": str(raw), "token": token},
+        "bmad_format_unknown_status",
+        extra={
+            "story_id": source_key,
+            "raw_status": str(raw),
+            "token": token,
+            "layout": layout,
+        },
     )
     return "backlog"
 
@@ -276,14 +300,18 @@ def _normalize_bmad(flat: dict[str, Any]) -> dict[str, Any]:
         if m_epic:
             epic_id = m_epic.group(1)
             ep = _ensure_epic(epics, epic_id)
-            ep["status"] = _canonical_status(raw_value, source_key=key)
+            ep["status"] = _canonical_status(
+                raw_value, source_key=key, layout="bmad"
+            )
             continue
         m_story = _STORY_KEY_RE.match(key)
         if m_story:
             epic_id = m_story.group(1)
             story_id = f"{m_story.group(1)}.{m_story.group(2)}"
             ep = _ensure_epic(epics, epic_id)
-            ep["stories"][story_id] = _canonical_status(raw_value, source_key=key)
+            ep["stories"][story_id] = _canonical_status(
+                raw_value, source_key=key, layout="bmad"
+            )
             continue
         # Genuinely unrecognized key — log once for operator visibility.
         logger.warning(
@@ -310,7 +338,7 @@ def _normalize_legacy(yaml_data: dict[str, Any]) -> dict[str, Any]:
         if not epic_id:
             continue
         epic_status = _canonical_status(
-            ep_data.get("status"), source_key=f"epic-{epic_id}"
+            ep_data.get("status"), source_key=f"epic-{epic_id}", layout="legacy"
         )
         stories: dict[str, str] = {}
         raw_stories = ep_data.get("stories") or {}
@@ -318,7 +346,7 @@ def _normalize_legacy(yaml_data: dict[str, Any]) -> dict[str, Any]:
             for raw_sid, raw_status in raw_stories.items():
                 sid = normalize_story_id(str(raw_sid))
                 stories[sid] = _canonical_status(
-                    raw_status, source_key=f"story-{sid}"
+                    raw_status, source_key=f"story-{sid}", layout="legacy"
                 )
         out[epic_id] = {"status": epic_status, "stories": stories}
     return {"epics": out}

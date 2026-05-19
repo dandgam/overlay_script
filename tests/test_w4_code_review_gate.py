@@ -348,15 +348,19 @@ async def test_w4_code_review_emits_reject_verdict(
 
 
 @pytest.mark.asyncio
-async def test_w4_code_review_spawn_failure_emits_error_verdict(
+async def test_w4_code_review_spawn_failure_escalates_no_error_verdict(
     reset_gate_config: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Spawn raising → subscriber emits ``verdict=error`` payload (no crash)."""
+    """NEW-15: spawn raising → verdict=error is a *technical* failure; the
+    subscriber retries then escalates via HUMAN_QUERY (verdict=code_review_error)
+    instead of emitting a silent CODE_REVIEW_VERDICT(error)."""
 
     async def boom(*, worktree: str, story_id: str, wave: str) -> WorkerHandle:
         raise RuntimeError("sandbox unavailable")
 
     monkeypatch.setattr("bmad_orchestrator.agent.run._spawn_merge_gate_spec_worker", boom)
+    # error_retry_max=0 → single attempt, deterministic + cheap.
+    monkeypatch.setenv("CODE_REVIEW_ERROR_RETRY_MAX", "0")
 
     configure_code_review_gate(target_project=tmp_path, wave="1a")
     bus = EventLoop()
@@ -368,9 +372,13 @@ async def test_w4_code_review_spawn_failure_emits_error_verdict(
     await bus.stop()
 
     emitted = _collect_emitted(bus)
-    assert len(emitted) == 1
-    assert emitted[0].payload["verdict"] == "error"
-    assert "sandbox unavailable" in emitted[0].payload["summary"]
+    types = [e.type for e in emitted]
+    assert EventType.CODE_REVIEW_VERDICT not in types
+    assert types.count(EventType.CODE_REVIEW_ERROR) == 1
+    human = [e for e in emitted if e.type == EventType.HUMAN_QUERY]
+    assert len(human) == 1
+    assert human[0].payload["verdict"] == "code_review_error"
+    assert human[0].payload["review_verdict"] == "error"
 
 
 # ── 7. cleanup_worktree safety ──────────────────────────────────────────────
@@ -649,9 +657,11 @@ async def test_w4_merge_subscriber_approve_ff_merge_and_cleanup(
     # Worktrees root preserved.
     assert worktrees_root.exists()
 
-    # No HUMAN_QUERY emitted on the happy path.
+    # Happy path emits exactly one INTEGRATION_MERGE_COMPLETED (NEW-16) and
+    # no HUMAN_QUERY.
     emitted = _collect_emitted(bus)
-    assert emitted == []
+    assert [e.type for e in emitted] == [EventType.INTEGRATION_MERGE_COMPLETED]
+    assert emitted[0].payload["story_id"] == "s1"
 
 
 @pytest.mark.asyncio
@@ -742,7 +752,9 @@ async def test_w4_merge_subscriber_cleanup_failure_does_not_block_merge(
     # Merge must have succeeded (integration advanced).
     assert _git(repo, "rev-parse", "integration/1a") == _git(repo, "rev-parse", "feature/s1")
     # No HUMAN_QUERY emitted — cleanup failure is downgraded to a warn log.
-    assert _collect_emitted(bus) == []
+    # The merge still emits INTEGRATION_MERGE_COMPLETED (NEW-16).
+    emitted = _collect_emitted(bus)
+    assert [e.type for e in emitted] == [EventType.INTEGRATION_MERGE_COMPLETED]
 
 
 # ── 10. Skill invocation literal ─────────────────────────────────────────────
