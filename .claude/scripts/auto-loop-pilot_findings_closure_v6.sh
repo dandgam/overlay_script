@@ -15,7 +15,7 @@
 #   ~45min/incident. Wake then continues to fresh Sxx+1.
 
 set -u
-cd "$(dirname "spec/spec_pilot_findings_closure_v6.md")/../.." || exit 1
+cd "$(dirname "$0")/../.." || exit 1
 
 TRACKER=".claude/initiative-tracker-pilot_findings_closure_v6.md"
 LOG=".claude/auto-loop-pilot_findings_closure_v6.log"
