@@ -4170,6 +4170,25 @@ async def _ff_merge_to_integration(
         repo.git.branch(integration_branch, base)
 
     repo.git.checkout(integration_branch)
+
+    # NEW-23 — the integration worktree may carry uncommitted residue from the
+    # orchestrator's own ``mark_sprint_status_done`` writes (e.g.
+    # ``sprint-status.yaml``). A dirty *tracked* file blocks the ff-merge
+    # ("local changes would be overwritten"). Integration is an automated
+    # branch — only the orchestrator writes to it, and the incoming feature
+    # branch carries the authoritative version of those metadata files — so
+    # tracked residue is safe to discard. Untracked files do not block a merge
+    # and are left untouched. This is a per-path working-tree restore (no
+    # branch ref movement, no history rewrite) — within CLAUDE.md scope.
+    dirty_tracked = [d.a_path for d in repo.index.diff(None) if d.a_path]
+    if dirty_tracked:
+        repo.git.checkout("--", *dirty_tracked)
+        log.info(
+            "integration_worktree_residue_discarded",
+            integration_branch=integration_branch,
+            files=dirty_tracked,
+        )
+
     repo.git.merge(feature_branch, "--ff-only", "--signoff")
     head_sha: str = repo.head.commit.hexsha
     return head_sha

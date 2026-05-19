@@ -531,6 +531,24 @@ Validated вживую ✅:
 
 ---
 
+### Backlog — pilot run #7 findings (replay 1.5 после v7 merge `69f02c4`, 2026-05-20)
+
+Replay 1.5 после v7: NEW-20/21 validated вживую (все review verdict'ы → `approve` через
+fallback), но merge упал на новом баге.
+
+- ✅ **NEW-23 (P1) · Тип: 🐛 Баг — `merge --ff-only` падает на dirty integration worktree** —
+  DONE 2026-05-20 (прямой фикс, hotfix вне auto-loop). `git merge feature/1.5 --ff-only`
+  аварийно завершался: `error: Your local changes to sprint-status.yaml would be overwritten
+  by merge`. Причина — оркестратор пишет `sprint-status.yaml` в integration-worktree через
+  `mark_sprint_status_done`, оставляет незакоммиченным; tracked-residue блокирует ff-merge.
+  Fix — `_ff_merge_to_integration` (`agent/run.py`) перед merge откатывает tracked
+  uncommitted-residue (`repo.index.diff(None)` → `git checkout -- <files>`), логирует
+  `integration_worktree_residue_discarded`. Untracked файлы не трогаются (merge их не
+  блокирует). Не `reset --hard` / не history rewrite — в рамках hard rules.
+  +2 tests (`test_new23_integration_dirty_residue.py`).
+
+---
+
 ## 6. References
 
 - **Universal methodology:** `spec/methodology.md`
