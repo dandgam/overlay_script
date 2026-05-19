@@ -547,6 +547,20 @@ fallback), но merge упал на новом баге.
   блокирует). Не `reset --hard` / не history rewrite — в рамках hard rules.
   +2 tests (`test_new23_integration_dirty_residue.py`).
 
+- ✅ **NEW-24 (P1, КОРЕНЬ) · Тип: 🐛 Баг — review-спавн падает `ConnectionRefused`** —
+  DONE 2026-05-20 (прямой фикс, hotfix вне auto-loop). **Истинный корень всей серии
+  NEW-13/15/20/21.** Review jsonl всех прогонов (#4..#7) содержал
+  `API Error: Unable to connect to API (ConnectionRefused)` + `worker_completed exit_code=1
+  status=failure` → `verdict=error` на каждом stage, маскировалось runner-log fallback'ом.
+  Причина — 4 review-спавна (`_spawn_code_review_worker`, `_spawn_security_review_worker`,
+  `_spawn_merge_gate_spec_worker`, `_spawn_merge_gate_quality_worker` в `agent/run.py`)
+  передавали `sandbox_network="none"` (`--unshare-net`). Review-worker запускает inner
+  `claude -p` reviewer, который делает LLM-вызовы к Anthropic API — ревью это LLM-операция,
+  ей нужен egress, как dev-worker'у (`sandbox_network="full"`). Fix — все 4 спавна →
+  `sandbox_network="full"`. NEW-13/15/20/21 (обработка `verdict=error`) после этого
+  становятся настоящей страховкой, а не основным путём. +4 tests
+  (`test_new24_review_network.py`).
+
 ---
 
 ## 6. References

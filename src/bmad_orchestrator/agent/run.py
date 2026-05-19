@@ -3448,7 +3448,12 @@ async def _spawn_code_review_worker(
             story_id=story_id,
             branch=f"feature/{story_id}",
             skill_invocation=CODE_REVIEW_SKILL_INVOCATION,
-            sandbox_network="none",
+            # NEW-24: the review worker runs an inner ``claude -p`` reviewer
+            # which makes LLM API calls. ``network="none"`` (--unshare-net)
+            # made every call abort with "Unable to connect to API
+            # (ConnectionRefused)" → verdict=error every run. Reviewing is an
+            # LLM operation — it needs API egress, same as the dev worker.
+            sandbox_network="full",
             # NEW-21: review workers MUST get a writable HOME snapshot. Without
             # it the sandbox bind-mounts the host ``~/.claude.json`` such that
             # the inner ``claude -p`` aborts on startup with
@@ -3486,7 +3491,9 @@ async def _spawn_security_review_worker(
             story_id=story_id,
             branch=f"feature/{story_id}",
             skill_invocation=SECURITY_REVIEW_SKILL_INVOCATION,
-            sandbox_network="none",
+            # NEW-24: reviewer makes LLM API calls — needs egress (see
+            # _spawn_code_review_worker).
+            sandbox_network="full",
             # NEW-21: writable HOME snapshot — see _spawn_code_review_worker.
             isolated_home=True,
         )
@@ -3554,7 +3561,9 @@ async def _spawn_merge_gate_spec_worker(
             story_id=story_id,
             branch=f"feature/{story_id}",
             skill_invocation=MERGE_GATE_SPEC_SKILL,
-            sandbox_network="none",
+            # NEW-24: reviewer makes LLM API calls — needs egress (see
+            # _spawn_code_review_worker).
+            sandbox_network="full",
             # NEW-21: writable HOME snapshot — see _spawn_code_review_worker.
             isolated_home=True,
         )
@@ -3581,7 +3590,9 @@ async def _spawn_merge_gate_quality_worker(
             story_id=story_id,
             branch=f"feature/{story_id}",
             skill_invocation=MERGE_GATE_QUALITY_SKILL,
-            sandbox_network="none",
+            # NEW-24: reviewer makes LLM API calls — needs egress (see
+            # _spawn_code_review_worker).
+            sandbox_network="full",
             # NEW-21: writable HOME snapshot — see _spawn_code_review_worker.
             isolated_home=True,
         )
