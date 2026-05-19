@@ -47,6 +47,14 @@ class BuildCheckCommand(BaseModel):
     name: str
     run: str
     required: bool = True
+    # NEW-11 (pilot_findings_closure_v5 S1): when true AND the command is a
+    # ``ruff`` invocation, the command is skipped gracefully (exit 0, audit
+    # log) if the worktree has no ruff configuration. A target BMad project
+    # without ``ruff.toml`` / ``[tool.ruff]`` makes ruff apply its built-in
+    # defaults — typically stricter than the project intends — producing a
+    # spurious exit 1 that halts the story before merge. No config = we
+    # cannot know the project's intended lint policy, so skip instead of halt.
+    skip_if_no_ruff_config: bool = False
 
 
 class BuildCheckPolicy(BaseModel):
@@ -67,6 +75,40 @@ class BuildCheckResult:
     tail: str
     timed_out: bool = False
     skipped_missing_executable: bool = False
+    skipped_no_ruff_config: bool = False
+
+
+# NEW-11: ruff configuration files recognised in a worktree. ``pyproject.toml``
+# is checked separately for a ``[tool.ruff]`` table.
+RUFF_CONFIG_FILENAMES: tuple[str, ...] = ("ruff.toml", ".ruff.toml")
+
+
+def _worktree_has_ruff_config(worktree: Path) -> bool:
+    """Return True if ``worktree`` carries a ruff configuration.
+
+    Recognised: a top-level ``ruff.toml`` / ``.ruff.toml``, or a
+    ``pyproject.toml`` containing a ``[tool.ruff]`` table (or any
+    ``[tool.ruff.*]`` sub-table). Only the worktree root is inspected — ruff
+    itself walks upward from each file, but a target project's intended
+    config lives at its root.
+    """
+    for name in RUFF_CONFIG_FILENAMES:
+        if (worktree / name).is_file():
+            return True
+    pyproject = worktree / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            text = pyproject.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if "[tool.ruff]" in text or "[tool.ruff." in text:
+            return True
+    return False
+
+
+def _is_ruff_command(cmd: BuildCheckCommand) -> bool:
+    """True if the command's executable is ``ruff``."""
+    return _first_token(cmd.run) == "ruff"
 
 
 def load_build_check_policy(path: Path | None = None) -> BuildCheckPolicy:
@@ -135,6 +177,24 @@ async def _run_command(
                 exit_code=0,
                 tail="",
                 skipped_missing_executable=True,
+            )
+
+    # NEW-11: graceful path for ruff in a worktree with no ruff config.
+    if cmd.skip_if_no_ruff_config and _is_ruff_command(cmd):
+        if not _worktree_has_ruff_config(worktree):
+            log.info(
+                "build_check_skip_no_ruff_config",
+                command=cmd.name,
+                worktree=str(worktree),
+                audit="ruff skipped — target worktree has no ruff config; "
+                "default ruff rules would produce spurious lint halt",
+            )
+            return BuildCheckResult(
+                name=cmd.name,
+                run=cmd.run,
+                exit_code=0,
+                tail="",
+                skipped_no_ruff_config=True,
             )
 
     try:

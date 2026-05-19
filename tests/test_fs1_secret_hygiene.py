@@ -34,6 +34,7 @@ from bmad_orchestrator.bot.pii_detector import (
 from bmad_orchestrator.imports.from_bad import gh_client
 from bmad_orchestrator.runtime.worker_spawn import (
     ALLOWED_WORKER_ENV,
+    WORKER_ENV_INJECTED,
     _build_worker_env,
 )
 
@@ -194,7 +195,10 @@ def test_b8_worker_env_strips_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("YANDEX_API_KEY", "yandex_secret")
     monkeypatch.setenv("GOOGLE_API_KEY", "google_secret")
     env = _build_worker_env(extra=None)
-    leaked = [k for k in env if k not in ALLOWED_WORKER_ENV]
+    leaked = [
+        k for k in env
+        if k not in ALLOWED_WORKER_ENV and k not in WORKER_ENV_INJECTED
+    ]
     assert leaked == [], f"secrets leaked into worker env: {leaked}"
     for forbidden in (
         "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "TELEGRAM_BOT_TOKEN",

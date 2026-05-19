@@ -373,11 +373,17 @@ recheck), merged в main `48febc0`.
 
 Не дошли до integration (1.4/1.5) — fixable, pipeline не разорван:
 
-- ⬜ **NEW-11 (P2) · Тип: 🐛 Баг — ruff build_check_halt** — `build_check_halt command=ruff
+- ✅ **NEW-11 (P2) · Тип: 🐛 Баг — ruff build_check_halt** — `build_check_halt command=ruff
   exit_code=1` на 1.3 и 1.4. ruff в worktree падает — вероятно конфиг проекта или версия.
-- ⬜ **NEW-12 (P2) · Тип: 🐛 Баг — pre-commit config missing** — `stage5_recovery_failed:
+  **DONE** (v5 S1, `integration/pilot_findings_closure_v5`): флаг `skip_if_no_ruff_config` на
+  ruff build-check команде — worktree без ruff-конфига → ruff пропускается gracefully
+  (exit 0 + audit-лог), не halt. Конфиг есть → ruff бежит, реальные нарушения халтят как
+  раньше.
+- ✅ **NEW-12 (P2) · Тип: 🐛 Баг — pre-commit config missing** — `stage5_recovery_failed:
   No .pre-commit-config.yaml file` на 1.3/1.4. Worktree без pre-commit конфига → git commit
-  ругается. Fix: `PRE_COMMIT_ALLOW_NO_CONFIG=1` или прокидывать конфиг в worktree.
+  ругается. **DONE** (v5 S1): `PRE_COMMIT_ALLOW_NO_CONFIG=1` инжектится в env воркера
+  (`WORKER_ENV_INJECTED` в `worker_spawn.py`) + pre-spawn detector логирует
+  `precommit_config_absent`. Конфиг в чужой worktree НЕ создаётся (Critical Boundary).
 - ⬜ **NEW-13 (P2) · Тип: 🐛 Баг — security_review error → circuit breaker abort** — story
   1.4 ушла в security review, тот вернул `verdict=error` (не approve/reject), 3 escalations
   подряд → `supervisor_abort_pipeline circuit breaker`. error-verdict не должен считаться

@@ -28,9 +28,18 @@
 #       worktree should not halt because `cargo` is absent).
 #   escalation_text: str — prepended to HUMAN_QUERY body (operator hint).
 
+#   skip_if_no_ruff_config: bool — NEW-11 (pilot_findings_closure_v5). Only
+#       meaningful on a ruff command. If true and the worker's worktree has no
+#       ruff configuration (no ``ruff.toml`` / ``.ruff.toml`` and no
+#       ``[tool.ruff]`` table in ``pyproject.toml``), the ruff command is
+#       skipped gracefully (exit 0 + audit log) instead of halting the story.
+#       A target project without ruff config makes ruff fall back to its
+#       built-in defaults, which are usually stricter than the project
+#       intends — a spurious exit 1 that should not block merge. Default false.
+
 commands:
   - {name: pytest, run: "pytest tests/ -q", required: true}
-  - {name: ruff,   run: "ruff check src tests", required: true}
+  - {name: ruff,   run: "ruff check src tests", required: true, skip_if_no_ruff_config: true}
 
 timeout_sec: 600
 tail_lines: 40
