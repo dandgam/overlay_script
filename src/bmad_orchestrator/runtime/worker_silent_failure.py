@@ -37,6 +37,13 @@ _REUSED_WORKTREE_RE = re.compile(
 # Fallback: match the phrase even when the branch is not single-quoted.
 _REUSED_WORKTREE_LOOSE_RE = re.compile(r"cannot delete branch .* used by worktree")
 
+# #4 NEW-4 — the outer ``claude -p`` wrapper prints the inner runner's exit
+# code as a plain stdout line, optionally prefixed by the ``❯`` shell glyph:
+#   Exit code: 1
+#   ❯ Exit code: 1
+# The line is matched after stripping surrounding whitespace.
+_INNER_EXIT_RE = re.compile(r"^(?:❯\s*)?Exit code:\s*(\d+)$")
+
 
 def is_reused_worktree_cleanup_line(line: str) -> bool:
     """True when a single stdout line is git's reused-worktree refusal."""
@@ -99,9 +106,33 @@ def decide_cleanup_recovery(commit_count: int) -> CleanupRecoveryDecision:
     )
 
 
+def parse_inner_exit_code(stdout_lines: Iterable[str]) -> int | None:
+    """Scan tailed stdout lines for the runner's ``Exit code: N`` marker.
+
+    #4 NEW-4 — the outer ``claude -p`` process can exit 0 while the inner
+    ``bmad-auto-dev-runner.sh`` exited non-zero; the wrapper dutifully echoes
+    the inner code to stdout. The orchestrator parses it here so a non-zero
+    inner code can override a misleading outer-0 ``worker_completed`` success.
+
+    Returns the **last** matching code (the runner logs ``Exit code:`` once near
+    the end of its run; the last wins should a nested wrapper echo more than
+    one) or ``None`` when no line matches — in which case the caller preserves
+    the legacy outer-exit-only behaviour.
+    """
+    result: int | None = None
+    for line in stdout_lines:
+        if not isinstance(line, str):
+            continue
+        m = _INNER_EXIT_RE.match(line.strip())
+        if m is not None:
+            result = int(m.group(1))
+    return result
+
+
 __all__ = [
     "CleanupRecoveryDecision",
     "decide_cleanup_recovery",
     "detect_reused_worktree_cleanup_failure",
     "is_reused_worktree_cleanup_line",
+    "parse_inner_exit_code",
 ]

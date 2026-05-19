@@ -147,6 +147,7 @@ from bmad_orchestrator.runtime.verdict_fallback import parse_runner_review_log
 from bmad_orchestrator.runtime.worker_silent_failure import (
     decide_cleanup_recovery,
     detect_reused_worktree_cleanup_failure,
+    parse_inner_exit_code,
 )
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
@@ -1838,6 +1839,17 @@ async def _tail_and_emit_completion(
                     return "completed"
                 # no commits past base — preserve the existing halt behaviour.
             exit_code = ev.get("exit_code", 0)
+            # #4 NEW-4 — outer/inner exit-code race: the outer ``claude -p``
+            # can exit 0 while the inner ``bmad-auto-dev-runner.sh`` exited
+            # non-zero (it echoes ``Exit code: N`` to stdout). A non-zero
+            # inner code overrides an outer-0 success so analytics don't
+            # record a false positive that masks a real halt.
+            inner_exit_code = parse_inner_exit_code(stdout_tail)
+            inner_exit_failure = (
+                exit_code == 0
+                and inner_exit_code is not None
+                and inner_exit_code != 0
+            )
             if exit_code == 0 and handle.base_sha:
                 commits = await _count_new_commits(
                     handle.worktree, handle.base_sha
@@ -1866,16 +1878,33 @@ async def _tail_and_emit_completion(
                         reason="silent_failure_zero_commits",
                     )
                     return "silent_failure"
+            status = ev.get("status", "success")
+            completion_extra: dict[str, object] = {}
+            if inner_exit_failure:
+                status = "failure"
+                completion_extra["inner_exit_code"] = inner_exit_code
+                completion_extra["outer_exit_code"] = exit_code
+                log.warning(
+                    "worker_inner_exit_mismatch",
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    inner_exit_code=inner_exit_code,
+                    outer_exit_code=exit_code,
+                    note="outer claude -p exit 0 but inner runner exit != 0",
+                )
             await bus.emit(
                 EventType.WORKER_COMPLETED,
                 story_id=handle.story_id,
                 worktree=handle.worktree,
                 jsonl=str(handle.jsonl_path),
                 exit_code=exit_code,
-                status=ev.get("status", "success"),
+                status=status,
                 mock=False,
                 review_iteration=int(ev.get("review_iteration", 1) or 1),
+                **completion_extra,
             )
+            if inner_exit_failure:
+                return "failed"
             return "completed" if exit_code == 0 else "failed"
         if event_type == "worker_halt_file":
             if tracker is not None and budget is not None:
