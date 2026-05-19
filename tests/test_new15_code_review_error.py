@@ -39,11 +39,12 @@ class _SequenceStage:
 
     async def __call__(
         self, *, worktree: str, story_id: str, wave: str, bus: EventLoop
-    ) -> tuple[str, str, None]:
+    ) -> tuple[str, str, None, str]:
         idx = min(self.calls, len(self._verdicts) - 1)
         self.calls += 1
         v = self._verdicts[idx]
-        return v, f"{v} summary", None
+        # 4-tuple since NEW-21 (verdict, summary, metrics, jsonl_path).
+        return v, f"{v} summary", None, ""
 
 
 def _drain(bus: EventLoop) -> list[Event]:

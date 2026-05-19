@@ -116,7 +116,7 @@ async def test_spec_stage_emits_merge_gate_stage_completed(
         new_callable=AsyncMock,
         return_value=fake_handle,
     ):
-        verdict, _summary, _metrics = await _run_merge_gate_spec_stage(
+        verdict, _summary, _metrics, jsonl_str = await _run_merge_gate_spec_stage(
             worktree="/tmp/wt",
             story_id="1.1",
             wave="w1",
@@ -124,6 +124,7 @@ async def test_spec_stage_emits_merge_gate_stage_completed(
         )
 
     assert verdict == "approve"
+    assert jsonl_str == str(jsonl_path)  # NEW-21: real review_jsonl surfaced
     emitted = _drain_bus(bus)
     stage_events = [e for e in emitted if e.type == EventType.MERGE_GATE_STAGE_COMPLETED]
     assert len(stage_events) == 1
@@ -154,7 +155,7 @@ async def test_quality_stage_emits_merge_gate_stage_completed(
         new_callable=AsyncMock,
         return_value=fake_handle,
     ):
-        verdict, _summary, _metrics = await _run_merge_gate_quality_stage(
+        verdict, _summary, _metrics, jsonl_str = await _run_merge_gate_quality_stage(
             worktree="/tmp/wt",
             story_id="1.1",
             wave="w1",
@@ -162,6 +163,7 @@ async def test_quality_stage_emits_merge_gate_stage_completed(
         )
 
     assert verdict == "approve"
+    assert jsonl_str == str(jsonl_path)  # NEW-21: real review_jsonl surfaced
     emitted = _drain_bus(bus)
     stage_events = [e for e in emitted if e.type == EventType.MERGE_GATE_STAGE_COMPLETED]
     assert len(stage_events) == 1
