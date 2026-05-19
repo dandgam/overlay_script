@@ -148,6 +148,11 @@ from bmad_orchestrator.runtime.verdict_fallback import (
     parse_runner_review_log,
     read_runner_verdict,
 )
+from bmad_orchestrator.runtime.worker_events import (
+    detect_stage_marker,
+    merge_worktree_events,
+    worktree_events_path,
+)
 from bmad_orchestrator.runtime.worker_silent_failure import (
     decide_cleanup_recovery,
     decide_worker_status,
@@ -2008,7 +2013,38 @@ async def _tail_and_emit_completion(
                 stdout_tail.append(text)
                 if len(stdout_tail) > _STDOUT_TAIL_CAP:
                     del stdout_tail[: len(stdout_tail) - _STDOUT_TAIL_CAP]
+                # #10 NEW-10 — surface stage transitions so the orchestrator
+                # log does not go silent for the full worker lifetime.
+                stage = detect_stage_marker(text)
+                if stage is not None:
+                    log.info(
+                        "worker_stage_progress",
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        stage=stage,
+                    )
         if event_type == "worker_completed":
+            # #10 NEW-10 — propagate worktree-internal worker events into the
+            # orchestrator-side runs/ events.jsonl so the run is diagnosable
+            # post-hoc (pilot run #3 left the main file with a stale mtime).
+            try:
+                merged = merge_worktree_events(
+                    worktree_events_path(handle.worktree),
+                    handle.jsonl_path,
+                )
+                if merged:
+                    log.info(
+                        "worker_events_merged",
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        events_merged=merged,
+                    )
+            except OSError as exc:
+                log.warning(
+                    "worker_events_merge_failed",
+                    story_id=handle.story_id,
+                    error=str(exc),
+                )
             if tracker is not None and budget is not None:
                 if subscription_mode and _tracker_has_no_usage(tracker):
                     await _emit_cost_tracking_unavailable(

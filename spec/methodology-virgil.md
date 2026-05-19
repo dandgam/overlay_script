@@ -338,17 +338,21 @@ integration ветка не создана. Детали — memory [[project_pi
 - ❌ **NEW-7 НЕ validated** — `_reconcile_success_verdicts` реконсилит только success
   verdict'ы; все 3 story помечены `failed` → нечего мержить → ни integration ветки, ни
   `INTEGRATION_MERGE_SKIPPED`. Merge-path так и не протестирован.
-- ⬜ **NEW-9 (P1, КОРЕНЬ)** · `Тип: 🐛 Баг` — **runner exit non-zero на успешной story перекрывает verdict** —
-  story 1.5 прошла ПОЛНЫЙ цикл (dev `63dc8d4` + autofix `79bc93c` F1-F4, 2 коммита), но
-  помечена `failed`. Цепочка: runner exit non-zero на финальной стадии → NEW-4
-  `parse_inner_exit_code` ставит `status=failure` → counter failed → reconcile нечего
-  мержить. **NEW-4 over-correction** — стал строже к exit code, завершённая работа с
-  коммитами = failed. Fix: orchestrator берёт `verdict=approve` из stage6 review log как
-  source-of-truth (verdict approve + commits → success, независимо от runner exit code).
-  Разблокирует NEW-7. ~1 сессия.
-- ⬜ **NEW-10 (P2)** · `Тип: 🐛 Баг` — **worker events не доходят до главного `events.jsonl` + orchestrator-лога** —
-  `runs/default/wt-1.X.events.jsonl` с mtime прошлого run'а; orchestrator-лог пуст 30 мин
-  между worktree_created и real_pilot_done. Диагностика run'а почти невозможна.
+- ✅ **NEW-9 (P1, КОРЕНЬ)** — DONE 2026-05-19 (S1 `pilot_findings_closure_v4` `80dd56d`):
+  `decide_worker_status(verdict, new_commits_count, inner_exit, outer_exit)` —
+  `verdict=approve` + commits → `success` независимо от runner exit code; `request_changes`/
+  `reject` → `failure`; verdict=None → старый exit-code fallback. `read_runner_verdict`
+  читает stage6 review log. Wired в `_tail_and_emit_completion`; `worker_completed` payload
+  получил `verdict`/`new_commits_count`/`status_decided_by`. +11 tests. Разблокирует NEW-7.
+- ✅ **NEW-10 (P2)** — DONE 2026-05-19 (S2 `pilot_findings_closure_v4`): модуль
+  `runtime/worker_events.py` — `merge_worktree_events` мержит worktree-internal
+  `events.jsonl` в главный `runs/<wave>/wt-<id>.events.jsonl` (append + dedup по ts) после
+  `worker_completed`; `detect_stage_marker` эмитит `worker_stage_progress` лог-строки чтобы
+  orchestrator-лог не молчал. +7 tests.
+- ✅ **NEW-5 recheck (P2)** — DONE 2026-05-19 (S2 `pilot_findings_closure_v4`):
+  dirty-worktree gate (`filter_dirty_outside_claude`) игнорирует `.claude/` пути — embedded
+  skills (~73 файла) больше не считаются «грязью»; `_clean_dirty_worktree` использует
+  `git clean -fd -e .claude` чтобы реальная грязь чистилась без сноса skills. +5 tests.
 
 **Recommended next initiative:** `pilot_findings_closure_v4` — приоритет **NEW-9** (verdict
 как source-of-truth — разблокирует NEW-7) + NEW-10 (observability) + перепроверка NEW-5.
@@ -377,6 +381,6 @@ integration ветка не создана. Детали — memory [[project_pi
 
 ---
 
-**Last updated:** 2026-05-19 (v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Last updated:** 2026-05-19 (v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
 **Status:** v13.5 — **Phase 3 gate CLOSED** (Step A `28 tests` + Step B `10 real cases` + baseline scaffold `evals/baselines/phase3-step-b-baseline.json`). pilot_findings_closure initiative complete on integration branch (S1..S8, 5 P1 + 3 P2 + 1 P3 + R1 + R2): tests **1945 PASS** (+85 vs 1860 baseline; +5 expected after S8 merge), mypy/ruff clean, EventType count **34** (+5: STORY_AUTO_SPLIT, WORKER_CANCELLED, MCP_NOT_READY, BUDGET_AUTO_DISABLED, WORKER_HALT_PRESPAWN). **Awaits manual merge** `git checkout main && git merge --no-ff integration/pilot_findings_closure`. **#10 production pilot UNBLOCKED** post-merge.
 **Owner:** user + Claude orchestrator
