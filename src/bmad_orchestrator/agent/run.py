@@ -161,6 +161,15 @@ from bmad_orchestrator.runtime.worker_silent_failure import (
     detect_reused_worktree_cleanup_failure,
     parse_inner_exit_code,
 )
+from bmad_orchestrator.runtime.stuck_watchdog import (
+    DEFAULT_CHECK_INTERVAL_SECONDS as STUCK_CHECK_INTERVAL_DEFAULT,
+)
+from bmad_orchestrator.runtime.stuck_watchdog import (
+    DEFAULT_STUCK_TIMEOUT_SECONDS as STUCK_TIMEOUT_DEFAULT,
+)
+from bmad_orchestrator.runtime.stuck_watchdog import (
+    tail_with_stuck_watchdog,
+)
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHaltPrespawnError,
     WorkerHandle,
@@ -2147,7 +2156,29 @@ async def _tail_and_emit_completion(
     # silent failure when stage5 never ran.
     stage5_seen = False
 
-    async for ev in tail_jsonl_events(handle.jsonl_path):
+    _stuck_timeout = float(
+        os.environ.get("BMAD_STUCK_TIMEOUT_SECONDS", STUCK_TIMEOUT_DEFAULT)
+    )
+    _stuck_check = float(
+        os.environ.get(
+            "BMAD_STUCK_CHECK_INTERVAL_SECONDS", STUCK_CHECK_INTERVAL_DEFAULT
+        )
+    )
+
+    async def _commit_counter_for_handle() -> int:
+        if not handle.base_sha:
+            return 0
+        return await _count_new_commits(handle.worktree, handle.base_sha)
+
+    async for ev in tail_with_stuck_watchdog(
+        handle.jsonl_path,
+        bus,
+        story_id=handle.story_id,
+        worktree=handle.worktree,
+        commit_counter=_commit_counter_for_handle,
+        stuck_threshold_seconds=_stuck_timeout,
+        check_interval_seconds=_stuck_check,
+    ):
         if tracker is not None and budget is not None:
             delta = tracker.feed(ev)
             if delta > 0:

@@ -177,6 +177,7 @@ class EventType(StrEnum):
     # {story_id, worktree, jsonl, reason}.
     WORKER_EXIT_UNCOMMITTED = "worker_exit_uncommitted"
     INTEGRATION_TEST_FAILED = "integration_test_failed"
+    WORKER_STUCK_TIMEOUT = "worker_stuck_timeout"
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
 

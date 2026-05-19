@@ -131,10 +131,11 @@ def test_event_loop_has_all_spec_types() -> None:
         "worker_exit_uncommitted",
         # 2026-05-20 NEW-32.
         "integration_test_failed",
+        "worker_stuck_timeout",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 42
+    assert len(ALL_EVENT_TYPES) == 43
 
 
 @pytest.mark.asyncio
