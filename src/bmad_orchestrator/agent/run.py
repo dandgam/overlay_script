@@ -144,9 +144,13 @@ from bmad_orchestrator.runtime.supervisor_subscriber import (
 from bmad_orchestrator.runtime.supervisor_subscriber import (
     make_supervisor_subscriber,
 )
-from bmad_orchestrator.runtime.verdict_fallback import parse_runner_review_log
+from bmad_orchestrator.runtime.verdict_fallback import (
+    parse_runner_review_log,
+    read_runner_verdict,
+)
 from bmad_orchestrator.runtime.worker_silent_failure import (
     decide_cleanup_recovery,
+    decide_worker_status,
     detect_reused_worktree_cleanup_failure,
     parse_inner_exit_code,
 )
@@ -2073,47 +2077,70 @@ async def _tail_and_emit_completion(
             exit_code = ev.get("exit_code", 0)
             # #4 NEW-4 — outer/inner exit-code race: the outer ``claude -p``
             # can exit 0 while the inner ``bmad-auto-dev-runner.sh`` exited
-            # non-zero (it echoes ``Exit code: N`` to stdout). A non-zero
-            # inner code overrides an outer-0 success so analytics don't
-            # record a false positive that masks a real halt.
+            # non-zero (it echoes ``Exit code: N`` to stdout). The inner code
+            # stays a SIGNAL, but #9 NEW-9 demotes it from sole decider —
+            # ``decide_worker_status`` resolves the terminal status from the
+            # Stage 6 verdict + commit count, with exit codes as fallback.
             inner_exit_code = parse_inner_exit_code(stdout_tail)
             inner_exit_failure = (
                 exit_code == 0
                 and inner_exit_code is not None
                 and inner_exit_code != 0
             )
-            if exit_code == 0 and handle.base_sha:
-                commits = await _count_new_commits(
+            # #9 NEW-9 — commit count + Stage 6 verdict for the verdict
+            # source-of-truth decision. ``new_commits_count`` is also reused by
+            # the silent-failure guard below.
+            new_commits_count = 0
+            if handle.base_sha:
+                new_commits_count = await _count_new_commits(
                     handle.worktree, handle.base_sha
                 )
-                if commits == 0:
-                    log.warning(
-                        "worker_silent_failure",
-                        story_id=handle.story_id,
-                        worktree=handle.worktree,
-                        base_sha=handle.base_sha,
-                        note="exit_code=0 but zero new commits — treating as halt",
-                    )
-                    await bus.emit(
-                        EventType.WORKER_SILENT_FAILURE,
-                        story_id=handle.story_id,
-                        worktree=handle.worktree,
-                        jsonl=str(handle.jsonl_path),
-                        exit_code=exit_code,
-                        base_sha=handle.base_sha,
-                    )
-                    await bus.emit(
-                        EventType.WORKER_HALT_FILE,
-                        story_id=handle.story_id,
-                        worktree=handle.worktree,
-                        jsonl=str(handle.jsonl_path),
-                        reason="silent_failure_zero_commits",
-                    )
-                    return "silent_failure"
-            status = ev.get("status", "success")
-            completion_extra: dict[str, object] = {}
+            runner_verdict = read_runner_verdict(
+                handle.worktree, handle.story_id
+            )
+            if (
+                exit_code == 0
+                and handle.base_sha
+                and new_commits_count == 0
+            ):
+                log.warning(
+                    "worker_silent_failure",
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    base_sha=handle.base_sha,
+                    note="exit_code=0 but zero new commits — treating as halt",
+                )
+                await bus.emit(
+                    EventType.WORKER_SILENT_FAILURE,
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    jsonl=str(handle.jsonl_path),
+                    exit_code=exit_code,
+                    base_sha=handle.base_sha,
+                )
+                await bus.emit(
+                    EventType.WORKER_HALT_FILE,
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    jsonl=str(handle.jsonl_path),
+                    reason="silent_failure_zero_commits",
+                )
+                return "silent_failure"
+            status = decide_worker_status(
+                verdict=runner_verdict,
+                new_commits_count=new_commits_count,
+                inner_exit=inner_exit_code,
+                outer_exit=exit_code,
+            )
+            status_decided_by = (
+                "verdict" if runner_verdict is not None else "exit_code_fallback"
+            )
+            completion_extra: dict[str, object] = {
+                "verdict": runner_verdict,
+                "new_commits_count": new_commits_count,
+                "status_decided_by": status_decided_by,
+            }
             if inner_exit_failure:
-                status = "failure"
                 completion_extra["inner_exit_code"] = inner_exit_code
                 completion_extra["outer_exit_code"] = exit_code
                 log.warning(
@@ -2122,7 +2149,12 @@ async def _tail_and_emit_completion(
                     worktree=handle.worktree,
                     inner_exit_code=inner_exit_code,
                     outer_exit_code=exit_code,
-                    note="outer claude -p exit 0 but inner runner exit != 0",
+                    final_status=status,
+                    status_decided_by=status_decided_by,
+                    note=(
+                        "inner runner exit != 0 with outer exit 0; "
+                        "status resolved by " + status_decided_by
+                    ),
                 )
             await bus.emit(
                 EventType.WORKER_COMPLETED,
@@ -2135,9 +2167,7 @@ async def _tail_and_emit_completion(
                 review_iteration=int(ev.get("review_iteration", 1) or 1),
                 **completion_extra,
             )
-            if inner_exit_failure:
-                return "failed"
-            return "completed" if exit_code == 0 else "failed"
+            return "completed" if status == "success" else "failed"
         if event_type == "worker_halt_file":
             if tracker is not None and budget is not None:
                 if subscription_mode and _tracker_has_no_usage(tracker):

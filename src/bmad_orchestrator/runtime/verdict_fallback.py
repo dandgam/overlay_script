@@ -118,4 +118,22 @@ def parse_runner_review_log(
     return None
 
 
-__all__ = ["Verdict", "parse_runner_review_log"]
+def read_runner_verdict(worktree: str | Path, story_id: str) -> Verdict | None:
+    """Return just the runner Stage 6 verdict string for ``story_id``, or None.
+
+    Thin reader over :func:`parse_runner_review_log` for callers that only need
+    the verdict (``approve`` | ``request_changes`` | ``reject``) and not the
+    human-readable summary — notably ``agent.run._tail_and_emit_completion``,
+    which feeds the verdict into ``decide_worker_status`` (NEW-9: verdict is the
+    source-of-truth for worker success, runner exit code is secondary).
+
+    None when no parseable Stage 6 review log exists — the caller then falls
+    back to exit-code logic.
+    """
+    result = parse_runner_review_log(worktree, story_id)
+    if result is None:
+        return None
+    return result[0]
+
+
+__all__ = ["Verdict", "parse_runner_review_log", "read_runner_verdict"]
