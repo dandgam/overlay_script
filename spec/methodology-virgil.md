@@ -258,7 +258,7 @@ merge в `main` — manual (Auto merge=false).
 Запуск `virgil run --project antares --wave 1a --real --story 1.3/1.4/1.5`. Все 3 stories
 halted на одном паттерне, 1.3 с реальной работой потеряна (не merged в integration).
 
-- ⬜ **P1 NEW-1: `--project <slug>` flag не побеждает `ORCHESTRATOR_TARGET_PROJECT` env var** —
+- ✅ **P1 NEW-1: `--project <slug>` flag не побеждает `ORCHESTRATOR_TARGET_PROJECT` env var** — DONE 2026-05-19 (commits `64f07a9` + `0348b75`, S1 `pilot_findings_closure_v2`): CLI `run` резолвит registry в strict mode, `ProjectNotFoundError` fail-loud, `run_orchestrator` принимает pre-resolved `Settings`. —
   при запуске `virgil run --project antares` оркестратор создал worktrees в
   `/home/server/odyssey/.worktrees/wt-1.X` несмотря на `config/projects.yaml::antares.path=/home/server/Antares`.
   Workaround: `ORCHESTRATOR_TARGET_PROJECT=/home/server/Antares virgil run ...` (env override
@@ -267,7 +267,7 @@ halted на одном паттерне, 1.3 с реальной работой 
   [[project_backlog_target_resolution_bug]]. ~0.5 сессии + тест
   `test_project_flag_overrides_env.py`. **Блокирует чистый запуск любого target проекта.**
 
-- ⬜ **P1 NEW-2: runner Stage 7 cleanup ломается на reused worktree** — 3/3 stories
+- ✅ **P1 NEW-2: runner Stage 7 cleanup ломается на reused worktree** — DONE 2026-05-19 (commit `0e4e6d0`, S2 `pilot_findings_closure_v2`): Layer A — `stage7_cleanup_feature_branch()` graceful skip при worktree-hold + synthetic verdict + `BMAD_RUNNER_SKIP_STAGE7=1`. Layer B — pure detector `runtime/worker_silent_failure.py` + wire-in `_tail_and_emit_completion`, EventType #35 `RUNNER_CLEANUP_FAILED_REUSED_WORKTREE`. Layer C (pre-spawn refresh) deferred в follow-up. — 3/3 stories
   на Antares 1a (включая 1.3 с 2 коммитами реальной autofix-работы) halted одинаково:
   `error: cannot delete branch 'feature/1.X' used by worktree at '/home/server/Antares/.worktrees/wt-1.X'`.
   `bmad-auto-dev-runner.sh` Stage 7 cleanup делает `git branch -D feature/<id>` на
@@ -289,18 +289,16 @@ halted на одном паттерне, 1.3 с реальной работой 
   См. memory [[project_backlog_runner_reused_worktree_cleanup]]. ~1-1.5 сессии.
   **Блокирует ЛЮБОЙ production pilot на projects где worktrees уже существуют (т.е. почти всегда).**
 
-- ⬜ **P2 NEW-3: S1 `normalize_story_id` resolver не находит match** — log показал
+- ✅ **P2 NEW-3: S1 `normalize_story_id` resolver не находит match** — DONE 2026-05-19 (commit `729650f`, S1 `pilot_findings_closure_v2`): `resolve_sprint_status_key` получил детерминированный tie-break (lexicographic sort + `sprint_status_key_ambiguous` warning) для kebab+slug composite. — log показал
   `pilot_mark_done_unresolved reason='no matching sprint-status key in any epic block' spawned_id=1.3`,
   при этом sprint-status имеет ключ `1-3-fastapi-app-lifespan-health`. Наш
   `resolve_sprint_status_key` (S1, commit `7edc9bb`) видимо не сматчил `1.3` → kebab+slug
   composite key. Fix: расширить fuzzy match — split kebab key на dotted-prefix +
   slug-suffix, match только по prefix. ~0.3 сессии.
 
-- ⬜ **P2 NEW-4: `worker_completed status=success` при runner exit 1** — race условие:
+- ✅ **P2 NEW-4: `worker_completed status=success` при runner exit 1** — DONE 2026-05-19 (commit `5bd9ff1`, S3 `pilot_findings_closure_v2`): `parse_inner_exit_code` сканирует stdout-tail на `^(?:❯ )?Exit code: (\d+)$`; при inner!=0 && outer==0 `_tail_and_emit_completion` ставит `status=failure` + `inner_exit_code`/`outer_exit_code` в payload. race условие:
   outer claude -p exit 0 (он dutifully reported inner exit), но inner
-  `bmad-auto-dev-runner.sh` exit 1. Orchestrator пишет `status=success` потому что
-  смотрит на outer exit. Fix: parse stdout_lines на `^Exit code: (\d+)$` regex,
-  использовать inner exit code в `worker_completed`. ~0.3 сессии.
+  `bmad-auto-dev-runner.sh` exit 1.
 
 **Связь с pilot_findings_closure:** этот pilot — первый РЕАЛЬНЫЙ production run после
 merge `f2ff857`. Подтвердил что fixes работают (S6 budget auto-disable сработал; S1
@@ -308,10 +306,11 @@ counter split дал spawned/succeeded/failed; S2 verdict-fallback не помо
 потому что Stage 7 падает ДО Stage 6 review log creation). Нашёл 4 новых P1/P2 баг'а,
 из которых **P1 NEW-2 — главная блокировка** для любого production pilot.
 
-**Recommended next initiative:** `pilot_findings_closure_v2` через `/auto-loop-spec-long` —
-2-3 сессии на P1 NEW-1 + P1 NEW-2 + P2 NEW-3 + P2 NEW-4. После закрытия — повторный
-прогон Antares Epic 1 (теперь с fresh worktrees через decommission старых) для
-валидации.
+**Recommended next initiative:** ✅ `pilot_findings_closure_v2` ЗАКРЫТА 2026-05-19
+(S1..S3 на `integration/pilot_findings_closure_v2`, NEW-1..NEW-4 + EventType #35,
+2009 PASS). Layer C (pre-spawn worktree refresh) deferred. Следующее — `pilot_findings_closure_v2_validation`:
+повторный прогон Antares Epic 1 (1.3/1.4/1.5) на fresh worktrees ПОСЛЕ merge для
+валидации fixes.
 
 ---
 
@@ -335,6 +334,6 @@ counter split дал spawned/succeeded/failed; S2 verdict-fallback не помо
 
 ---
 
-**Last updated:** 2026-05-19 (v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Last updated:** 2026-05-19 (v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
 **Status:** v13.5 — **Phase 3 gate CLOSED** (Step A `28 tests` + Step B `10 real cases` + baseline scaffold `evals/baselines/phase3-step-b-baseline.json`). pilot_findings_closure initiative complete on integration branch (S1..S8, 5 P1 + 3 P2 + 1 P3 + R1 + R2): tests **1945 PASS** (+85 vs 1860 baseline; +5 expected after S8 merge), mypy/ruff clean, EventType count **34** (+5: STORY_AUTO_SPLIT, WORKER_CANCELLED, MCP_NOT_READY, BUDGET_AUTO_DISABLED, WORKER_HALT_PRESPAWN). **Awaits manual merge** `git checkout main && git merge --no-ff integration/pilot_findings_closure`. **#10 production pilot UNBLOCKED** post-merge.
 **Owner:** user + Claude orchestrator

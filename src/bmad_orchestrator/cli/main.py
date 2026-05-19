@@ -54,6 +54,7 @@ from bmad_orchestrator.runtime.multi_run import (
     run_multi,
 )
 from bmad_orchestrator.runtime.project_registry import (
+    ProjectNotFoundError,
     ProjectRegistryError,
     ProjectsRegistry,
     load_registry,
@@ -391,25 +392,59 @@ def _build_snapshot(
 
 
 def _resolve_settings_for_project(
-    settings: Settings, project_slug: str | None
+    settings: Settings, project_slug: str | None, *, strict: bool = False
 ) -> Settings:
     """Return Settings with target_project pointed at `project_slug`'s path.
 
-    Falls back to the original `settings` when:
-      - `project_slug` is None or matches `settings.target_project.name`
-      - the registry has no entry (graceful degrade — we just read from the
-        env-bound project, which is wrong but doesn't crash).
+    CLI precedence (NEW-1) — the resolved target project is decided in this
+    order, highest wins:
+
+        1. ``--project <slug>`` flag  (this function, via the registry)
+        2. ``config/projects.yaml`` registry lookup
+        3. ``ORCHESTRATOR_TARGET_PROJECT`` env var  (bound onto Settings)
+        4. ``Settings`` default (``/home/server/odyssey``)
+
+    So an explicit ``--project`` deterministically beats the env var: when the
+    slug resolves through the registry, the env-bound ``settings.target_project``
+    is replaced with the registry path.
+
+    `strict` controls the registry-miss behaviour:
+
+      - ``strict=False`` (default, used by read-only status snapshots): an
+        absent registry entry or an unreadable registry degrades gracefully —
+        the original env-bound `settings` is returned. A wrong-but-non-crashing
+        snapshot is acceptable for a display path.
+      - ``strict=True`` (used by `virgil run` and other mutating subcommands):
+        an absent entry raises :class:`ProjectNotFoundError` and a malformed
+        registry propagates its load error. Silent degrade here would spawn
+        worktrees in the wrong project — the NEW-1 bug.
+
+    Falls back to the original `settings` without consulting the registry when
+    `project_slug` is None or already matches `settings.target_project.name`.
     """
     if not project_slug or project_slug == settings.target_project.name:
         return settings
+    reg_path = registry_path(orchestrator_home=settings.orchestrator_home)
     try:
-        reg_path = registry_path(orchestrator_home=settings.orchestrator_home)
         reg = load_registry(reg_path)
     except Exception:
+        if strict:
+            raise
         return settings
     entry = reg.projects.get(project_slug)
     if entry is None:
+        if strict:
+            raise ProjectNotFoundError(
+                f"Project '{project_slug}' not found in {reg_path}. "
+                f"Run 'virgil project add' or check config/projects.yaml."
+            )
         return settings
+    if entry.path != settings.target_project:
+        console.print(
+            f"[dim]overriding ORCHESTRATOR_TARGET_PROJECT="
+            f"{settings.target_project} with --project={project_slug} "
+            f"→ resolved path {entry.path}[/dim]"
+        )
     return settings.model_copy(update={"target_project": entry.path})
 
 
@@ -475,6 +510,19 @@ def run(
             )
         max_parallel = parallel
 
+    # NEW-1 — `--project` must beat the `ORCHESTRATOR_TARGET_PROJECT` env var.
+    # Resolve the slug through the registry in strict mode (unregistered slug
+    # → fail loud) and hand the resolved Settings to `run_orchestrator` so it
+    # spawns worktrees in the requested project, not the env-bound default.
+    base_settings = load_settings()
+    try:
+        effective_settings = _resolve_settings_for_project(
+            base_settings, project, strict=True
+        )
+    except ProjectNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
     models_cfg = _resolve_models(
         model=model,
         planner_model=planner_model,
@@ -533,6 +581,7 @@ def run(
                 models=models_cfg, mock=mock,
                 max_stories=max_stories, max_spend_usd=max_spend_usd,
                 stories=tuple(story) if story else None,
+                settings=effective_settings,
             )
 
         async def _supervised() -> None:
@@ -558,6 +607,7 @@ def run(
             models=models_cfg, mock=mock,
             max_stories=max_stories, max_spend_usd=max_spend_usd,
             stories=tuple(story) if story else None,
+            settings=effective_settings,
         )
     )
 

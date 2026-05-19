@@ -33,7 +33,7 @@ BACKSTOP_INTERVAL_SECONDS_DEFAULT = 300
 
 
 class EventType(StrEnum):
-    """Spec §4 — все 13 типов + FS4 HUMAN_QUERY. Phase 4 hardening adds up to 29 total."""
+    """Spec §4 — все 13 типов + FS4 HUMAN_QUERY. Phase 4 hardening adds up to 30 total."""
 
     WORKER_COMPLETED = "worker_completed"
     WORKER_HALT_FILE = "worker_halt_file"
@@ -111,6 +111,15 @@ class EventType(StrEnum):
     # Payload: {story_id, total_input_tokens, total_cached_tokens, total_output_tokens,
     #           total_cost_usd, retry_count, p95_turn_latency_ms, lessons_extracted: bool}
     STORY_METRICS_AGGREGATED = "story_metrics_aggregated"
+    # Initiative pilot_findings_closure_v2 S2 (#2 NEW-2 Layer B): emitted by
+    # ``agent.run._tail_and_emit_completion`` when the worker's stdout carries a
+    # ``cannot delete branch ... used by worktree`` line — the runner's Stage 7
+    # ``git branch -d`` failed because a reused/stale worktree still holds the
+    # feature branch. Payload: {story_id, worktree, branch, commits, jsonl}.
+    # When ``commits > 0`` the detector additionally emits a synthetic
+    # CODE_REVIEW_VERDICT(verdict=approve, source=runner_cleanup_recovery) so the
+    # merge subscriber recovers the work instead of treating it as a halt.
+    RUNNER_CLEANUP_FAILED_REUSED_WORKTREE = "runner_cleanup_failed_reused_worktree"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)

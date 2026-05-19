@@ -108,10 +108,13 @@ def test_event_loop_has_all_spec_types() -> None:
         "budget_auto_disabled",
         # 2026-05-19 spec_pilot_findings_closure S6 #7 — pre-spawn halt gate.
         "worker_halt_prespawn",
+        # 2026-05-19 spec_pilot_findings_closure_v2 S2 #2 — reused-worktree
+        # Stage 7 cleanup-failure detector.
+        "runner_cleanup_failed_reused_worktree",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 34
+    assert len(ALL_EVENT_TYPES) == 35
 
 
 @pytest.mark.asyncio

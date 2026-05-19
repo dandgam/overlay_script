@@ -40,6 +40,15 @@ class ProjectRegistryError(ValueError):
     """Raised on malformed yaml, bad slug, or path validation failure."""
 
 
+class ProjectNotFoundError(ProjectRegistryError):
+    """Raised when an explicitly requested project slug has no registry entry.
+
+    Surfaced by ``--project <slug>`` resolution in strict mode: a typo or an
+    unregistered project must fail loud instead of silently degrading to the
+    env-bound default target (the ``--project``-vs-env bug, NEW-1).
+    """
+
+
 class ProjectIsolationError(ProjectRegistryError):
     """Raised when a project path overlaps a forbidden host mount (prod CRM).
 

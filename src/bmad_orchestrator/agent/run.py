@@ -68,7 +68,7 @@ from bmad_orchestrator.agent.skills import dispatch as dispatch_skills
 from bmad_orchestrator.agent.skills import load_body as load_skill_body
 from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
 from bmad_orchestrator.agent.tools import ALL_TOOLS
-from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.config import ModelConfig, Settings, load_settings
 from bmad_orchestrator.runtime.auto_split import (
     AutoSplitOutcome,
     DecomposeFn,
@@ -144,6 +144,11 @@ from bmad_orchestrator.runtime.supervisor_subscriber import (
     make_supervisor_subscriber,
 )
 from bmad_orchestrator.runtime.verdict_fallback import parse_runner_review_log
+from bmad_orchestrator.runtime.worker_silent_failure import (
+    decide_cleanup_recovery,
+    detect_reused_worktree_cleanup_failure,
+    parse_inner_exit_code,
+)
 from bmad_orchestrator.runtime.worker_spawn import (
     WorkerHandle,
     tail_jsonl_events,
@@ -220,6 +225,7 @@ async def run_orchestrator(
     max_stories: int = 50,
     max_spend_usd: float = 50.0,
     stories: tuple[str, ...] | None = None,
+    settings: Settings | None = None,
 ) -> EventLoop:
     """Main orchestrator loop. Returns the EventLoop instance.
 
@@ -238,8 +244,14 @@ async def run_orchestrator(
     needed for the bot's NL intent-router (graceful slash-command fallback
     without it). When multi-LLM support lands, this comment becomes outdated.
     See memory: feedback_no_anthropic_api.
+
+    ``settings`` — when provided (e.g. by the CLI after resolving an explicit
+    ``--project`` flag through the registry), it is used verbatim instead of
+    ``load_settings()``. This is how ``--project`` deterministically beats the
+    ``ORCHESTRATOR_TARGET_PROJECT`` env var (NEW-1): the CLI hands down a
+    Settings whose ``target_project`` is already the registry-resolved path.
     """
-    settings = load_settings()
+    settings = settings or load_settings()
     models = models or settings.models
     bus = event_loop or EventLoop()
 
@@ -1692,6 +1704,13 @@ async def _count_new_commits(worktree: str, base_sha: str) -> int:
         return 0
 
 
+# #2 NEW-2 Layer B — how many trailing stdout lines to retain for the runner
+# Stage 7 cleanup-failure scan. The refusal is logged once near the end of the
+# run; ~50 lines is the spec target, 300 gives generous headroom for noisy
+# trailing output without unbounded memory growth on long workers.
+_STDOUT_TAIL_CAP = 300
+
+
 async def _tail_and_emit_completion(
     handle: WorkerHandle,
     bus: EventLoop,
@@ -1734,6 +1753,11 @@ async def _tail_and_emit_completion(
     if budget is not None and model:
         tracker = WorkerCostTracker(model=model)
 
+    # #2 NEW-2 Layer B — keep a bounded tail of plain stdout lines so that, on
+    # the terminal event, we can detect the runner's reused-worktree Stage 7
+    # cleanup failure (``cannot delete branch ... used by worktree``).
+    stdout_tail: list[str] = []
+
     async for ev in tail_jsonl_events(handle.jsonl_path):
         if tracker is not None and budget is not None:
             delta = tracker.feed(ev)
@@ -1742,6 +1766,12 @@ async def _tail_and_emit_completion(
                     scope=f"worker:{handle.story_id}", spent=delta
                 )
         event_type = ev.get("event_type")
+        if event_type == "stdout_line":
+            text = ev.get("text")
+            if isinstance(text, str):
+                stdout_tail.append(text)
+                if len(stdout_tail) > _STDOUT_TAIL_CAP:
+                    del stdout_tail[: len(stdout_tail) - _STDOUT_TAIL_CAP]
         if event_type == "worker_completed":
             if tracker is not None and budget is not None:
                 if subscription_mode and _tracker_has_no_usage(tracker):
@@ -1751,7 +1781,75 @@ async def _tail_and_emit_completion(
                 else:
                     _emit_worker_cost_final(tracker, handle.story_id)
                     budget.record_story_cost(tracker.total_cost)
+            # #2 NEW-2 Layer B — detect the runner's reused-worktree Stage 7
+            # cleanup failure. When the feature branch still carries commits
+            # past base_sha, recover the work via a synthetic approve verdict;
+            # otherwise fall through to the silent-failure / halt path below.
+            cleanup_branch = detect_reused_worktree_cleanup_failure(stdout_tail)
+            if cleanup_branch is not None:
+                cleanup_commits = (
+                    await _count_new_commits(handle.worktree, handle.base_sha)
+                    if handle.base_sha
+                    else 0
+                )
+                decision = decide_cleanup_recovery(cleanup_commits)
+                log.warning(
+                    "runner_cleanup_failed_reused_worktree",
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    branch=cleanup_branch,
+                    commits=decision.commits,
+                    recover=decision.recover,
+                )
+                await bus.emit(
+                    EventType.RUNNER_CLEANUP_FAILED_REUSED_WORKTREE,
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    branch=cleanup_branch,
+                    commits=decision.commits,
+                    jsonl=str(handle.jsonl_path),
+                )
+                if decision.recover:
+                    review_iter = int(ev.get("review_iteration", 1) or 1)
+                    await bus.emit(
+                        EventType.CODE_REVIEW_VERDICT,
+                        story_id=handle.story_id,
+                        verdict="approve",
+                        source="runner_cleanup_recovery",
+                        commits=decision.commits,
+                        summary=(
+                            f"runner Stage 7 cleanup skipped (branch "
+                            f"{cleanup_branch} held by a reused worktree); "
+                            f"{decision.commits} commit(s) recovered past "
+                            "base_sha"
+                        ),
+                        worktree=handle.worktree,
+                        review_iteration=review_iter,
+                    )
+                    await bus.emit(
+                        EventType.WORKER_COMPLETED,
+                        story_id=handle.story_id,
+                        worktree=handle.worktree,
+                        jsonl=str(handle.jsonl_path),
+                        exit_code=ev.get("exit_code", 0),
+                        status="success",
+                        mock=False,
+                        review_iteration=review_iter,
+                    )
+                    return "completed"
+                # no commits past base — preserve the existing halt behaviour.
             exit_code = ev.get("exit_code", 0)
+            # #4 NEW-4 — outer/inner exit-code race: the outer ``claude -p``
+            # can exit 0 while the inner ``bmad-auto-dev-runner.sh`` exited
+            # non-zero (it echoes ``Exit code: N`` to stdout). A non-zero
+            # inner code overrides an outer-0 success so analytics don't
+            # record a false positive that masks a real halt.
+            inner_exit_code = parse_inner_exit_code(stdout_tail)
+            inner_exit_failure = (
+                exit_code == 0
+                and inner_exit_code is not None
+                and inner_exit_code != 0
+            )
             if exit_code == 0 and handle.base_sha:
                 commits = await _count_new_commits(
                     handle.worktree, handle.base_sha
@@ -1780,16 +1878,33 @@ async def _tail_and_emit_completion(
                         reason="silent_failure_zero_commits",
                     )
                     return "silent_failure"
+            status = ev.get("status", "success")
+            completion_extra: dict[str, object] = {}
+            if inner_exit_failure:
+                status = "failure"
+                completion_extra["inner_exit_code"] = inner_exit_code
+                completion_extra["outer_exit_code"] = exit_code
+                log.warning(
+                    "worker_inner_exit_mismatch",
+                    story_id=handle.story_id,
+                    worktree=handle.worktree,
+                    inner_exit_code=inner_exit_code,
+                    outer_exit_code=exit_code,
+                    note="outer claude -p exit 0 but inner runner exit != 0",
+                )
             await bus.emit(
                 EventType.WORKER_COMPLETED,
                 story_id=handle.story_id,
                 worktree=handle.worktree,
                 jsonl=str(handle.jsonl_path),
                 exit_code=exit_code,
-                status=ev.get("status", "success"),
+                status=status,
                 mock=False,
                 review_iteration=int(ev.get("review_iteration", 1) or 1),
+                **completion_extra,
             )
+            if inner_exit_failure:
+                return "failed"
             return "completed" if exit_code == 0 else "failed"
         if event_type == "worker_halt_file":
             if tracker is not None and budget is not None:

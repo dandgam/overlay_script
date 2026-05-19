@@ -776,7 +776,9 @@ def test_w1_tail_helper_bridges_to_bus() -> None:
 # ── CLI propagation ──────────────────────────────────────────────────────────
 
 
-def test_w1_cli_daemon_args_include_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_w1_cli_daemon_args_include_caps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """``--daemon`` mode must propagate ``--max-stories`` / ``--max-spend-usd``."""
     captured: dict[str, Any] = {}
 
@@ -787,6 +789,24 @@ def test_w1_cli_daemon_args_include_caps(monkeypatch: pytest.MonkeyPatch) -> Non
             captured["args"] = args
 
     monkeypatch.setattr(cli_main.subprocess, "Popen", _FakePopen)
+
+    # NEW-1 — `--project` is now resolved strictly through the registry; an
+    # unregistered slug fails loud. Register a project so the daemon path runs.
+    from bmad_orchestrator.runtime.project_registry import (
+        REGISTRY_ENV_VAR,
+        ProjectEntry,
+        ProjectsRegistry,
+        save_registry,
+    )
+
+    reg_file = tmp_path / "projects.yaml"
+    save_registry(
+        ProjectsRegistry(
+            projects={"x": ProjectEntry(path=tmp_path / "x", bmad_layout="bmm-v6")}
+        ),
+        reg_file,
+    )
+    monkeypatch.setenv(REGISTRY_ENV_VAR, str(reg_file))
 
     runner = CliRunner()
     result = runner.invoke(cli_main.app, [
