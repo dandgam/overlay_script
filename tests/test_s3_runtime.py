@@ -117,10 +117,13 @@ def test_event_loop_has_all_spec_types() -> None:
         # 2026-05-19 spec_pilot_findings_closure_v5 S2 NEW-13 — security_review
         # technical-error audit signal (retry + escalate-story, no abort).
         "security_review_error",
+        # 2026-05-19 spec_pilot_findings_closure_v6 S1 NEW-19 — replay-from-
+        # worktree mode start signal (post-dev pipeline tail, no spawn).
+        "replay_mode_started",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 37
+    assert len(ALL_EVENT_TYPES) == 38
 
 
 @pytest.mark.asyncio

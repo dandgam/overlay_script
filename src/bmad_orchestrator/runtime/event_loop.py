@@ -139,6 +139,16 @@ class EventType(StrEnum):
     # are exhausted the subscriber escalates the single story via HUMAN_QUERY
     # instead of aborting the whole pipeline.
     SECURITY_REVIEW_ERROR = "security_review_error"
+    # Initiative pilot_findings_closure_v6 S1 (NEW-19): emitted once by
+    # :func:`agent.run.run_replay` at the start of a replay-from-worktree run.
+    # Replay skips the expensive ``spawn_worker`` (worker-dev) phase entirely:
+    # it takes a worktree that already carries a dev commit and drives only the
+    # post-dev pipeline tail (stage5 → build-check → merge-gate → reconcile →
+    # merge). Payload: {story_id, worktree, integration_branch, base_sha,
+    # dev_commits (int), synthesized (bool — True when --auto-commit-dev
+    # synthesized the dev commit from a dirty worktree)}. Lets audit consumers
+    # distinguish a cheap validation replay from a real worker-dev pilot run.
+    REPLAY_MODE_STARTED = "replay_mode_started"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)

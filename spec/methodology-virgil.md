@@ -401,6 +401,68 @@ bootstrap — 3 P2 items, ~2 сессии).
 
 ---
 
+### Backlog — pilot run #5 findings (Antares 1a после v5 merge `dbeb936`, 2026-05-19)
+
+**Replay-проверка фиксов NEW-11/12/13. Результат — НЕ 2/2.** Запуск 19:58 (только 1.4 + 1.5,
+1.3 уже в `integration/1a` с run #4). Итог `real_pilot_done spawned=2 succeeded=1 failed=1`,
+но **фактически 0 историй смержено** в `integration/1a` — ни одного `story_merged` события.
+`succeeded=1` — ложное (см. NEW-16).
+
+Validated частично:
+- ✅ **NEW-11 validated** — `build_check_skip_no_ruff_config` сработал на 1.4 (`ruff skipped`),
+  `build_check_clean` прошёл. ruff больше не халтит config-less worktree.
+
+Регрессии и новые баги:
+
+- ⬜ **NEW-14 (P1) · Тип: 🐛 Баг — NEW-12 регрессия: stage5_recovery git commit без env** —
+  `stage5_recovery_failed: No .pre-commit-config.yaml file` на 1.4 снова. Фикс v5 прокинул
+  `PRE_COMMIT_ALLOW_NO_CONFIG=1` в env *воркера* (`worker_spawn.py`), но stage5 recovery path
+  вызывает `git commit` отдельным процессом без проброшенного env. Fix — инжектить флаг во
+  все `git commit` вызовы stage5_recovery (или глобально в subprocess env пути runner'а).
+- ⬜ **NEW-15 (P1) · Тип: 🐛 Баг — code_review verdict=error блокирует merge gate** —
+  `code_review_dispatched review_jsonl= verdict=error` на 1.4: review_jsonl пустой → verdict
+  становится `error`, оба merge-gate stage (`spec`/`quality`) дают `verdict=error`. Аналог
+  NEW-13, но для **code_review**, не security_review — v5-фикс error→retry покрыл только
+  security_review. Под-баг (b): `code_review_runner_log_fallback fallback_verdict=approve`
+  отработал, но `merge_gate_quality_stage_done` всё равно `verdict=error` — fallback-verdict
+  не применяется к итоговому merge-gate verdict.
+- ⬜ **NEW-16 (P1) · Тип: 🐛 Баг — ложный `succeeded` для no-op story** — 1.5 worker написал
+  код (`.pre-commit-config.yaml`, `.gitleaks.toml`, `ci.yml`, ADR 0005) но **не закоммитил**
+  (uncommitted changes висят в `wt-1.5`), не дошёл до merge gate, нет ни одного merge_gate /
+  `story_merged` события — однако засчитан `succeeded=1`. `succeeded` обязан требовать
+  `story_merged` (или хотя бы непустой коммит на feature-ветке), иначе метрика врёт.
+- ⬜ **NEW-17 (P2) · Тип: 🐛 Баг — 1.5 worker завершился молча без коммита** — для 1.5 нет
+  `pilot_mark_done`, нет `stage5_recovery`, нет `merge_gate` — только `cost_tracking_unavailable`.
+  Worker написал файлы и вышел, не закоммитив. Вероятно тот же pre-commit-config блок
+  (NEW-14), но для 1.5 даже `stage5_recovery_failed` не залогирован — silent failure.
+- ⬜ **NEW-18 (P2) · Тип: 🐛 Баг — `bmad_format.unknown_status` ×4** — парсер статусов историй
+  печатает голый `bmad_format.unknown_status` в stdout (не структурный лог) 4 раза за прогон
+  — не распознаёт Status-поле части историй. Нужен structured warning + диагностика какие
+  именно статусы не парсятся.
+- ✅ **NEW-19 (P1) · Тип: ✨ Улучшение — replay-from-worktree режим** — DONE
+  `integration/pilot_findings_closure_v6` S1: CLI `bmad-orchestrator replay --worktree <path>
+  --story <id> --integration <branch>` прогоняет хвост pipeline (WORKER_COMPLETED →
+  stage5→build-check→merge-gate→reconcile→merge) без `spawn_worker`; `--auto-commit-dev`
+  синтезирует dev-коммит из dirty worktree; EventType #38 `REPLAY_MODE_STARTED`,
+  лог `replay_mode_active`. Модуль `runtime/replay.py` + `agent.run.run_replay`;
+  subscriber-wiring вынесен в `_wire_pipeline_subscribers` (общий с `_run_real_pilot_body`).
+  +5 tests (`tests/test_new19_replay_worktree.py`). Источник — feedback пользователя
+  (replay жжёт токены): dev-фаза не нужна для валидации фиксов merge-gate/stage5/metrics.
+
+**Recommended next initiative:** `pilot_findings_closure_v6` — 6 items (NEW-14..19), из них
+4×P1. Порядок: NEW-19 (replay-режим, разблокирует дешёвую валидацию) → NEW-14 (pre-commit
+env в recovery path, NEW-12 переоткрыт) + NEW-15 (code_review error) + NEW-16 (ложный
+succeeded) → NEW-17/18. **Spec:** `spec/spec_pilot_findings_closure_v6.md` (v1.0, READY для
+`/auto-loop-spec-long` bootstrap — 6 items, ~3 сессии, +22 tests). Детали run #5 — memory
+[[project_pilot_antares_1a_run5_2026-05-19]].
+
+**Правила v6 (против повторения NEW-12 регрессии):** (1) каждый фикс → unit-тест,
+воспроизводящий именно тот code path где баг (v5-тест проверял env воркера, а баг был в
+recovery path → проехал); (2) pilot replay — один раз в конце, на одной истории (1.4), не
+после каждого фикса.
+
+---
+
 ## 6. References
 
 - **Universal methodology:** `spec/methodology.md`
@@ -421,6 +483,6 @@ bootstrap — 3 P2 items, ~2 сессии).
 
 ---
 
-**Last updated:** 2026-05-19 (v13.11 — NEW-11/12/13 closed in integration/pilot_findings_closure_v5 (S1..S2): ruff graceful-skip + pre-commit no-config env flag + security_review error→retry/escalate-story (not abort); EventType #37 SECURITY_REVIEW_ERROR; tests 2061→2078, mypy/ruff clean; v13.10 — pilot run #4 findings: FIRST integration merge success (`integration/1a`, story 1.3), NEW-7 validated, new backlog NEW-11/12/13; v4 merged `48febc0`; v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Last updated:** 2026-05-19 (v13.12 — pilot run #5 (Antares 1a replay after v5 merge `dbeb936`): NEW-11 validated, но NEW-12 РЕГРЕССИРОВАЛ; результат `succeeded=1 failed=1`, фактически 0 stories merged; new backlog NEW-14..19 (4×P1, +NEW-19 replay-from-worktree режим), spec `spec_pilot_findings_closure_v6.md` v1.0 READY → next initiative pilot_findings_closure_v6; v13.11 — NEW-11/12/13 closed in integration/pilot_findings_closure_v5 (S1..S2): ruff graceful-skip + pre-commit no-config env flag + security_review error→retry/escalate-story (not abort); EventType #37 SECURITY_REVIEW_ERROR; tests 2061→2078, mypy/ruff clean; v13.10 — pilot run #4 findings: FIRST integration merge success (`integration/1a`, story 1.3), NEW-7 validated, new backlog NEW-11/12/13; v4 merged `48febc0`; v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
 **Status:** v13.10 — **Phase 4 (Deploy) in progress.** `pilot_findings_closure_v4` merged в main `48febc0` (S1..S2: NEW-9 verdict source-of-truth + NEW-10 observability + NEW-5 recheck, tests 2038→2061, mypy/ruff clean). **FIRST end-to-end production success** — pilot run #4 (Antares 1a, `BMAD_AUTO_SPLIT=1`) создал ветку `integration/1a`, story 1.3 смержена автономно через verdict→reconcile→merge (NEW-7 pipeline VALIDATED). `spawned=3 succeeded=2 failed=1`. Stories 1.4/1.5 не дошли до integration — new backlog **NEW-11/12/13** (P2, fixable: ruff halt · pre-commit config missing · security_review error→circuit breaker) → next initiative `pilot_findings_closure_v5`.
 **Owner:** user + Claude orchestrator

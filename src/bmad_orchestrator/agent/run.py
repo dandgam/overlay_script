@@ -1004,6 +1004,225 @@ def _resolve_auto_clean_dirty_worktree(settings: Settings) -> bool:
     return settings.auto_clean_dirty_worktree
 
 
+def _wire_pipeline_subscribers(
+    bus: EventLoop, *, settings: Settings, wave: str
+) -> None:
+    """Wire the W4 gate context + full Phase-4 pipeline subscriber chain.
+
+    Extracted from ``_run_real_pilot_body`` so the NEW-19 replay path
+    (:func:`run_replay`) reuses the identical wiring. Registers, in
+    canonical cheapest-first order:
+
+      stage5 → build_check → deletion_safety → code_review → security_review
+      → merge_to_integration → quarterly_sweep
+
+    plus the elicitation / supervisor / self-learning / BMad-canonical
+    subscribers. Subscribers take ``(event, bus)`` while ``EventLoop``
+    dispatches with ``(event,)`` only, so ``partial`` binds the bus to satisfy
+    the ``EventCallback`` contract.
+    """
+    # W4 — share the gate context with code_review / merge subscribers so they
+    # know which target project + wave to merge into.
+    configure_code_review_gate(
+        target_project=settings.target_project,
+        wave=wave,
+        escalation_chat_id=getattr(getattr(settings, "bot", None), "escalation_chat_id", None),
+    )
+
+    # Final canonical-patches order (after P3 — stage5 → build → deletion →
+    # code_review → merge → quarterly_sweep). The two halters (build_check,
+    # deletion_safety) mutate ``payload['status']``; downstream gates
+    # (code_review, merge_to_integration) short-circuit on non-success status.
+    # Patch S: stage5_completeness runs FIRST (auto-stages Stage 5 residue).
+    # Patch N: build_check runs second (cheap pytest+ruff guard before Opus).
+    # Patch C: deletion_safety runs third (unsafe-deletion halt before review).
+    # Patch Q: diff size gate embedded INSIDE code_review_subscriber.
+    # Patch R: commit recovery embedded INSIDE merge_to_integration_subscriber.
+    # Patch X: security_review sits AFTER code_review and BEFORE merge.
+    bus.on(cast(EventCallback, partial(stage5_completeness_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(build_check_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(deletion_safety_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
+    bus.on(
+        cast(
+            EventCallback,
+            partial(
+                security_review_subscriber,
+                bus=bus,
+                runner=_real_security_review_runner,
+            ),
+        )
+    )
+    bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
+
+    # Auto-elicitation engine (Phase 3 — P2 Routing). ``bus`` bound via a
+    # positional closure (a keyword bind tripped mypy ``call-arg``).
+    elicitation_policy_path = getattr(settings, "elicitation_policy_path", None)
+    elicitation_engine = _load_elicitation_engine(elicitation_policy_path)
+    _elicitation_sub = make_elicitation_subscriber(elicitation_engine)
+    bus.on(lambda e: _elicitation_sub(e, bus))
+
+    # Supervisor LLM-loop (Phase 4 #9 — P4 Orchestrator-Workers + P2 Routing).
+    supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
+    supervisor_engine = _load_supervisor_engine(supervisor_policy_path)
+    _supervisor_sub = make_supervisor_subscriber(supervisor_engine)
+    bus.on(lambda e: _supervisor_sub(e, bus))
+
+    # Self-learning consolidation loop (Phase 5 — P5 Evaluator-Optimizer).
+    self_learning_policy_path = getattr(settings, "self_learning_policy_path", None)
+    sl_config = _load_self_learning_config(self_learning_policy_path)
+    sl_consolidator = Consolidator(config=sl_config)
+    _self_learning_sub = make_self_learning_subscriber(sl_consolidator)
+    bus.on(lambda e: _self_learning_sub(e, bus))
+
+    # BMad Phase 4 canonical-workflow subscribers (gap-closure 2026-05-19).
+    from bmad_orchestrator.runtime.phase4_subscribers import (
+        correct_course_subscriber,
+        investigate_subscriber,
+    )
+    bus.on(cast(EventCallback, partial(correct_course_subscriber, bus=bus)))
+    bus.on(cast(EventCallback, partial(investigate_subscriber, bus=bus)))
+
+
+async def run_replay(
+    *,
+    worktree: Path,
+    story_id: str,
+    integration_branch: str,
+    settings: Settings,
+    auto_commit_dev: bool = False,
+    bus: EventLoop | None = None,
+    wire_subscribers: bool = True,
+) -> dict[str, Any]:
+    """NEW-19 — replay the post-dev pipeline tail against an existing worktree.
+
+    Skips ``spawn_worker`` entirely (the ~30-min worker-dev phase). Takes a
+    worktree that already carries a dev commit — or synthesizes one from a
+    dirty worktree when ``auto_commit_dev`` is set — and drives it through the
+    same chain a real pilot runs post-dev: stage5 → build-check → merge-gate →
+    reconcile → merge. Used to validate merge-gate / stage5 / metrics fixes in
+    seconds (spec_pilot_findings_closure_v6 §1).
+
+    ``wire_subscribers=False`` lets tests pre-register their own (stub)
+    subscribers on ``bus``; production callers leave it ``True`` so the real
+    Phase-4 pipeline subscribers run.
+
+    Returns a result dict: story_id, worktree, integration_branch, base_sha,
+    dev_commits (list), synthesized (bool), reconciled (list), verdict (str |
+    None — last CODE_REVIEW_VERDICT for the story), merge_skipped (bool),
+    story_merged (bool — git-verified ancestry of the dev work in the
+    integration branch), spawned_worker (always False).
+    """
+    from bmad_orchestrator.runtime.replay import (
+        commit_is_merged,
+        prepare_replay_worktree,
+    )
+
+    wave = integration_branch.removeprefix("integration/")
+    bus = bus or EventLoop()
+
+    rw = await prepare_replay_worktree(
+        worktree=worktree,
+        story_id=story_id,
+        integration_branch=integration_branch,
+        auto_commit_dev=auto_commit_dev,
+    )
+
+    if wire_subscribers:
+        _wire_pipeline_subscribers(bus, settings=settings, wave=wave)
+
+    log.info(
+        "replay_mode_active",
+        worktree=str(rw.path),
+        story=story_id,
+        integration_branch=integration_branch,
+        dev_commits=len(rw.dev_commits),
+        synthesized=rw.synthesized,
+    )
+    await bus.emit(
+        EventType.REPLAY_MODE_STARTED,
+        story_id=story_id,
+        worktree=str(rw.path),
+        integration_branch=integration_branch,
+        base_sha=rw.base_sha,
+        dev_commits=len(rw.dev_commits),
+        synthesized=rw.synthesized,
+    )
+
+    # Drive the post-dev tail: emit WORKER_COMPLETED (success) so the wired
+    # gate chain runs, drain it, then reconcile + drain — exactly the sequence
+    # ``_run_real_pilot_body`` runs after its workers finish.
+    await bus.emit(
+        EventType.WORKER_COMPLETED,
+        story_id=story_id,
+        worktree=str(rw.path),
+        jsonl="",
+        exit_code=0,
+        status="success",
+        mock=False,
+        replay=True,
+    )
+    dispatched = await bus.drain()
+
+    handle = WorkerHandle(
+        worktree=str(rw.path),
+        story_id=story_id,
+        branch=f"feature/{story_id}",
+        pid=0,
+        jsonl_path=Path(""),
+        process=None,
+        mock=False,
+        sandbox_kind="n/a-replay",
+        base_sha=rw.base_sha,
+    )
+    reconciled = await _reconcile_success_verdicts(
+        bus, succeeded=[story_id], handles=[handle], dispatched=dispatched
+    )
+    post = await bus.drain()
+
+    all_events = dispatched + post
+    verdict: str | None = None
+    merge_skipped = False
+    for ev in all_events:
+        ep = ev.payload or {}
+        if str(ep.get("story_id") or "") != story_id:
+            continue
+        if ev.type == EventType.CODE_REVIEW_VERDICT:
+            verdict = str(ep.get("verdict") or "") or verdict
+        elif ev.type == EventType.INTEGRATION_MERGE_SKIPPED:
+            merge_skipped = True
+
+    # Ground truth — is the dev work an ancestor of the integration branch?
+    story_merged = False
+    if rw.dev_commits:
+        story_merged = await commit_is_merged(
+            settings.target_project, rw.dev_commits[-1], integration_branch
+        )
+
+    log.info(
+        "replay_mode_done",
+        story=story_id,
+        verdict=verdict,
+        story_merged=story_merged,
+        merge_skipped=merge_skipped,
+        reconciled=reconciled,
+    )
+    return {
+        "story_id": story_id,
+        "worktree": str(rw.path),
+        "integration_branch": integration_branch,
+        "base_sha": rw.base_sha,
+        "dev_commits": list(rw.dev_commits),
+        "synthesized": rw.synthesized,
+        "reconciled": reconciled,
+        "verdict": verdict,
+        "merge_skipped": merge_skipped,
+        "story_merged": story_merged,
+        "spawned_worker": False,
+    }
+
+
 async def _run_real_pilot_body(
     bus: EventLoop,
     *,
@@ -1044,110 +1263,12 @@ async def _run_real_pilot_body(
     worktree_root = settings.target_project / ".worktrees"
     worktree_root.mkdir(parents=True, exist_ok=True)
 
-    # W4 — share the gate context with code_review / merge subscribers so they
-    # know which target project + wave to merge into. Subscribers are wired to
-    # the bus by caller-side startup code; configure_code_review_gate keeps the
-    # module-level config in sync per pilot run.
-    configure_code_review_gate(
-        target_project=settings.target_project,
-        wave=wave,
-        escalation_chat_id=getattr(getattr(settings, "bot", None), "escalation_chat_id", None),
-    )
-
-    # P0-1 — wire E5/W4/sweep subscribers into the live bus. Without these
-    # registrations real-mode pilots silently no-op on the entire self-learning
-    # pipeline (code review → ff-merge → quarterly sweep). Subscribers take
-    # ``(event, bus)`` while EventLoop dispatches with ``(event,)`` only, so
-    # ``partial`` binds the bus to satisfy the EventCallback contract.
-    #
-    # Final canonical-patches order (after P3 — stage5 → build → deletion →
-    # code_review → merge → quarterly_sweep). Each WORKER_COMPLETED gate is
-    # ordered cheapest-first so a halt skips the more expensive downstream
-    # steps. The two halters (build_check, deletion_safety) mutate
-    # ``payload['status']``; downstream gates (code_review,
-    # merge_to_integration) short-circuit on non-success status.
-    #
-    # Patch S (2026-05-18): stage5_completeness_subscriber runs FIRST so it
-    # auto-stages any Stage 5 residue BEFORE build_check / deletion_safety
-    # see the worktree (the residue would otherwise be silently lost when
-    # the worktree is cleaned post-merge).
-    # Patch N (2026-05-18): build_check_subscriber runs second so a broken
-    # build halts the chain before deletion_safety / code_review fire — the
-    # cheap pytest+ruff guard saves the ~$15 Opus review on broken code.
-    # Patch C (2026-05-18): deletion_safety_subscriber runs third so an
-    # unsafe-deletion halt mutates the WORKER_COMPLETED payload status
-    # BEFORE code_review_subscriber sees it.
-    # Patch Q (2026-05-18): diff size gate is embedded INSIDE
-    # code_review_subscriber (downgrades approve→reject on oversize diff,
-    # not a new subscriber — see _gate_diff_size below).
-    # Patch R (2026-05-18): commit recovery is embedded INSIDE
-    # merge_to_integration_subscriber (auto-commits residue before ff-merge,
-    # not a new subscriber).
-    # Patch X (2026-05-18): security_review_subscriber sits AFTER code_review
-    # and BEFORE merge — on CODE_REVIEW_VERDICT(approve) for security-critical
-    # stories it spawns the 4-hunter `/bmad-security-review`. BLOCK mutates
-    # verdict→reject + appends gate_reasons so the merge subscriber (next in
-    # chain) naturally skips.
-    bus.on(cast(EventCallback, partial(stage5_completeness_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(build_check_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(deletion_safety_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(code_review_subscriber, bus=bus)))
-    bus.on(
-        cast(
-            EventCallback,
-            partial(
-                security_review_subscriber,
-                bus=bus,
-                runner=_real_security_review_runner,
-            ),
-        )
-    )
-    bus.on(cast(EventCallback, partial(merge_to_integration_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(quarterly_sweep_subscriber, bus=bus)))
-
-    # Auto-elicitation engine (Phase 3 — P2 Routing). Loads policy YAML (path
-    # configurable via Settings.elicitation_policy_path; falls back to
-    # examples/ default). Subscribes to WORKER_ELICITATION: low-risk auto-
-    # resolves are logged + delivered through the existing respond channel,
-    # high-risk / hard-override topics emit HUMAN_QUERY for the operator.
-    elicitation_policy_path = getattr(settings, "elicitation_policy_path", None)
-    elicitation_engine = _load_elicitation_engine(elicitation_policy_path)
-    # S4 finalize — bind ``bus`` via a closure rather than ``partial(fn, bus=bus)``.
-    # The factory return type is an unnamed ``Callable[[Event, EventLoop], ...]``,
-    # so a keyword bind tripped mypy ``call-arg``; a positional closure is clean.
-    _elicitation_sub = make_elicitation_subscriber(elicitation_engine)
-    bus.on(lambda e: _elicitation_sub(e, bus))
-
-    # Supervisor LLM-loop (Phase 4 #9 — P4 Orchestrator-Workers + P2 Routing).
-    # Listens on 5 high-level event types (HUMAN_QUERY, WORKER_HALT_FILE,
-    # BUDGET_THRESHOLD_HIT, WORKER_SILENT_FAILURE, COMPLIANCE_SWEEP_NEEDED),
-    # routes them through Tier 0 hard rules → Tier 1 LLM judge (stub by
-    # default; real Sonnet behind future flag) → Tier 2 fail-safe escalate.
-    # Filters out events with payload['source']='supervisor' to avoid loops.
-    supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
-    supervisor_engine = _load_supervisor_engine(supervisor_policy_path)
-    _supervisor_sub = make_supervisor_subscriber(supervisor_engine)
-    bus.on(lambda e: _supervisor_sub(e, bus))
-
-    # Self-learning consolidation loop (Phase 5 — P5 Evaluator-Optimizer).
-    # Listens on 4 trigger events (WAVE_BOUNDARY_REACHED, EPIC_BOUNDARY_REACHED,
-    # PHASE4_COMPLETE, MONTHLY_REVIEW_SCHEDULED). Filters out self-emitted events
-    # (source=self_learning). StubExtractor by default — no token cost.
-    self_learning_policy_path = getattr(settings, "self_learning_policy_path", None)
-    sl_config = _load_self_learning_config(self_learning_policy_path)
-    sl_consolidator = Consolidator(config=sl_config)
-    _self_learning_sub = make_self_learning_subscriber(sl_consolidator)
-    bus.on(lambda e: _self_learning_sub(e, bus))
-
-    # BMad Phase 4 canonical-workflow subscribers (gap-closure 2026-05-19).
-    # SPRINT_SCOPE_CHANGE_DETECTED → bmad-correct-course.
-    # FORENSIC_INVESTIGATION_NEEDED → bmad-investigate (with retry-count heuristic).
-    from bmad_orchestrator.runtime.phase4_subscribers import (
-        correct_course_subscriber,
-        investigate_subscriber,
-    )
-    bus.on(cast(EventCallback, partial(correct_course_subscriber, bus=bus)))
-    bus.on(cast(EventCallback, partial(investigate_subscriber, bus=bus)))
+    # W4 + P0-1 — wire the shared gate context + the full Phase-4 pipeline
+    # subscriber chain onto the live bus. Extracted into a module-level helper
+    # (_wire_pipeline_subscribers) so the NEW-19 replay path (run_replay)
+    # reuses the exact same wiring instead of duplicating it
+    # (spec_pilot_findings_closure_v6 §1).
+    _wire_pipeline_subscribers(bus, settings=settings, wave=wave)
 
     planner = DagPlanner.from_target()
     spawned: list[str] = []
@@ -4028,6 +4149,7 @@ __all__ = [
     "human_query_subscriber",
     "main",
     "run_orchestrator",
+    "run_replay",
 ]
 
 

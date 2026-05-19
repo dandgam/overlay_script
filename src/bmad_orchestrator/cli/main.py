@@ -612,6 +612,87 @@ def run(
     )
 
 
+# ── replay (NEW-19 — replay-from-worktree) ───────────────────────────────────
+
+
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+
+
+@app.command()
+def replay(
+    worktree: str = typer.Option(
+        ..., "--worktree",
+        help="Path to an existing git worktree carrying a dev commit",
+    ),
+    story: str = typer.Option(..., "--story", help="Story id (e.g. 1.4)"),
+    integration: str = typer.Option(
+        ..., "--integration",
+        help="Integration branch to merge into (e.g. integration/1a)",
+    ),
+    project: str | None = typer.Option(
+        None, "--project", help="Target project registry slug",
+    ),
+    auto_commit_dev: bool = typer.Option(
+        False, "--auto-commit-dev",
+        help="Synthesize a dev commit from a dirty (uncommitted) worktree",
+    ),
+) -> None:
+    """Replay the post-dev pipeline tail against an existing worktree (NEW-19).
+
+    Validates merge-gate / stage5 / metrics fixes without re-running the
+    expensive worker-dev phase — ``spawn_worker`` is skipped entirely. Runs
+    stage5 → build-check → merge-gate → reconcile → merge against the given
+    worktree and reports whether the story landed in the integration branch.
+    """
+    from bmad_orchestrator.agent.run import run_replay
+
+    _validate_cli_token(story, name="story", pattern=_STORY_RE)
+    _validate_cli_token(integration, name="integration", pattern=_BRANCH_RE)
+    if project is not None:
+        _validate_cli_token(project, name="project", pattern=_PROJECT_RE)
+
+    base_settings = load_settings()
+    try:
+        effective_settings = _resolve_settings_for_project(
+            base_settings, project, strict=True
+        )
+    except ProjectNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"[bold cyan]Virgil replay[/bold cyan] "
+        f"story={story} worktree={worktree} integration={integration} "
+        f"auto_commit_dev={auto_commit_dev}",
+    )
+
+    try:
+        result = asyncio.run(
+            run_replay(
+                worktree=Path(worktree),
+                story_id=story,
+                integration_branch=integration,
+                settings=effective_settings,
+                auto_commit_dev=auto_commit_dev,
+            )
+        )
+    except Exception as exc:  # ReplayError + git/pipeline failures
+        console.print(f"[red]replay failed: {type(exc).__name__}: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    merged = bool(result.get("story_merged"))
+    colour = "green" if merged else "yellow"
+    console.print(
+        f"[{colour}]story_merged={merged}[/{colour}] "
+        f"verdict={result.get('verdict')} "
+        f"dev_commits={len(result.get('dev_commits') or [])} "
+        f"synthesized={result.get('synthesized')} "
+        f"merge_skipped={result.get('merge_skipped')}",
+    )
+    if not merged:
+        raise typer.Exit(code=1)
+
+
 # ── observability ────────────────────────────────────────────────────────────
 
 
