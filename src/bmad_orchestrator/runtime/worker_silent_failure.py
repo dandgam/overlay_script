@@ -41,8 +41,11 @@ _REUSED_WORKTREE_LOOSE_RE = re.compile(r"cannot delete branch .* used by worktre
 # code as a plain stdout line, optionally prefixed by the ``❯`` shell glyph:
 #   Exit code: 1
 #   ❯ Exit code: 1
-# The line is matched after stripping surrounding whitespace.
-_INNER_EXIT_RE = re.compile(r"^(?:❯\s*)?Exit code:\s*(\d+)$")
+#   EXIT_CODE=2
+# The line is matched after stripping surrounding whitespace. The runner emits
+# the inner exit in two formats — ``Exit code: N`` (claude-p tail) and
+# ``EXIT_CODE=N`` (bmad-auto-dev-runner.sh) — both are accepted (#4 NEW-6).
+_INNER_EXIT_RE = re.compile(r"^(?:❯\s*)?(?:Exit code:\s*|EXIT_CODE=)(\d+)$")
 
 
 def is_reused_worktree_cleanup_line(line: str) -> bool:
@@ -107,7 +110,11 @@ def decide_cleanup_recovery(commit_count: int) -> CleanupRecoveryDecision:
 
 
 def parse_inner_exit_code(stdout_lines: Iterable[str]) -> int | None:
-    """Scan tailed stdout lines for the runner's ``Exit code: N`` marker.
+    """Scan tailed stdout lines for the runner's inner exit-code marker.
+
+    Accepts both runner formats: ``Exit code: N`` (optionally ``❯``-prefixed)
+    and ``EXIT_CODE=N`` (#4 NEW-6 — the replay runner emitted the latter and
+    the old single-format regex missed it, masking a real worker failure).
 
     #4 NEW-4 — the outer ``claude -p`` process can exit 0 while the inner
     ``bmad-auto-dev-runner.sh`` exited non-zero; the wrapper dutifully echoes

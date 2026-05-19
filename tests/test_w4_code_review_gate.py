@@ -681,11 +681,16 @@ async def test_w4_merge_subscriber_conflict_emits_human_query(
     await bus.stop()
 
     emitted = _collect_emitted(bus)
-    assert len(emitted) == 1
-    assert emitted[0].type == EventType.HUMAN_QUERY
-    assert emitted[0].payload["verdict"] == "merge_conflict"
-    assert emitted[0].payload["chat_id"] == 7
-    assert "manual_resolve" in emitted[0].payload["actions"]
+    # NEW-7 (v3 S3): a ff-merge failure now also emits INTEGRATION_MERGE_SKIPPED
+    # for observability, ahead of the escalation HUMAN_QUERY.
+    assert len(emitted) == 2
+    skipped = next(e for e in emitted if e.type == EventType.INTEGRATION_MERGE_SKIPPED)
+    assert skipped.payload["reason"] == "ff_conflict"
+    assert skipped.payload["story_id"] == "s1"
+    human = next(e for e in emitted if e.type == EventType.HUMAN_QUERY)
+    assert human.payload["verdict"] == "merge_conflict"
+    assert human.payload["chat_id"] == 7
+    assert "manual_resolve" in human.payload["actions"]
     # Worktree must NOT be cleaned up when merge failed.
     assert wt.exists()
     # Integration branch must not have advanced.

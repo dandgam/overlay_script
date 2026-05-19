@@ -120,6 +120,15 @@ class EventType(StrEnum):
     # CODE_REVIEW_VERDICT(verdict=approve, source=runner_cleanup_recovery) so the
     # merge subscriber recovers the work instead of treating it as a halt.
     RUNNER_CLEANUP_FAILED_REUSED_WORKTREE = "runner_cleanup_failed_reused_worktree"
+    # Initiative pilot_findings_closure_v3 S3 (#1 NEW-7 observability): emitted
+    # when a story finishes ``worker_completed status=success`` but its work
+    # never reaches ``integration/<wave>``. Payload: {story_id, reason, worktree,
+    # commits}. ``reason`` ∈ {``no_commits`` — success but zero commits past
+    # base_sha; ``verdict_missing`` — success but no WorkerHandle/base_sha to
+    # verify commits, so no verdict could be reconciled; ``ff_conflict`` —
+    # merge_to_integration_subscriber's fast-forward merge failed}. Turns a
+    # silent loss of work into a visible audit signal (replay finding NEW-7).
+    INTEGRATION_MERGE_SKIPPED = "integration_merge_skipped"
 
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)

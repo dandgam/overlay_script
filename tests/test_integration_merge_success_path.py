@@ -151,3 +151,126 @@ async def test_reconcile_no_double_emit_when_verdict_seen(
 
     assert reconciled == []
     assert bus.queue.empty()
+
+
+# ── INTEGRATION_MERGE_SKIPPED (#36 — NEW-7 observability) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reconcile_emits_merge_skipped_for_zero_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """success + zero commits → INTEGRATION_MERGE_SKIPPED reason=no_commits."""
+    bus = EventLoop()
+
+    async def fake_count(worktree: str, base_sha: str) -> int:
+        return 0
+
+    monkeypatch.setattr(run, "_count_new_commits", fake_count)
+
+    reconciled = await run._reconcile_success_verdicts(
+        bus, succeeded=["1.6"], handles=[_handle("1.6", worktree="/tmp/wt-1.6")],
+        dispatched=[],
+    )
+
+    assert reconciled == []
+    skipped = [
+        e for e in await bus.drain()
+        if e.type == EventType.INTEGRATION_MERGE_SKIPPED
+    ]
+    assert len(skipped) == 1
+    assert skipped[0].payload["story_id"] == "1.6"
+    assert skipped[0].payload["reason"] == "no_commits"
+    assert skipped[0].payload["worktree"] == "/tmp/wt-1.6"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_emits_merge_skipped_when_handle_unverifiable() -> None:
+    """success but no base_sha → INTEGRATION_MERGE_SKIPPED reason=verdict_missing."""
+    bus = EventLoop()
+
+    reconciled = await run._reconcile_success_verdicts(
+        bus, succeeded=["1.7"], handles=[_handle("1.7", base_sha=None)],
+        dispatched=[],
+    )
+
+    assert reconciled == []
+    skipped = [
+        e for e in await bus.drain()
+        if e.type == EventType.INTEGRATION_MERGE_SKIPPED
+    ]
+    assert len(skipped) == 1
+    assert skipped[0].payload["story_id"] == "1.7"
+    assert skipped[0].payload["reason"] == "verdict_missing"
+
+
+# ── merge_to_integration_subscriber — NEW-7 robustness ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_merge_subscriber_resolves_worktree_from_registry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Empty worktree payload → resolved from <project>/.worktrees/wt-<id>."""
+    project = tmp_path / "proj"
+    wt = project / ".worktrees" / "wt-1.5"
+    wt.mkdir(parents=True)
+
+    run.configure_code_review_gate(target_project=project, wave="wave-1a")
+
+    seen: dict[str, str] = {}
+
+    async def fake_ff(*, target_project: Path, integration_branch: str,
+                      feature_branch: str) -> str:
+        return "merge-sha"
+
+    monkeypatch.setattr(run, "_ff_merge_to_integration", fake_ff)
+    monkeypatch.setattr(
+        run, "cleanup_worktree",
+        lambda path, root: seen.update(cleaned=str(path)),
+    )
+
+    bus = EventLoop()
+    event = Event(
+        type=EventType.CODE_REVIEW_VERDICT,
+        payload={"story_id": "1.5", "verdict": "approve", "worktree": ""},
+    )
+    await run.merge_to_integration_subscriber(event, bus)
+
+    # worktree resolved from registry → cleanup_worktree called with that path
+    assert seen["cleaned"] == str(wt)
+    run.configure_code_review_gate(target_project=None, wave=None)
+
+
+@pytest.mark.asyncio
+async def test_merge_subscriber_emits_skipped_on_ff_conflict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ff-merge failure → INTEGRATION_MERGE_SKIPPED reason=ff_conflict + HUMAN_QUERY."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    run.configure_code_review_gate(target_project=project, wave="wave-1a")
+
+    async def boom(*, target_project: Path, integration_branch: str,
+                   feature_branch: str) -> str:
+        raise RuntimeError("non-ff")
+
+    monkeypatch.setattr(run, "_ff_merge_to_integration", boom)
+
+    bus = EventLoop()
+    event = Event(
+        type=EventType.CODE_REVIEW_VERDICT,
+        payload={"story_id": "1.5", "verdict": "approve", "worktree": "/tmp/wt"},
+    )
+    await run.merge_to_integration_subscriber(event, bus)
+
+    emitted = list(bus.queue._queue)  # type: ignore[attr-defined]
+    types = [e.type for e in emitted]
+    assert EventType.INTEGRATION_MERGE_SKIPPED in types
+    assert EventType.HUMAN_QUERY in types
+    skipped = next(
+        e for e in emitted if e.type == EventType.INTEGRATION_MERGE_SKIPPED
+    )
+    assert skipped.payload["reason"] == "ff_conflict"
+    assert skipped.payload["story_id"] == "1.5"
+    run.configure_code_review_gate(target_project=None, wave=None)

@@ -1767,11 +1767,39 @@ async def _reconcile_success_verdicts(
             continue
         handle = handle_by_story.get(sid)
         if handle is None or not handle.base_sha:
+            # success but no WorkerHandle/base_sha to verify commits — can't
+            # reconcile a verdict. Surface it instead of dropping silently.
+            log.warning(
+                "integration_merge_skipped",
+                story_id=sid,
+                reason="verdict_missing",
+                note="no WorkerHandle/base_sha — cannot verify commits",
+            )
+            await bus.emit(
+                EventType.INTEGRATION_MERGE_SKIPPED,
+                story_id=sid,
+                reason="verdict_missing",
+                worktree=handle.worktree if handle is not None else "",
+                commits=0,
+            )
             continue
         commits = await _count_new_commits(handle.worktree, handle.base_sha)
         if commits <= 0:
-            # success + zero commits — left for the S3 INTEGRATION_MERGE_SKIPPED
-            # observability event; not a merge candidate here.
+            # success + zero commits — nothing to merge. Emit the NEW-7
+            # observability event so a no-op success is visible, not silent.
+            log.warning(
+                "integration_merge_skipped",
+                story_id=sid,
+                reason="no_commits",
+                worktree=handle.worktree,
+            )
+            await bus.emit(
+                EventType.INTEGRATION_MERGE_SKIPPED,
+                story_id=sid,
+                reason="no_commits",
+                worktree=handle.worktree,
+                commits=0,
+            )
             continue
         log.warning(
             "integration_reconcile_synthetic_verdict",
@@ -3623,6 +3651,20 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
         log.warning("merge_subscriber_missing_story_id", payload=payload)
         return
 
+    # NEW-7 — a synthetic reconcile verdict (success_path_reconcile) may carry
+    # an empty ``worktree`` payload. Resolve it from the project worktree
+    # registry (``<project>/.worktrees/wt-<story_id>``) instead of failing the
+    # pre-merge recovery silently. Same convention as worker spawn (run.py:635).
+    if not worktree and cfg.target_project is not None:
+        candidate = cfg.target_project / ".worktrees" / f"wt-{story_id}"
+        if candidate.exists():
+            worktree = str(candidate)
+            log.info(
+                "merge_subscriber_worktree_resolved_from_registry",
+                story_id=story_id,
+                worktree=worktree,
+            )
+
     if verdict != "approve":
         await bus.emit(
             EventType.HUMAN_QUERY,
@@ -3698,6 +3740,15 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
             story_id=story_id,
             feature=feature_branch,
             integration=integration_branch,
+        )
+        # NEW-7 observability — the fast-forward merge failed; the work is
+        # stranded on feature/<story>. Surface it before the human query.
+        await bus.emit(
+            EventType.INTEGRATION_MERGE_SKIPPED,
+            story_id=story_id,
+            reason="ff_conflict",
+            worktree=worktree,
+            commits=0,
         )
         await bus.emit(
             EventType.HUMAN_QUERY,
