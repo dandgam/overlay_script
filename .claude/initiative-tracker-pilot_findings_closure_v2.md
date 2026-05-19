@@ -37,25 +37,6 @@
 ## Sessions
 
 ### Pending
-- **id:** S2
-  **title:** P1 NEW-2 — runner Stage 7 graceful (Layer A) + orchestrator detector (Layer B)
-  **surface:** backend-python
-  **spec_section:** 78-130
-  **depends_on:** [S1]
-  **acceptance:**
-    - `agent/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh` Stage 7 checks `git worktree list` for branch checkout before `git branch -D`; skips cleanup gracefully on reused worktree.
-    - Synthetic `verdict=approve commits=N` event emitted when feature branch has unmerged commits past base_sha and Stage 7 had to skip.
-    - `runtime/worker_silent_failure.py` (or equivalent) recognises `cannot delete branch .* used by worktree` regex in stdout_lines.
-    - New `RUNNER_CLEANUP_FAILED_REUSED_WORKTREE` event registered in `runtime/event_loop.py` (event count 29 → 30).
-    - On detect with commits present → synthetic `CODE_REVIEW_VERDICT verdict=approve source=runner_cleanup_recovery commits=N`; with no commits → preserve halt behaviour.
-    - +11 tests total (5 runner-side unit + 4 detector unit + 2 e2e mock).
-    - mypy/ruff clean. Tests ≥ baseline +21 cumulative.
-  **safety_gates:**
-    - L3 branch check — work only on `integration/pilot_findings_closure_v2`.
-    - L1 deny-list — `git push --force`, `--no-verify`, `git reset --hard` blocked.
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S3
   **title:** P2 NEW-4 — inner exit code parsing + optional Layer C + finalize
   **surface:** backend-python
@@ -76,31 +57,43 @@
   **estimated_retries_allowed:** 3
 
 ### Current
-- **id:** S1
-  **title:** P1 NEW-1 — `--project` flag overrides env + P2 NEW-3 — kebab+slug composite resolver
+- **id:** S2
+  **title:** P1 NEW-2 — runner Stage 7 graceful (Layer A) + orchestrator detector (Layer B)
   **surface:** backend-python
-  **spec_section:** 32-76
-  **depends_on:** []
+  **spec_section:** 78-130
+  **depends_on:** [S1]
   **acceptance:**
-    - `_resolve_settings_for_project` (cli/main.py:393-413) raises `ProjectNotFoundError` when `--project <slug>` is passed and registry has no entry (not silent fallback).
-    - `--project` flag overrides `ORCHESTRATOR_TARGET_PROJECT` env var deterministically; documented precedence: flag > yaml registry > env > default.
-    - Audit pass: no module under `src/bmad_orchestrator/` (except `worker_spawn._build_worker_env`) reads `os.environ["ORCHESTRATOR_TARGET_PROJECT"]` directly post-fix.
-    - `agent/story_id.py::resolve_sprint_status_key` matches `1.3` → `1-3-fastapi-app-lifespan-health` (composite key) via dotted-prefix split fallback; tie-break warning logged on multiple matches.
-    - +10 tests (6 NEW-1: 3 unit + 2 integration + 1 regression on other subcommands; 4 NEW-3: 3 unit + 1 integration).
-    - mypy/ruff clean. Tests ≥ baseline +10 cumulative.
-    - 2 commits: one for NEW-1, one for NEW-3.
+    - `agent/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh` Stage 7 checks `git worktree list` for branch checkout before `git branch -D`; skips cleanup gracefully on reused worktree.
+    - Synthetic `verdict=approve commits=N` event emitted when feature branch has unmerged commits past base_sha and Stage 7 had to skip.
+    - `runtime/worker_silent_failure.py` (or equivalent) recognises `cannot delete branch .* used by worktree` regex in stdout_lines.
+    - New `RUNNER_CLEANUP_FAILED_REUSED_WORKTREE` event registered in `runtime/event_loop.py` (event count 29 → 30).
+    - On detect with commits present → synthetic `CODE_REVIEW_VERDICT verdict=approve source=runner_cleanup_recovery commits=N`; with no commits → preserve halt behaviour.
+    - +11 tests total (5 runner-side unit + 4 detector unit + 2 e2e mock).
+    - mypy/ruff clean. Tests ≥ baseline +21 cumulative.
   **safety_gates:**
     - L3 branch check — work only on `integration/pilot_findings_closure_v2`.
     - L1 deny-list — `git push --force`, `--no-verify`, `git reset --hard` blocked.
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** (pending first wake)
+  **started:** 2026-05-19 05:44 UTC
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
-(none yet)
+- **id:** S1
+  **title:** P1 NEW-1 — `--project` flag overrides env + P2 NEW-3 — kebab+slug composite resolver
+  **completed:** 2026-05-19 05:44 UTC
+  **commit:** 0348b75 (S1 range 64f07a9..0348b75)
+  **files_changed:** 6 (cli/main.py, agent/run.py, runtime/project_registry.py, runtime/bmad_format.py, test_w1_real_pilot.py + 2 new test files)
+  **tests_passed:** 1990 PASS (+12 new: 7 NEW-1 + 5 NEW-3); ruff clean; mypy 0 new errors (4 pre-existing run.py errors out-of-scope, unchanged)
+  **decisions_made:**
+    - NEW-1: resolution lives in CLI `run` (strict mode), `run_orchestrator` gained optional `settings` param — CLI hands down registry-resolved Settings; avoids cli→agent circular import.
+    - NEW-1: `ProjectNotFoundError` added to `project_registry.py`; `_resolve_settings_for_project` got `strict` flag (raise for mutating subcommands, graceful degrade for read-only `_build_snapshot`).
+    - NEW-1 audit: no offending direct `os.environ["ORCHESTRATOR_TARGET_PROJECT"]` reads in src — only `_build_worker_env` (by-design exception) + `eval/runner.py` save/restore + `project_registry.py` hint-string.
+    - NEW-3: current normalize-tier ALREADY resolved `1.3`→`1-3-fastapi-...` composite (verified). Real remaining gap was non-determinism on multi-match; fixed via lexicographic sort + `sprint_status_key_ambiguous` tie-break warning. Spec code anchor `agent/story_id.py` was stale — function lives in `runtime/bmad_format.py`.
+  **deferred_items:**
+    - 4 pre-existing mypy errors in `agent/run.py` (lines ~1000/1010/1019/1062-69, `bus` kwarg + tuple/list) — pre-date this initiative, out of S1 scope.
 
 ## Safety Gates Triggered
 (none yet)
@@ -121,8 +114,16 @@
   **rationale:** All edits land in `src/bmad_orchestrator/` (Python) plus one bash file (`bmad-auto-dev-runner.sh`) inside the bundled skill — bash piece is ≪20% of any session. Dispatch rule 10 (`mixed`) does not apply: bash + Python is not Rust+React+vanilla coexistence. The `backend-python` workflow file is CRM-tied but its scaffold (pytest + ruff + mypy + Python edit) is the universal portion the sessions need.
   **impact:** Each session reads the spec directly for project-specific commands rather than blindly following the CRM-flavoured workflow file.
 
+- **date:** 2026-05-19 05:44 UTC
+  **session:** S1
+  **decision:** `run_orchestrator` gained an optional `settings: Settings | None` param instead of resolving `--project` internally.
+  **rationale:** Registry resolution + `ProjectNotFoundError` live in the CLI layer; passing pre-resolved Settings down keeps `agent/run.py` free of a `cli/main.py` import (circular). `None` default preserves every existing caller/test.
+  **impact:** S2/S3 — any new code paths needing the resolved target should read `settings.target_project`, not env.
+
 ## Journal
 [2026-05-19 UTC] bootstrap: tracker + integration branch `integration/pilot_findings_closure_v2` + backup `backup/pilot_findings_closure_v2-pre-2026-05-19` created via /auto-loop-spec-long, delay=120s, Auto merge=false, 3 sessions planned (S1 NEW-1+NEW-3 / S2 NEW-2 A+B / S3 NEW-4 + optional Layer C + finalize).
+[2026-05-19 05:44 UTC] S1 execution: NEW-1 — `--project` strict registry resolution, `ProjectNotFoundError`, `run_orchestrator` settings param; commit 64f07a9. NEW-3 — `resolve_sprint_status_key` deterministic tie-break + warning; commit 729650f. Regression fix test_w1_real_pilot; commit 0348b75. Full suite 1990 PASS, ruff clean.
+[2026-05-19 05:44 UTC] S1 completed, S2 promoted to Current. runtime=loop_wrapper — wrapper handles next iteration.
 
 ## Final Report (populated on last session completion)
 (empty)
