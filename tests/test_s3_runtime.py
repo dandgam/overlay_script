@@ -129,10 +129,12 @@ def test_event_loop_has_all_spec_types() -> None:
         # 2026-05-19 spec_pilot_findings_closure_v6 S3 NEW-17 — silent worker
         # exit with uncommitted changes and no stage5 recovery.
         "worker_exit_uncommitted",
+        # 2026-05-20 NEW-32.
+        "integration_test_failed",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 41
+    assert len(ALL_EVENT_TYPES) == 42
 
 
 @pytest.mark.asyncio

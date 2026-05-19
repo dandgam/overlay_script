@@ -433,8 +433,8 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     #   INTEGRATION_MERGE_COMPLETED → 39 + 1 = 40.
     # 2026-05-19 spec_pilot_findings_closure_v6 S3 NEW-17 adds
     #   WORKER_EXIT_UNCOMMITTED → 40 + 1 = 41.
-    assert len(ALL_EVENT_TYPES) == 41, (
-        f"Expected 41 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    assert len(ALL_EVENT_TYPES) == 42, (
+        f"Expected 42 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 

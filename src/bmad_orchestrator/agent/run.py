@@ -4255,7 +4255,7 @@ async def _ff_merge_to_integration(
 
     Rebase conflict handling: abort cleanly (``git rebase --abort``), then
     re-raise the original error so the caller's ``except`` block escalates
-    via ``HUMAN_QUERY``.  No force-push, no reset --hard, no --no-verify.
+    via ``HUMAN_QUERY``.  Destructive git operations are strictly prohibited.
     """
     from git import Repo
     from git import exc as git_exc
@@ -4427,6 +4427,26 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
 
     integration_branch = f"integration/{cfg.wave}"
     feature_branch = f"feature/{story_id}"
+
+    # NEW-32 — capture the pre-merge HEAD of integration so that, if the
+    # post-merge integration test fails, the HUMAN_QUERY escalation carries a
+    # ``pre_merge_sha`` that the operator can use to revert.  Failure here is
+    # non-fatal: ``_pre_merge_sha`` stays ``None`` and the test still runs.
+    _pre_merge_sha: str | None = None
+    if cfg.target_project is not None:
+        try:
+            from git import Repo as _GitRepoPreMerge
+
+            _pm_repo = _GitRepoPreMerge(str(cfg.target_project))
+            _pm_existing = {b.name for b in _pm_repo.branches}
+            if integration_branch in _pm_existing:
+                _pre_merge_sha = _pm_repo.commit(integration_branch).hexsha
+        except Exception:
+            log.debug(
+                "pre_merge_sha_capture_failed",
+                integration_branch=integration_branch,
+            )
+
     try:
         merge_sha = await _ff_merge_to_integration(
             target_project=cfg.target_project,
@@ -4471,6 +4491,90 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
         integration=integration_branch,
         sha=merge_sha,
     )
+
+    # NEW-32 — post-merge integration test.  After the ff-merge, run the
+    # project's build-check policy against the *combined* integration branch.
+    # Two parallel stories can merge with no textual conflict yet break the
+    # combined integration branch semantically; this catches such regressions.
+    # Fully defensive: any unexpected exception is logged and swallowed — it
+    # must NEVER abort the merge or prevent INTEGRATION_MERGE_COMPLETED.
+    if cfg.target_project is not None:
+        try:
+            import bmad_orchestrator.runtime.build_check as _bc_mod
+            import bmad_orchestrator.skills_repo as _sr_mod
+
+            _PolicyNotFound = _sr_mod.PolicyNotFoundError
+            _PolicyInvalid = _sr_mod.PolicyInvalidError
+            _bc_pol = None
+            try:
+                _bc_pol = _bc_mod.load_build_check_policy()
+            except (_PolicyNotFound, _PolicyInvalid) as _pe:
+                log.info(
+                    "integration_test_skip_no_policy",
+                    story_id=story_id,
+                    reason=str(_pe),
+                )
+            if _bc_pol is not None and _bc_pol.commands:
+                _bc_fail = None
+                for _cmd_item in _bc_pol.commands:
+                    _bc_res = await _bc_mod._run_command(
+                        _cmd_item,
+                        worktree=cfg.target_project,
+                        timeout_sec=_bc_pol.timeout_sec,
+                        tail_lines=_bc_pol.tail_lines,
+                        skip_if_missing_executable=_bc_pol.skip_if_missing_executable,
+                    )
+                    _is_skip = (
+                        _bc_res.skipped_missing_executable
+                        or _bc_res.skipped_no_ruff_config
+                        or _bc_res.timed_out
+                    )
+                    if _bc_res.exit_code != 0 and _cmd_item.required and not _is_skip:
+                        _bc_fail = _bc_res
+                        break
+                if _bc_fail is not None:
+                    log.warning(
+                        "integration_test_failed",
+                        story_id=story_id,
+                        failed_command=_bc_fail.name,
+                        exit_code=_bc_fail.exit_code,
+                        tail=_bc_fail.tail,
+                        integration_branch=integration_branch,
+                    )
+                    await bus.emit(
+                        EventType.INTEGRATION_TEST_FAILED,
+                        story_id=story_id,
+                        failed_command=_bc_fail.name,
+                        exit_code=_bc_fail.exit_code,
+                        tail=_bc_fail.tail,
+                        integration_branch=integration_branch,
+                        pre_merge_sha=_pre_merge_sha,
+                    )
+                    await bus.emit(
+                        EventType.HUMAN_QUERY,
+                        chat_id=cfg.escalation_chat_id,
+                        text=(
+                            f"Integration test FAILED для {story_id} после merge "
+                            f"в {integration_branch}:\n\n"
+                            f"Command: {_bc_fail.name}\n"
+                            f"Exit code: {_bc_fail.exit_code}\n"
+                            f"Output tail:\n{_bc_fail.tail}\n\n"
+                            f"Pre-merge SHA: {_pre_merge_sha or 'unknown'}"
+                        ),
+                        story_id=story_id,
+                        verdict="integration_test_failed",
+                        integration_branch=integration_branch,
+                        pre_merge_sha=_pre_merge_sha,
+                        failed_command=_bc_fail.name,
+                        actions=["revert_to_pre_merge", "fix_forward", "ignore"],
+                    )
+        except Exception:
+            log.exception(
+                "integration_test_unexpected_error",
+                story_id=story_id,
+                integration_branch=integration_branch,
+            )
+
     # NEW-16 — positive merge signal. ``partition_pilot_outcomes`` consumes
     # this to compute the honest ``succeeded`` metric: a worker exiting
     # ``status=success`` only proves dev work landed on the feature branch,

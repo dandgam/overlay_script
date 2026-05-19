@@ -176,7 +176,7 @@ class EventType(StrEnum):
     # committed, no stage5_recovery_failed) into a loud audit signal. Payload:
     # {story_id, worktree, jsonl, reason}.
     WORKER_EXIT_UNCOMMITTED = "worker_exit_uncommitted"
-
+    INTEGRATION_TEST_FAILED = "integration_test_failed"
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
 

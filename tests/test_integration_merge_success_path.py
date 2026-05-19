@@ -221,7 +221,7 @@ async def test_merge_subscriber_resolves_worktree_from_registry(
     seen: dict[str, str] = {}
 
     async def fake_ff(*, target_project: Path, integration_branch: str,
-                      feature_branch: str) -> str:
+                      feature_branch: str, worktree: str | None = None) -> str:
         return "merge-sha"
 
     monkeypatch.setattr(run, "_ff_merge_to_integration", fake_ff)
@@ -252,7 +252,7 @@ async def test_merge_subscriber_emits_skipped_on_ff_conflict(
     run.configure_code_review_gate(target_project=project, wave="wave-1a")
 
     async def boom(*, target_project: Path, integration_branch: str,
-                   feature_branch: str) -> str:
+                   feature_branch: str, worktree: str | None = None) -> str:
         raise RuntimeError("non-ff")
 
     monkeypatch.setattr(run, "_ff_merge_to_integration", boom)
