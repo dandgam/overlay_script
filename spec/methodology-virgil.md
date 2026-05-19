@@ -649,6 +649,17 @@ fallback), но merge упал на новом баге.
   консервативный regex по путям в Tasks/Dev-Notes ИЛИ извлекать список из git-diff
   worker'а пост-фактум для следующих батчей. P1 — не блокирует пилот (порядок важнее).
 
+- ✅ **NEW-30 (P1, СТРУКТУРНОЕ) · Тип: 🐛 Баг — auto-split слеп к размеру реальных
+  историй** — DONE 2026-05-20 (commit `b437f4b`), родственник NEW-28. `evaluate_split`
+  читал 5 метрик размера (`estimated_minutes/tokens`, `touches_files`, `layers`,
+  `ac_count`) из машинных полей, которых в реальных BMad-историях нет → все метрики 0 →
+  всегда `keep`, история любого размера не дробилась (даже `BMAD_AUTO_SPLIT=1`).
+  **Fix:** `parse_story_md` извлекает размер из markdown-структуры — `ac_count` (число
+  distinct `AC<n>`-заголовков) и `task_count` (число чекбоксов Tasks/Subtasks); новое
+  правило `tasks>=40` (`SPLIT_TASK_THRESHOLD`); `count_acceptance_criteria`
+  приоритезирует explicit `ac_count`. Калибровка на Antares: 1.3 (82 подзадачи)→split,
+  1.4 (74)→split, 3-2-zfs (8 AC)→split, 10-1 (21)→keep. +5 tests, tests 2150.
+
 ---
 
 ## 6. References
