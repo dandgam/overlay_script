@@ -666,18 +666,24 @@ fallback), но merge упал на новом баге.
   на integration, EventType #42 `INTEGRATION_TEST_FAILED`, defensive — exception не
   крашит мерж). Tests 2150 → 2166.
 
-- ⬜ **NEW-33 (P1, СТРУКТУРНОЕ) · Тип: 🐛 Баг — watchdog слеп к застрявшему воркеру** —
-  OPEN 2026-05-20, найден pilot 2b. Story 3-2-zfs: dev-воркер выполнил работу (коммит
-  `1d86f83` + staged-файлы), но events.jsonl застыл на 4 строках в `runs/default/`
-  (вместо `runs/2b/` — wave-env mismatch?) → терминальный `worker_completed`
-  оркестратору не дошёл → tail-loop ждёт **30+ мин без таймаута**. Два правила-проверки
-  оба прошли мимо: `subprocess_timeout` (на отдельный `claude -p`, не на суммарный
-  stuck) + `liveness.is_stalled` (если событий 0, возвращает «не завис»). LLM-judge
-  protocol есть, но не подключён. **Fix:** (a) `is_stalled` — «нет JSONL N сек» =
-  stalled; (b) cumulative таймаут на застрявший раннер; (c) подключить
-  `LLMJudgeProtocol` в `supervisor_subscriber` — periodic health-verdict по
-  разнородным сигналам, спека `spec_supervisor_llm_loop.md` уже есть; (d) проверить
-  почему `BMAD_CURRENT_WAVE` не доехал до sandbox-env воркера.
+- ✅ **NEW-33 (P1, СТРУКТУРНОЕ) · Тип: 🐛 Баг — watchdog слеп к застрявшему воркеру** —
+  CLOSED 2026-05-20 (4 subtasks). NEW-33.1 `ad0b578` — `liveness.is_stalled` принимает
+  опциональный `start_time` → пустой JSONL после threshold = stalled (backward-compatible).
+  NEW-33.2 `8e83bb2` + `36b80eb` — новый `runtime/stuck_watchdog.py` с pure
+  `evaluate_stuck` и async-iterator-обёрткой `tail_with_stuck_watchdog` над
+  `tail_jsonl_events`; кумулятивный stuck = нет роста коммитов + (события устарели
+  > threshold OR событий нет и elapsed > threshold); порог `BMAD_STUCK_TIMEOUT_SECONDS`
+  (default 1800s); на stuck — emit `HUMAN_QUERY` + `WORKER_STUCK_TIMEOUT` + синтез
+  терминального `worker_completed(status=stuck_timeout)`; EventType #43.
+  NEW-33.3 `dded04d` — `WATCHED_EVENT_TYPES += WORKER_STUCK_TIMEOUT`,
+  `load_supervisor_engine(judge_factory=...)` env-gated hook (`BMAD_SUPERVISOR_LLM`,
+  real Sonnet deferred to spec_supervisor_llm_loop M4 — wiring готов, fail-safe
+  fallback на StubJudge); добавлено hard rule worker-stuck-timeout → escalate_human.
+  NEW-33.4 `60de067` — `BMAD_CURRENT_WAVE` добавлен в `ALLOWED_WORKER_ENV`
+  (worker_spawn) И в `_SANDBOX_DEFAULT_ENV_ALLOWLIST` (bwrap `--setenv`) — pilot 2b
+  root cause: переменная не проходила через два слоя allowlist'ов, и
+  `worker_events.current_wave_dir()` писал `runs/default/` вместо `runs/2b/`.
+  Tests 2166→2182 (+16), ruff clean.
 
 ---
 
