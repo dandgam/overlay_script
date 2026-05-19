@@ -229,6 +229,32 @@ _PAREN_RE = re.compile(r"\([^()]*\)")
 # A story-id token: dotted ``3.1`` / ``1.17b`` or kebab ``3-1`` / ``3-1-slug``.
 _STORY_ID_TOKEN_RE = re.compile(r"\b\d+\.\d+[a-z]?\b|\b\d+-\d+(?:-[a-z0-9-]+)?\b")
 
+# NEW-29 — heuristic touches_files extraction from backtick code-spans.
+# Real BMad stories lack a canonical ``- **touches_files:**`` block; their
+# file paths live in backtick-wrapped tokens scattered through the prose.
+# We keep only tokens that look like source paths: they must contain a "/"
+# (directory separator) OR end in a known code extension. This is
+# best-effort — false positives (e.g. shell flags like `-C`) are filtered
+# by the extension/slash rule; the canonical machine field always wins.
+_BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
+_CODE_EXTENSIONS = frozenset(
+    ".py .rs .ts .tsx .js .jsx .sql .sh .yaml .yml .toml".split()
+)
+
+
+def _looks_like_source_path(token: str) -> bool:
+    """Return True if a backtick token resembles a source-file path."""
+    stripped = token.strip()
+    if not stripped or " " in stripped:
+        # multi-word spans (e.g. ``make dev``) are commands, not paths
+        return False
+    if "/" in stripped:
+        return True
+    # single-segment token: accept only known code extensions
+    _, _, suffix = stripped.rpartition(".")
+    return f".{suffix}" in _CODE_EXTENSIONS if suffix else False
+
+
 # NEW-30 — auto-split size signals. Real BMad stories carry no machine
 # ``- **estimated_tokens:**`` field; their size lives in the markdown body:
 #   * AC headers — ``**AC1 — …**`` / ``### AC 2`` / ``AC3:`` (line-leading).
@@ -318,6 +344,20 @@ def parse_story_md(md_text: str) -> dict[str, Any]:
         prose_blocks = _extract_prose_story_ids(md_text, _PROSE_BLOCKS_RE)
         if prose_blocks:
             out["blocks"] = prose_blocks
+
+    # NEW-29 — fall back to heuristic backtick-span extraction when the
+    # canonical ``- **touches_files:**`` machine field is absent or empty.
+    # Best-effort: only tokens that look like source paths are kept (must
+    # contain "/" or end in a known code extension). The canonical field,
+    # when present and non-empty, always wins.
+    if not out.get("touches_files"):
+        prose_paths: list[str] = []
+        for m in _BACKTICK_TOKEN_RE.finditer(md_text):
+            token = m.group(1).strip()
+            if _looks_like_source_path(token) and token not in prose_paths:
+                prose_paths.append(token)
+        if prose_paths:
+            out["touches_files"] = prose_paths
 
     # NEW-30 — derive auto-split size signals from the markdown body when the
     # canonical machine fields are absent (real BMad story files). AC count is
