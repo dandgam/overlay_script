@@ -326,7 +326,34 @@ counter split дал spawned/succeeded/failed; S2 verdict-fallback не помо
 
 **Closed by initiative:** `pilot_findings_closure_v3` (S1..S4 на `integration/pilot_findings_closure_v3`,
 NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 + EventType #36, tests 2009→2038).
-Post-merge — повторный validation-replay Antares 1a для финального подтверждения NEW-7.
+Merged в main `be655eb`.
+
+### Backlog — pilot run #3 findings (Antares 1a после v3 merge, 2026-05-19)
+
+3-й production pilot ПОСЛЕ merge v3 (`be655eb`). `spawned=3 succeeded=0 failed=3`,
+integration ветка не создана. Детали — memory [[project_pilot_antares_1a_run3_2026-05-19]].
+
+- ✅ **NEW-1-completion validated** — worktrees в `/home/server/Antares` без env-override.
+- ✅ **NEW-8 validated** — `orchestrator_shutdown_complete elapsed_sec=0.0` (чистый выход).
+- ❌ **NEW-7 НЕ validated** — `_reconcile_success_verdicts` реконсилит только success
+  verdict'ы; все 3 story помечены `failed` → нечего мержить → ни integration ветки, ни
+  `INTEGRATION_MERGE_SKIPPED`. Merge-path так и не протестирован.
+- ⬜ **NEW-9 (P1, КОРЕНЬ): runner exit non-zero на успешной story перекрывает verdict** —
+  story 1.5 прошла ПОЛНЫЙ цикл (dev `63dc8d4` + autofix `79bc93c` F1-F4, 2 коммита), но
+  помечена `failed`. Цепочка: runner exit non-zero на финальной стадии → NEW-4
+  `parse_inner_exit_code` ставит `status=failure` → counter failed → reconcile нечего
+  мержить. **NEW-4 over-correction** — стал строже к exit code, завершённая работа с
+  коммитами = failed. Fix: orchestrator берёт `verdict=approve` из stage6 review log как
+  source-of-truth (verdict approve + commits → success, независимо от runner exit code).
+  Разблокирует NEW-7. ~1 сессия.
+- ⬜ **NEW-10 (P2): worker events не доходят до главного `events.jsonl` + orchestrator-лога** —
+  `runs/default/wt-1.X.events.jsonl` с mtime прошлого run'а; orchestrator-лог пуст 30 мин
+  между worktree_created и real_pilot_done. Диагностика run'а почти невозможна.
+
+**Recommended next initiative:** `pilot_findings_closure_v4` — приоритет **NEW-9** (verdict
+как source-of-truth — разблокирует NEW-7) + NEW-10 (observability) + перепроверка NEW-5.
+Без NEW-9 ни одна story не доходит до success → NEW-7 непроверяем → production pilot
+по-прежнему не доводит работу до integration.
 
 ---
 
