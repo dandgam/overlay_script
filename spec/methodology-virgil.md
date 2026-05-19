@@ -660,6 +660,25 @@ fallback), но merge упал на новом баге.
   приоритезирует explicit `ac_count`. Калибровка на Antares: 1.3 (82 подзадачи)→split,
   1.4 (74)→split, 3-2-zfs (8 AC)→split, 10-1 (21)→keep. +5 tests, tests 2150.
 
+- ✅ **NEW-29/31/32** — DONE 2026-05-20 (субагент). NEW-29 `36e77c6` (touches_files из
+  бэктик-спанов прозы), NEW-31 `883e288` (rebase feature на integration перед ff-merge,
+  на конфликт — `rebase --abort` + эскалация), NEW-32 `9b66f0c` (post-merge build-check
+  на integration, EventType #42 `INTEGRATION_TEST_FAILED`, defensive — exception не
+  крашит мерж). Tests 2150 → 2166.
+
+- ⬜ **NEW-33 (P1, СТРУКТУРНОЕ) · Тип: 🐛 Баг — watchdog слеп к застрявшему воркеру** —
+  OPEN 2026-05-20, найден pilot 2b. Story 3-2-zfs: dev-воркер выполнил работу (коммит
+  `1d86f83` + staged-файлы), но events.jsonl застыл на 4 строках в `runs/default/`
+  (вместо `runs/2b/` — wave-env mismatch?) → терминальный `worker_completed`
+  оркестратору не дошёл → tail-loop ждёт **30+ мин без таймаута**. Два правила-проверки
+  оба прошли мимо: `subprocess_timeout` (на отдельный `claude -p`, не на суммарный
+  stuck) + `liveness.is_stalled` (если событий 0, возвращает «не завис»). LLM-judge
+  protocol есть, но не подключён. **Fix:** (a) `is_stalled` — «нет JSONL N сек» =
+  stalled; (b) cumulative таймаут на застрявший раннер; (c) подключить
+  `LLMJudgeProtocol` в `supervisor_subscriber` — periodic health-verdict по
+  разнородным сигналам, спека `spec_supervisor_llm_loop.md` уже есть; (d) проверить
+  почему `BMAD_CURRENT_WAVE` не доехал до sandbox-env воркера.
+
 ---
 
 ## 6. References
