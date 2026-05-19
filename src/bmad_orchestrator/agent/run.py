@@ -68,7 +68,7 @@ from bmad_orchestrator.agent.skills import dispatch as dispatch_skills
 from bmad_orchestrator.agent.skills import load_body as load_skill_body
 from bmad_orchestrator.agent.system_prompt import blocks_to_string, build_system_prompt
 from bmad_orchestrator.agent.tools import ALL_TOOLS
-from bmad_orchestrator.config import ModelConfig, load_settings
+from bmad_orchestrator.config import ModelConfig, Settings, load_settings
 from bmad_orchestrator.runtime.auto_split import (
     AutoSplitOutcome,
     DecomposeFn,
@@ -220,6 +220,7 @@ async def run_orchestrator(
     max_stories: int = 50,
     max_spend_usd: float = 50.0,
     stories: tuple[str, ...] | None = None,
+    settings: Settings | None = None,
 ) -> EventLoop:
     """Main orchestrator loop. Returns the EventLoop instance.
 
@@ -238,8 +239,14 @@ async def run_orchestrator(
     needed for the bot's NL intent-router (graceful slash-command fallback
     without it). When multi-LLM support lands, this comment becomes outdated.
     See memory: feedback_no_anthropic_api.
+
+    ``settings`` — when provided (e.g. by the CLI after resolving an explicit
+    ``--project`` flag through the registry), it is used verbatim instead of
+    ``load_settings()``. This is how ``--project`` deterministically beats the
+    ``ORCHESTRATOR_TARGET_PROJECT`` env var (NEW-1): the CLI hands down a
+    Settings whose ``target_project`` is already the registry-resolved path.
     """
-    settings = load_settings()
+    settings = settings or load_settings()
     models = models or settings.models
     bus = event_loop or EventLoop()
 
