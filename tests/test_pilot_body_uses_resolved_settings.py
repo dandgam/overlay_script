@@ -36,11 +36,31 @@ from bmad_orchestrator.agent.run import (
     run_orchestrator,
 )
 from bmad_orchestrator.agent.safety.budget_guard import BudgetGuard
+from bmad_orchestrator.agent.tools._common import worktree_root
 from bmad_orchestrator.config import ModelConfig, Settings, load_settings
 from bmad_orchestrator.runtime.event_loop import EventLoop
 from bmad_orchestrator.runtime.worker_spawn import WorkerHandle
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _clean_var_tmp_worktrees() -> Any:
+    """NEW-27 — worktrees now land in ``/var/tmp/virgil-worktrees/<target>``.
+
+    These tests name their targets ``resolved`` / ``envproj``; the real pilot
+    body runs an actual ``git worktree add`` there. Clean those roots before
+    and after each test so the suite stays idempotent (a leftover ``wt-*`` dir
+    makes the next ``git worktree add`` fail with "already exists").
+    """
+    import shutil
+
+    roots = [Path("/var/tmp/virgil-worktrees") / n for n in ("resolved", "envproj")]
+    for r in roots:
+        shutil.rmtree(r, ignore_errors=True)
+    yield
+    for r in roots:
+        shutil.rmtree(r, ignore_errors=True)
 
 
 def _make_target(tmp_path: Path, name: str, *story_ids: str) -> Path:
@@ -140,13 +160,17 @@ async def test_mock_pilot_uses_passed_settings_not_env(
     finally:
         await bus.stop()
 
+    expected_root = worktree_root(settings)
     assert captured, "expected at least one spawn"
-    assert all(wt.startswith(str(target_resolved)) for wt in captured), (
-        f"worktrees must sit under the resolved project {target_resolved}, "
-        f"got {captured!r}"
+    assert all(wt.startswith(str(expected_root)) for wt in captured), (
+        f"worktrees must sit under the resolved project's root {expected_root} "
+        f"(NEW-27 — outside the target tree), got {captured!r}"
+    )
+    assert target_env.name not in expected_root.parts, (
+        "env-named project must not drive the worktree root"
     )
     assert not (target_env / ".worktrees").exists(), (
-        "env-named project must not receive worktrees"
+        "NEW-27 — no worktrees inside any target project tree"
     )
 
 
@@ -188,9 +212,14 @@ async def test_real_pilot_body_uses_passed_settings_not_env(
     finally:
         await bus.stop()
 
+    expected_root = worktree_root(settings)
     assert captured, "expected at least one spawn"
-    assert all(wt.startswith(str(target_resolved)) for wt in captured), (
-        f"real-pilot worktrees must sit under {target_resolved}, got {captured!r}"
+    assert all(wt.startswith(str(expected_root)) for wt in captured), (
+        f"real-pilot worktrees must sit under the resolved root {expected_root} "
+        f"(NEW-27), got {captured!r}"
+    )
+    assert target_env.name not in expected_root.parts, (
+        "env-named project must not drive the worktree root"
     )
 
 
@@ -249,8 +278,12 @@ async def test_run_orchestrator_threads_settings_to_mock_pilot(
     )
     await bus.stop()
 
+    expected_root = worktree_root(settings)
     assert captured, "expected at least one spawn"
-    assert all(wt.startswith(str(target_resolved)) for wt in captured), (
-        f"run_orchestrator must thread settings to the pilot body; "
-        f"worktrees got {captured!r}"
+    assert all(wt.startswith(str(expected_root)) for wt in captured), (
+        f"run_orchestrator must thread settings to the pilot body; expected "
+        f"root {expected_root} (NEW-27), worktrees got {captured!r}"
+    )
+    assert target_env.name not in expected_root.parts, (
+        "env-named project must not drive the worktree root"
     )

@@ -130,9 +130,12 @@ class Settings(BaseSettings):
     # _bmad-output/  = generated artifacts (planning + implementation)
     artifacts_dir_name: str = "_bmad-output"
 
-    # Worktree layout (BAD default = .worktrees inside repo;
-    # ours по handoff §6.2 = sibling /home/server/<proj>-wt-N)
-    worktree_layout: Literal["sibling", "nested"] = "sibling"
+    # NEW-27 — worktree root resolution moved to
+    # ``agent/tools/_common.worktree_root()``: worktrees live OUTSIDE the target
+    # tree (default ``/var/tmp/virgil-worktrees/<target>``) so workers cannot
+    # resolve the target project's skills. Override via env
+    # ``ORCHESTRATOR_WORKTREE_ROOT``. The old ``worktree_layout`` enum was
+    # never wired and is removed.
 
     max_parallel_workers: int = 3  # matches BAD MAX_PARALLEL_STORIES default
     anthropic_api_key: str | None = None

@@ -614,8 +614,12 @@ async def _run_mock_pilot(
         read_sprint_status_yaml,
         write_sprint_status_yaml,
     )
+    from bmad_orchestrator.agent.tools._common import (
+        worktree_root as _worktree_root,
+    )
 
-    worktree_root = settings.target_project / ".worktrees"
+    # NEW-27 — worktree root lives outside the target tree (see worktree_root).
+    worktree_root = _worktree_root(settings)
     worktree_root.mkdir(parents=True, exist_ok=True)
 
     planner = DagPlanner.from_target()
@@ -1261,8 +1265,12 @@ async def _run_real_pilot_body(
         read_sprint_status_yaml,
         write_sprint_status_yaml,
     )
+    from bmad_orchestrator.agent.tools._common import (
+        worktree_root as _worktree_root,
+    )
 
-    worktree_root = settings.target_project / ".worktrees"
+    # NEW-27 — worktree root lives outside the target tree (see worktree_root).
+    worktree_root = _worktree_root(settings)
     worktree_root.mkdir(parents=True, exist_ok=True)
 
     # W4 + P0-1 — wire the shared gate context + the full Phase-4 pipeline

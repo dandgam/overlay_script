@@ -104,13 +104,28 @@ def runs_dir(settings: Settings | None = None) -> Path:
 
 
 def worktree_root(settings: Settings | None = None) -> Path:
-    """Base directory holding mock worktrees (parent of target_project).
+    """Base directory holding per-story worktrees.
 
-    Real layout per spec §10: sibling `<proj>-wt-N`. In mock-mode we keep
-    everything under target_project/.worktrees/.
+    NEW-27 — worktrees MUST live **outside** the target project tree. A worker's
+    ``claude`` resolves slash commands by walking up the directory tree from its
+    CWD; a worktree under ``<target>/.worktrees/`` lets the worker reach
+    ``<target>/.claude/skills/`` and resolve the *target project's* skills
+    instead of Virgil's embedded ones (the NEW-26 trap).
+
+    Default root: ``/var/tmp/virgil-worktrees/<target-basename>`` — ``/var/tmp``
+    (persistent, not a tmpfs) has no ``.claude`` ancestor, so the target's and
+    the operator's skills are undiscoverable. Override via the
+    ``ORCHESTRATOR_WORKTREE_ROOT`` env var (its value is used verbatim as the
+    root; per-story worktrees are ``<root>/wt-<story_id>``).
     """
     s = settings or get_settings()
-    return s.target_project / ".worktrees"
+    override = os.environ.get("ORCHESTRATOR_WORKTREE_ROOT")
+    if override:
+        return Path(override)
+    # Deliberate fixed root, not a predictable secret-bearing temp file:
+    # worktrees must sit outside every project tree (NEW-27), git worktree add
+    # fails loudly on a hijacked path, and no secrets are written here.
+    return Path("/var/tmp/virgil-worktrees") / s.target_project.name  # noqa: S108
 
 
 def memory_dir(settings: Settings | None = None) -> Path:
