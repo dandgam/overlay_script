@@ -32,6 +32,9 @@
 ## Sessions
 
 ### Pending
+(none)
+
+### Current
 
 - **id:** S2
   **title:** NEW-10 worker events propagation + NEW-5 recheck
@@ -43,36 +46,28 @@
     - Orchestrator-лог не молчит >5 мин при активных воркерах
     - Dirty-detector игнорирует `.claude/` пути (embedded skills не «грязь»)
     - Реальная грязь вне `.claude/` по-прежнему ловится
+    - methodology-virgil.md §5 — NEW-9/NEW-10/NEW-5-recheck помечены DONE
     - +7 + +5 = +12 tests
   **safety_gates: []
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-
-### Current
-
-- **id:** S1
-  **title:** NEW-9 verdict source-of-truth для worker success
-  **surface:** backend-python
-  **spec_section:** spec/spec_pilot_findings_closure_v4.md §1
-  **depends_on:** []
-  **acceptance:**
-    - `decide_worker_status(verdict, commits, inner_exit, outer_exit)` — verdict=approve+commits→success независимо от inner_exit
-    - `read_runner_verdict(worktree, story_id)` парсит stage6 review log
-    - `_tail_and_emit_completion` wired → worker_completed payload содержит verdict/new_commits_count/status_decided_by
-    - verdict=request_changes → failure даже с commits
-    - verdict=None → fallback на exit-code логику (backwards compat)
-    - regression: pilot run #3 1.5 fixture (verdict approve, 2 commits, exit non-zero) → success
-    - +11 tests
-  **safety_gates: []
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-  **started:** 2026-05-19 (bootstrap)
+  **started:** 2026-05-19
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
-(none)
+
+- **id:** S1
+  **title:** NEW-9 verdict source-of-truth для worker success
+  **surface:** backend-python
+  **completed:** 2026-05-19
+  **commit:** 80dd56d
+  **result:** decide_worker_status + read_runner_verdict реализованы, wired в
+    _tail_and_emit_completion. worker_completed payload содержит verdict /
+    new_commits_count / status_decided_by. +11 tests (2038→2049 PASS),
+    mypy/ruff clean. Все acceptance criteria выполнены, включая regression
+    fixture pilot run #3 1.5 (approve + 2 commits + inner exit 2 → success).
 
 ## Safety Gates Triggered
 (none)
@@ -81,11 +76,18 @@
 (none)
 
 ## Decisions Log
-(none)
+
+[2026-05-19] S1: decide_worker_status размещён в runtime/worker_silent_failure.py
+(рядом с parse_inner_exit_code — обе pure-функции про worker terminal status),
+а не в worker_spawn.py как буквально указано в spec §1. Spec допускает «или где
+формируется worker_completed»; фактический wiring-site = agent/run.py
+_tail_and_emit_completion. read_runner_verdict вынесен в verdict_fallback.py.
 
 ## Journal
 
 [2026-05-19 UTC] bootstrap: tracker created via /auto-loop-spec-long, 2 sessions planned, S1 promoted to Current. Slug=pilot_findings_closure_v4, runtime=loop_wrapper, delay=120s, auto_merge=false.
+
+[2026-05-19 10:00 UTC] S1 done — NEW-9 verdict source-of-truth. commit 80dd56d. +11 tests (2049 PASS), mypy/ruff clean. S2 promoted to Current. runtime=loop_wrapper — wrapper handles next iteration.
 
 ## Final Report
 (empty)
