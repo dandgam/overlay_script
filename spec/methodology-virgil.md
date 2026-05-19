@@ -308,9 +308,43 @@ counter split дал spawned/succeeded/failed; S2 verdict-fallback не помо
 
 **Recommended next initiative:** ✅ `pilot_findings_closure_v2` ЗАКРЫТА 2026-05-19
 (S1..S3 на `integration/pilot_findings_closure_v2`, NEW-1..NEW-4 + EventType #35,
-2009 PASS). Layer C (pre-spawn worktree refresh) deferred. Следующее — `pilot_findings_closure_v2_validation`:
-повторный прогон Antares Epic 1 (1.3/1.4/1.5) на fresh worktrees ПОСЛЕ merge для
-валидации fixes.
+2009 PASS). Layer C (pre-spawn worktree refresh) deferred.
+
+### Backlog — validation replay findings (Antares 1a replay 2026-05-19)
+
+Источник: validation-replay pilot Antares 1a ПОСЛЕ merge `pilot_findings_closure_v2`
+(`f76816f`). Результат `spawned=3 succeeded=2 failed=1`. NEW-2 validated, остальные
+фиксы оказались частичными. Детали — memory [[project_pilot_antares_1a_replay_2026-05-19]].
+
+- ✅ **NEW-2 VALIDATED** — `grep -c "cannot delete branch"` по логу = 0 (прошлый run халтил 3/3). Stage 7 graceful cleanup работает в проде.
+- ⬜ **NEW-1-completion (P1): pilot body перечитывает env** — v2 пометил NEW-1 done, но
+  `agent/run.py:_run_real_pilot_body` (~933) и `_run_mock_pilot` (~541) делают
+  `settings = load_settings()` заново → читают `ORCHESTRATOR_TARGET_PROJECT` из `.env` →
+  worktrees создаются в `/home/server/odyssey`. Fix: прокинуть resolved `Settings` в
+  pilot body, убрать оба `load_settings()`. ~20-30 мин + тест. memory
+  [[project_backlog_new1_incomplete]].
+- ⬜ **NEW-3-completion (P2): resolver всё ещё не матчит** — `pilot_mark_done_unresolved`
+  снова firing для 1.4/1.5 несмотря на v2 fix `729650f`. sprint-status не обновляется.
+  Нужен повторный разбор `resolve_sprint_status_key`.
+- ⬜ **NEW-6 (P2): NEW-4 format gap** — runner выводит и `Exit code: N`, и `EXIT_CODE=N`;
+  `parse_inner_exit_code` regex `^(?:❯ )?Exit code: (\d+)$` ловит только первый. Worker
+  1.4 вывел `EXIT_CODE=2` → `worker_completed status=success` (неверно). Расширить regex
+  на оба формата.
+- ⬜ **NEW-7 (P1, ГЛАВНЫЙ БЛОКЕР): integration ветка не создаётся даже на succeeded** —
+  1.5 — чистый успех с commit `85bb8a4` — но `merge_to_integration_subscriber` не
+  сработал, `integration/wave-1a` не создана. Verdict→integration pipeline разорван.
+  S2 verdict-fallback не покрывает реальные сценарии. **До фикса production pilot
+  бессмыслен — stories делаются, но никуда не интегрируются.**
+- ⬜ **NEW-5 (P2): dirty worktree блокирует Stage 0** — reused worktree с uncommitted
+  изменениями (от прошлого aborted run'а) → runner Stage 0 halt `working tree not clean`.
+  1.3 упала на этом. `worktree_dirty_pre_spawn` warning есть — нужен action (auto-stash /
+  checkout -- . перед spawn'ом).
+- ⬜ **NEW-8 (P2): orchestrator висит ~13 мин после `real_pilot_done`** — процесс не
+  выходит сам. Возможно orphan-cleanup hang или wait на subscriber.
+
+**Recommended next initiative:** `pilot_findings_closure_v3` через `/auto-loop-spec-long`
+(~3-4 сессии) — приоритет **NEW-7** (integration pipeline — критпуть) + NEW-1-completion
++ NEW-3-completion + NEW-6 + NEW-5 + NEW-8. До v3 production pilot бессмыслен.
 
 ---
 
@@ -334,6 +368,6 @@ counter split дал spawned/succeeded/failed; S2 verdict-fallback не помо
 
 ---
 
-**Last updated:** 2026-05-19 (v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Last updated:** 2026-05-19 (v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
 **Status:** v13.5 — **Phase 3 gate CLOSED** (Step A `28 tests` + Step B `10 real cases` + baseline scaffold `evals/baselines/phase3-step-b-baseline.json`). pilot_findings_closure initiative complete on integration branch (S1..S8, 5 P1 + 3 P2 + 1 P3 + R1 + R2): tests **1945 PASS** (+85 vs 1860 baseline; +5 expected after S8 merge), mypy/ruff clean, EventType count **34** (+5: STORY_AUTO_SPLIT, WORKER_CANCELLED, MCP_NOT_READY, BUDGET_AUTO_DISABLED, WORKER_HALT_PRESPAWN). **Awaits manual merge** `git checkout main && git merge --no-ff integration/pilot_findings_closure`. **#10 production pilot UNBLOCKED** post-merge.
 **Owner:** user + Claude orchestrator
