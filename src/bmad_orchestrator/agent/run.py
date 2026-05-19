@@ -4232,6 +4232,7 @@ async def _ff_merge_to_integration(
     target_project: Path,
     integration_branch: str,
     feature_branch: str,
+    worktree: str | None = None,
 ) -> str:
     """Fast-forward merge ``feature_branch`` → ``integration_branch``.
 
@@ -4242,8 +4243,22 @@ async def _ff_merge_to_integration(
     Hard rules per CLAUDE.md + spec §W4: this helper is restricted to ff-only
     plus signoff. Disabling pre-commit hooks, forcing the ref forward, or
     rewriting history with destructive resets are all out of scope.
+
+    NEW-31 — when ``worktree`` is given AND refers to a real git worktree
+    (has a ``.git`` entry), rebase the feature branch onto the current
+    integration HEAD *before* the ff-merge.  Parallel stories each branch
+    ``feature/<story>`` from the same integration base; after the first story
+    ff-merges, the second story's branch is no longer a descendant of the
+    moved integration HEAD — ``--ff-only`` would fail.  Rebasing inside the
+    worker's worktree (where the feature branch is checked out) brings it
+    up-to-date so the subsequent ff-merge succeeds.
+
+    Rebase conflict handling: abort cleanly (``git rebase --abort``), then
+    re-raise the original error so the caller's ``except`` block escalates
+    via ``HUMAN_QUERY``.  No force-push, no reset --hard, no --no-verify.
     """
     from git import Repo
+    from git import exc as git_exc
 
     repo = Repo(str(target_project))
 
@@ -4251,6 +4266,32 @@ async def _ff_merge_to_integration(
     if integration_branch not in existing:
         base = "main" if "main" in existing else repo.active_branch.name
         repo.git.branch(integration_branch, base)
+
+    # NEW-31 — rebase the feature branch onto integration BEFORE checking out
+    # integration for the merge.  The rebase must run inside the worker's
+    # worktree (where feature/<story> is the active branch); git refuses to
+    # rebase a branch that is checked out in a different worktree.
+    if (
+        worktree is not None
+        and (Path(worktree) / ".git").exists()
+        and integration_branch in existing
+    ):
+        wt_repo = Repo(str(worktree))
+        try:
+            wt_repo.git.rebase(integration_branch)
+            log.info(
+                "feature_rebased_onto_integration",
+                feature_branch=feature_branch,
+                integration_branch=integration_branch,
+                worktree=worktree,
+            )
+        except git_exc.GitCommandError as rebase_exc:
+            # Abort cleanly so the worktree is left in a usable state.
+            try:
+                wt_repo.git.rebase("--abort")
+            except Exception:  # pragma: no cover — defensive cleanup
+                log.warning("rebase_abort_failed", worktree=worktree)
+            raise rebase_exc
 
     repo.git.checkout(integration_branch)
 
@@ -4391,6 +4432,7 @@ async def merge_to_integration_subscriber(event: Event, bus: EventLoop) -> None:
             target_project=cfg.target_project,
             integration_branch=integration_branch,
             feature_branch=feature_branch,
+            worktree=worktree or None,
         )
     except Exception as exc:  # git library errors (GitCommandError) + subprocess
         log.exception(
