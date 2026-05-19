@@ -136,9 +136,50 @@ def parse_inner_exit_code(stdout_lines: Iterable[str]) -> int | None:
     return result
 
 
+def decide_worker_status(
+    verdict: str | None,
+    new_commits_count: int,
+    inner_exit: int | None,
+    outer_exit: int,
+) -> str:
+    """Decide a worker's terminal status — ``"success"`` or ``"failure"``.
+
+    #9 NEW-9 — verdict source-of-truth. The Stage 6 code-review ``verdict`` is
+    the authoritative signal that a story was done correctly; the runner exit
+    code is only secondary (it can be non-zero purely because of a Stage 7
+    cleanup failure on an otherwise-complete story — see NEW-2 / NEW-4).
+
+    Decision rules, in order:
+
+    * ``verdict == "approve"`` AND ``new_commits_count > 0`` → ``"success"``
+      regardless of ``inner_exit`` (this is the NEW-9 fix: a non-zero inner
+      exit no longer overrides a real approve+commits result).
+    * ``verdict == "approve"`` but zero commits → ``"failure"`` (approve with
+      no work produced is pathological — treat as failure).
+    * ``verdict`` is ``"request_changes"`` or ``"reject"`` → ``"failure"`` even
+      when commits exist (the review explicitly rejected the work).
+    * ``verdict is None`` (no parseable Stage 6 log) → fall back to the legacy
+      exit-code logic: non-zero ``outer_exit`` OR non-zero ``inner_exit`` →
+      ``"failure"``; otherwise ``"success"``. This preserves backwards-compat
+      behaviour for runs without a review log.
+    """
+    n = max(0, int(new_commits_count))
+    if verdict == "approve":
+        return "success" if n > 0 else "failure"
+    if verdict in ("request_changes", "reject"):
+        return "failure"
+    # verdict is None → exit-code fallback (legacy NEW-4 behaviour).
+    if outer_exit != 0:
+        return "failure"
+    if inner_exit is not None and inner_exit != 0:
+        return "failure"
+    return "success"
+
+
 __all__ = [
     "CleanupRecoveryDecision",
     "decide_cleanup_recovery",
+    "decide_worker_status",
     "detect_reused_worktree_cleanup_failure",
     "is_reused_worktree_cleanup_line",
     "parse_inner_exit_code",

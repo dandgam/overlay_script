@@ -222,9 +222,9 @@
 
 - ✅ **R1 (P1): AbortController per worker** (2026-05-19, integration commit `6929ee7`, S4 of pilot_findings_closure) — `CancellationToken` + module-level `_REGISTRY` keyed by `story_id::branch::pid`, `cancel_worker(SIGTERM→2s→SIGKILL)`, supervisor action wired, `WORKER_CANCELLED` event. Tests +8.
 - ✅ **R2 (P1): MCP server readiness polling** (2026-05-19, integration commit `2a3a0d6`, S5 of pilot_findings_closure) — `runtime/mcp_readiness.poll_mcp_ready` (30s timeout / 500ms interval, injectable clock+sleep), `spawn_worker` pre-Popen gate, `MCPNotReadyError`, `Settings.required_mcp_tools`, `MCP_NOT_READY` event. Tests +8.
-- ⬜ **R3 (P2): Per-turn token snapshot** — сохранять token count по каждому шагу worker'а (не только aggregated total). Mid-wave cost tracking + pause-resume без потери granularity. Ref: `tasks/LocalAgentTask:41-104`. Reserved event `COST_SNAPSHOT_RECORDED` planned (see real-6 eval fixture).
-- ⬜ **R4 (P2): Stale worktree GC** — periodic cleanup orphan worktrees из crashed workers (regex slug pattern + 30-day mtime cutoff). Ref: `utils/worktree.ts:1058`
-- ⬜ **R5 (P3): Fail-closed cleanup policy** — не удалять worktree если `git status` вернул ошибку или есть unpushed commits (guard для R4). Ref: `utils/worktree.ts:1113`
+- ⬜ **R3 (P2)** · `Тип: ✨ Улучшение` — **Per-turn token snapshot** — сохранять token count по каждому шагу worker'а (не только aggregated total). Mid-wave cost tracking + pause-resume без потери granularity. Ref: `tasks/LocalAgentTask:41-104`. Reserved event `COST_SNAPSHOT_RECORDED` planned (see real-6 eval fixture).
+- ⬜ **R4 (P2)** · `Тип: ✨ Улучшение` — **Stale worktree GC** — periodic cleanup orphan worktrees из crashed workers (regex slug pattern + 30-day mtime cutoff). Ref: `utils/worktree.ts:1058`
+- ⬜ **R5 (P3)** · `Тип: ✨ Улучшение` — **Fail-closed cleanup policy** — не удалять worktree если `git status` вернул ошибку или есть unpushed commits (guard для R4). Ref: `utils/worktree.ts:1113`
 - 💡 Дополнительно: bundled skills которых нет у нас — `skillify` (command→skill конвертер), `stuck` (escape failure loop), `remember` (auto-memory → CLAUDE.md promotion)
 
 ### Backlog — pilot findings (closed 2026-05-19 via integration/pilot_findings_closure)
@@ -240,7 +240,7 @@ merge в `main` — manual (Auto merge=false).
 - ✅ **P2 #6: subscription-mode budget auto-detect** (S6, commit `185a948`) — `runtime/budget_autodetect.evaluate_budget_disabled` idempotent per-run, emits `BUDGET_AUTO_DISABLED` on subscription auto-path (manual `BMAD_DISABLE_BUDGET=1` suppressed from emission). Tests +5.
 - ✅ **P2 #7: pre-flight halt-state check** (S6, same commit `185a948`) — `spawn_worker(auto_clear_halt=False)` + `WorkerHaltPrespawnError` + pre-Popen halt-reason.txt gate + `WORKER_HALT_PRESPAWN` event. Tests +5.
 - ✅ **P2 #8: subprocess timeout adaptive / configurable per story** (S3, same commit `949d8e7`) — runner default 1800→3600, `BMAD_RUNNER_CLAUDE_TIMEOUT_SEC` env override, `pick_timeout_sec(ac_count)` bucket logic (0→DEFAULT, 1-3→SMALL, 4-8→MEDIUM, 9+→LARGE). Tests +8.
-- ⬜ **P3: backlog-writer subscriber (auto-capture dev findings)** — сейчас Virgil
+- ⬜ **P3** · `Тип: ✨ Улучшение` — **backlog-writer subscriber (auto-capture dev findings)** — сейчас Virgil
   авто-пишет только в `skills/policy/*.yaml` (operational tuning) + `retrospective.md`
   (per-wave). Архитектурные находки (subprocess_timeout patterns, отсутствие
   verdict event, recurring worker_silent_failure) попадают в dev backlog
@@ -338,17 +338,21 @@ integration ветка не создана. Детали — memory [[project_pi
 - ❌ **NEW-7 НЕ validated** — `_reconcile_success_verdicts` реконсилит только success
   verdict'ы; все 3 story помечены `failed` → нечего мержить → ни integration ветки, ни
   `INTEGRATION_MERGE_SKIPPED`. Merge-path так и не протестирован.
-- ⬜ **NEW-9 (P1, КОРЕНЬ): runner exit non-zero на успешной story перекрывает verdict** —
-  story 1.5 прошла ПОЛНЫЙ цикл (dev `63dc8d4` + autofix `79bc93c` F1-F4, 2 коммита), но
-  помечена `failed`. Цепочка: runner exit non-zero на финальной стадии → NEW-4
-  `parse_inner_exit_code` ставит `status=failure` → counter failed → reconcile нечего
-  мержить. **NEW-4 over-correction** — стал строже к exit code, завершённая работа с
-  коммитами = failed. Fix: orchestrator берёт `verdict=approve` из stage6 review log как
-  source-of-truth (verdict approve + commits → success, независимо от runner exit code).
-  Разблокирует NEW-7. ~1 сессия.
-- ⬜ **NEW-10 (P2): worker events не доходят до главного `events.jsonl` + orchestrator-лога** —
-  `runs/default/wt-1.X.events.jsonl` с mtime прошлого run'а; orchestrator-лог пуст 30 мин
-  между worktree_created и real_pilot_done. Диагностика run'а почти невозможна.
+- ✅ **NEW-9 (P1, КОРЕНЬ)** — DONE 2026-05-19 (S1 `pilot_findings_closure_v4` `80dd56d`):
+  `decide_worker_status(verdict, new_commits_count, inner_exit, outer_exit)` —
+  `verdict=approve` + commits → `success` независимо от runner exit code; `request_changes`/
+  `reject` → `failure`; verdict=None → старый exit-code fallback. `read_runner_verdict`
+  читает stage6 review log. Wired в `_tail_and_emit_completion`; `worker_completed` payload
+  получил `verdict`/`new_commits_count`/`status_decided_by`. +11 tests. Разблокирует NEW-7.
+- ✅ **NEW-10 (P2)** — DONE 2026-05-19 (S2 `pilot_findings_closure_v4`): модуль
+  `runtime/worker_events.py` — `merge_worktree_events` мержит worktree-internal
+  `events.jsonl` в главный `runs/<wave>/wt-<id>.events.jsonl` (append + dedup по ts) после
+  `worker_completed`; `detect_stage_marker` эмитит `worker_stage_progress` лог-строки чтобы
+  orchestrator-лог не молчал. +7 tests.
+- ✅ **NEW-5 recheck (P2)** — DONE 2026-05-19 (S2 `pilot_findings_closure_v4`):
+  dirty-worktree gate (`filter_dirty_outside_claude`) игнорирует `.claude/` пути — embedded
+  skills (~73 файла) больше не считаются «грязью»; `_clean_dirty_worktree` использует
+  `git clean -fd -e .claude` чтобы реальная грязь чистилась без сноса skills. +5 tests.
 
 **Recommended next initiative:** `pilot_findings_closure_v4` — приоритет **NEW-9** (verdict
 как source-of-truth — разблокирует NEW-7) + NEW-10 (observability) + перепроверка NEW-5.
@@ -377,6 +381,6 @@ integration ветка не создана. Детали — memory [[project_pi
 
 ---
 
-**Last updated:** 2026-05-19 (v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Last updated:** 2026-05-19 (v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
 **Status:** v13.5 — **Phase 3 gate CLOSED** (Step A `28 tests` + Step B `10 real cases` + baseline scaffold `evals/baselines/phase3-step-b-baseline.json`). pilot_findings_closure initiative complete on integration branch (S1..S8, 5 P1 + 3 P2 + 1 P3 + R1 + R2): tests **1945 PASS** (+85 vs 1860 baseline; +5 expected after S8 merge), mypy/ruff clean, EventType count **34** (+5: STORY_AUTO_SPLIT, WORKER_CANCELLED, MCP_NOT_READY, BUDGET_AUTO_DISABLED, WORKER_HALT_PRESPAWN). **Awaits manual merge** `git checkout main && git merge --no-ff integration/pilot_findings_closure`. **#10 production pilot UNBLOCKED** post-merge.
 **Owner:** user + Claude orchestrator

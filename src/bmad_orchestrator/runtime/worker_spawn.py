@@ -229,6 +229,44 @@ async def _git_porcelain(worktree: Path) -> list[str] | None:
     return [ln for ln in stdout.decode(errors="replace").splitlines() if ln.strip()]
 
 
+def _porcelain_path(line: str) -> str | None:
+    """Extract the path from one ``git status --porcelain`` line.
+
+    Porcelain format: 2-char status, a space, then the path (cols 3+). For
+    renames/copies the field is ``old -> new`` — we return the *new* path.
+    Returns ``None`` for lines too short to carry a path.
+    """
+    if len(line) < 4:
+        return None
+    path = line[3:].strip()
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1].strip()
+    # Porcelain may quote paths containing special chars; strip the quotes.
+    if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
+        path = path[1:-1]
+    return path or None
+
+
+def filter_dirty_outside_claude(porcelain_lines: list[str]) -> list[str]:
+    """Drop ``.claude/`` entries from a porcelain listing (NEW-5 recheck, v4 §3).
+
+    Embedded skills are an intentional orchestrator inject (``apply_embedded_skills``
+    writes ~73 files into ``<worktree>/.claude/skills/``), not residue from a
+    prior aborted run. Treating them as a dirty worktree makes the pre-spawn
+    gate either halt the story or ``git clean`` the skills away. Real dirt
+    outside ``.claude/`` is still returned so the gate keeps catching it.
+    """
+    real: list[str] = []
+    for line in porcelain_lines:
+        path = _porcelain_path(line)
+        if path is None:
+            continue
+        if path == ".claude" or path.startswith(".claude/"):
+            continue
+        real.append(line)
+    return real
+
+
 async def _clean_dirty_worktree(worktree: Path) -> None:
     """Discard uncommitted residue: ``git reset --hard`` + ``git clean -fd``.
 
@@ -236,8 +274,12 @@ async def _clean_dirty_worktree(worktree: Path) -> None:
     managed ``.worktrees/`` path under orchestrator control (never a user
     repo): it discards just the orchestrator-residue of a prior aborted run
     (NEW-5, spec_pilot_findings_closure_v3 §#5).
+
+    ``.claude/`` is excluded from ``git clean`` (``-e .claude``) so embedded
+    skills injected by the orchestrator survive the cleanup (NEW-5 recheck,
+    v4 §3).
     """
-    for args in (["reset", "--hard"], ["clean", "-fd"]):
+    for args in (["reset", "--hard"], ["clean", "-fd", "-e", ".claude"]):
         proc = await asyncio.create_subprocess_exec(
             "git", "-C", str(worktree), *args,
             stdout=asyncio.subprocess.DEVNULL,
@@ -742,7 +784,11 @@ async def spawn_worker(
     #      repo);
     #   False (safe mode) → emit WORKER_HALT_PRESPAWN reason=dirty_worktree and
     #     refuse to spawn, so the operator can inspect the residue by hand.
-    dirty = await _git_porcelain(wt_path)
+    # NEW-5 recheck (v4 §3): ``.claude/`` entries are filtered out — embedded
+    # skills are an intentional inject, not dirty residue. Only real dirt
+    # outside ``.claude/`` arms the gate.
+    dirty_raw = await _git_porcelain(wt_path)
+    dirty = filter_dirty_outside_claude(dirty_raw) if dirty_raw else dirty_raw
     if dirty:
         if auto_clean_dirty_worktree:
             await _clean_dirty_worktree(wt_path)
@@ -1105,6 +1151,7 @@ __all__ = [
     "MCPNotReadyError",
     "WorkerHaltPrespawnError",
     "WorkerHandle",
+    "filter_dirty_outside_claude",
     "spawn_worker",
     "tail_jsonl_events",
     "trigger_precompact_dump",
