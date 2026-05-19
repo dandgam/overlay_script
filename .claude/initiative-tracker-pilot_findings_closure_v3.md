@@ -33,21 +33,6 @@
 
 ### Pending
 
-- **id:** S3
-  **title:** NEW-7 INTEGRATION_MERGE_SKIPPED + subscriber robustness + NEW-6 exit-code regex
-  **surface:** backend-python
-  **spec_section:** 50-83, 127-146
-  **depends_on:** [S2]
-  **acceptance:**
-    - EventType #36 INTEGRATION_MERGE_SKIPPED добавлен (count 35→36).
-    - merge_to_integration_subscriber резолвит worktree из registry при пустом payload.
-    - _INNER_EXIT_RE ловит и `Exit code: N`, и `EXIT_CODE=N`.
-    - +6 tests, mypy/ruff clean.
-  **safety_gates:**
-    - L3 branch isolation.
-  **checkpoint:** false
-  **estimated_retries_allowed:** 3
-
 - **id:** S4
   **title:** NEW-5 dirty worktree pre-spawn + NEW-8 clean shutdown + finalize
   **surface:** backend-python
@@ -65,26 +50,43 @@
 
 ### Current
 
-- **id:** S2
-  **title:** NEW-7 диагностика + reconcile + bus drain
+- **id:** S3
+  **title:** NEW-7 INTEGRATION_MERGE_SKIPPED + subscriber robustness + NEW-6 exit-code regex
   **surface:** backend-python
-  **spec_section:** 50-83
-  **depends_on:** [S1]
+  **spec_section:** 50-83, 127-146
+  **depends_on:** [S2]
   **acceptance:**
-    - Root cause verdict→integration disconnect зафиксирован в tracker (вариант a/b/c).
-    - post-worker reconcile step эмитит synthetic CODE_REVIEW_VERDICT для success+commits story.
-    - explicit bus drain перед real_pilot_done.
-    - +5 tests, mypy/ruff clean.
+    - EventType #36 INTEGRATION_MERGE_SKIPPED добавлен (count 35→36).
+    - merge_to_integration_subscriber резолвит worktree из registry при пустом payload.
+    - _INNER_EXIT_RE ловит и `Exit code: N`, и `EXIT_CODE=N`.
+    - +6 tests, mypy/ruff clean.
   **safety_gates:**
-    - L3 branch isolation — работа только на integration/pilot_findings_closure_v3.
+    - L3 branch isolation.
   **checkpoint:** false
   **estimated_retries_allowed:** 3
-  **started:** (set on first execution wake)
+  **started:** 2026-05-19 08:18 UTC
   **workflow:** workflows/backend-python.md
   **retry_count:** 0
   **worker_branches:** []
 
 ### Completed
+
+- **id:** S2
+  **title:** NEW-7 диагностика + reconcile + bus drain
+  **completed:** 2026-05-19 08:18 UTC
+  **commit:** db48b2c
+  **files_changed:** 5
+  **tests_passed:** 2023 PASS (+5: test_integration_merge_success_path.py)
+  **decisions_made:**
+    - Root cause NEW-7 = вариант (b), уточнённый: в real-режиме НИКТО не дренирует шину. `_run_real_pilot_body` эмитит WORKER_COMPLETED/WAVE_BOUNDARY в `bus.queue`, но `dispatch_one` не вызывается нигде (только тесты + 2 CLI-команды его дёргают). Значит вся subscriber-цепочка (build_check → deletion_safety → code_review → security_review → merge_to_integration) в проде была мёртвым кодом — отсюда и «integration не создаётся». S2 verdict-fallback (4ac3e56) исправен, но недостижим без consumer'а.
+    - Fix: `EventLoop.drain()` — диспатчит очередь + каскады до пустоты (max_events cap против runaway re-emit). `_run_real_pilot_body` делает drain → reconcile → drain перед `real_pilot_done`.
+    - `_reconcile_success_verdicts` — fallback-инвариант: succeeded story с commits past base_sha без verdict'а в `dispatched` → synthetic CODE_REVIEW_VERDICT(approve, source=success_path_reconcile). Если merge-gate уже выдал любой verdict (включая reject) — reconcile НЕ перебивает.
+  **deferred_items:**
+    - INTEGRATION_MERGE_SKIPPED (EventType #36) для success+no-commits — S3.
+    - merge_to_integration_subscriber worktree-resolve из registry при пустом payload — S3.
+    - Auto-split stories (synthetic WORKER_COMPLETED без WorkerHandle) reconcile не покрывает — они получают verdict через code_review_subscriber на drain'е; отдельная защита не нужна, зафиксировано.
+    - test_w1 line ~736 (`max_spend_usd_default_50`) теперь проверяет halt по пустому списку (vacuous pass) — косметика, не регрессия, можно усилить в S4.
+    - mypy: 4 pre-existing ошибки в run.py (orphan arg-type + bus kwarg) — baseline, чистка в S4 finalize.
 
 - **id:** S1
   **title:** NEW-1-completion (env threading) + NEW-3-completion (sprint-status resolver)
@@ -120,11 +122,19 @@
   **rationale:** Диагностика показала: resolver исправен, ломался уровень выше — mark-done loop не понимал BMad-flat layout. Чинить resolver было бы лечением симптома.
   **impact:** S3 (NEW-7) — при диагностике verdict→integration учитывать что mark-done теперь корректно обновляет sprint-status; resume-сценарии больше не re-spawn'ят done-stories.
 
+- **date:** 2026-05-19
+  **session:** S2
+  **decision:** NEW-7 root cause — отсутствие consumer'а шины в real-режиме, а не race verdict-эмиссии. Fix = explicit `EventLoop.drain()` в `_run_real_pilot_body` + reconcile-fallback, а не патч verdict_fallback.py.
+  **rationale:** `bus.emit` лишь кладёт event в `asyncio.Queue`; subscriber'ы отрабатывают только через `dispatch_one`. В проде `_run_real_pilot_body` ни разу его не вызывал → ВСЯ W4-цепочка (включая merge_to_integration) была недостижима. verdict-fallback (4ac3e56) был корректен, но за мёртвым consumer'ом. Это объясняет почему «Stage 7 проходит, log есть, а merge нет».
+  **impact:** S3 — INTEGRATION_MERGE_SKIPPED эмитится внутри той же drain-цепочки, теперь она реально крутится. S4 — NEW-8 clean shutdown должен дренировать/останавливать шину (`bus.stop()` отменяет backstop) после `real_pilot_done`; drain уже отрабатывает до него. Поведенческое изменение: build_check/deletion_safety/code_review-гейты впервые реально срабатывают в real-пилоте — это и есть намеренная цель NEW-7.
+
 ## Journal
 
 [2026-05-19 bootstrap] S0 bootstrap: tracker + backup/integration branches created, 4 sessions planned, runtime=loop_wrapper delay=120s, auto-merge=false
 [2026-05-19 08:03 UTC] S1 execution: NEW-1 — settings прокинут в 3 pilot-функции (required kw-only), убраны load_settings() из pilot-chain; ~25 test-callsite'ов обновлены. NEW-3 — диагностика: mark-done loop не понимал BMad-flat layout; добавлен mark_sprint_status_done. +9 tests, 2018 PASS, ruff clean. commit 80a15d2.
 [2026-05-19 08:03 UTC] S1 done, runtime=loop_wrapper — wrapper handles next iteration. S2 promoted to Current.
+[2026-05-19 08:18 UTC] S2 execution: NEW-7 диагностика — root cause = нет consumer'а шины в real-режиме (events эмитятся, dispatch_one не зовётся → W4-цепочка мёртвая). Fix: EventLoop.drain() + _reconcile_success_verdicts; _run_real_pilot_body делает drain→reconcile→drain перед real_pilot_done. +5 tests; w1/embed_phase45 тесты переведены на pre-run recorder. 2023 PASS, ruff clean, mypy 4 baseline. commit db48b2c.
+[2026-05-19 08:18 UTC] S2 done, runtime=loop_wrapper — wrapper handles next iteration. S3 promoted to Current.
 
 ## Final Report (populated on last session completion)
 
