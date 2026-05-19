@@ -114,9 +114,7 @@ Skip-menu `/virgil status` → сразу `Bash` (foreground): `bmad-orchestrato
 
 ### Пример 4 — destructive stop
 
-Drill-down → опция «💥 Stop --hard» → AskUserQuestion confirm placeholder → выбор «✅ Подтвердить» → `Bash` (foreground): `bmad-orchestrator stop --hard`.
-
-**Session 3 апгрейд:** после первого confirm — текстовый ввод «STOP HARD» с exact match. Сейчас (Session 1) достаточно одного AskUserQuestion confirm.
+Drill-down → опция «💥 Экстренный стоп» → читай `confirm-destructive.md` → двухшаговое подтверждение (предупреждение + ввод фразы `STOP HARD` заглавными) → при успехе `Bash` (foreground): `bmad-orchestrator stop --hard`. Если фраза не совпала — отмена без выполнения.
 
 ## 5. Streaming stdout
 
@@ -134,9 +132,9 @@ Drill-down → опция «💥 Stop --hard» → AskUserQuestion confirm place
 
 При завершении background команды skill получит `<task-notification>` — тогда показать пользователю summary + предложить следующее действие (например, после успешного `run` → «Wave завершён. Посмотреть retro? `/virgil retro <wave>`»).
 
-## 6. Error handling (Session 1 skeleton)
+## 6. Error handling
 
-Полный decision tree придёт в `templates/error-handling.md` (Session 3). Сейчас минимум:
+Полный decision tree — в `templates/error-handling.md` (читать при exit != 0). Здесь — минимум для общего случая:
 
 **Exit code 0:** ✅ «Готово.» + последние 10 строк stdout если они информативны (status, budget) или просто «Готово» если команда тихая (pause).
 

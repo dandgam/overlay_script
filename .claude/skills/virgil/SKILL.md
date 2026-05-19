@@ -26,6 +26,8 @@ description: Интерактивное меню для управления Vir
 3. **Главное меню → 4 опции** через `AskUserQuestion`. По выбору — **прочитай соответствующий файл** `menu/*.md` и следуй ему. Не держи детали sub-меню в голове заранее.
 4. **Перед вызовом CLI** — прочитай `templates/command-bridge.md` (regex валидации, streaming, error-handling).
 5. **Перед запуском CLI** — покажи сборку команды и спроси подтверждение. Кроме skip-menu кейсов.
+6. **Destructive операции** (`stop --hard`, `stop --graceful`, `policy-rollback`, `sl-rollback`) — прочитай `templates/confirm-destructive.md` и сделай двухшаговое подтверждение (предупреждение + ввод фразы заглавными).
+7. **Если `Bash` упал** (exit != 0) — прочитай `templates/error-handling.md` и ответь по pattern'у, не выливай stderr как есть.
 
 **Что НЕ делать:**
 - Не дублировать логику Python CLI — только формировать команду и звать `Bash`.
@@ -44,8 +46,8 @@ description: Интерактивное меню для управления Vir
 | `menu/config.md` | Выбран «⚙️ Настройка» |
 | `menu/quality.md` | Выбран «🧪 Качество и обучение» |
 | `templates/command-bridge.md` | Перед любым вызовом CLI |
-| `templates/confirm-destructive.md` | (Session 3) destructive flow |
-| `templates/error-handling.md` | (Session 3) разбор ошибок |
+| `templates/confirm-destructive.md` | Destructive op выбрана (stop --hard / stop --graceful / policy-rollback / sl-rollback) |
+| `templates/error-handling.md` | `Bash` команда упала (exit != 0) |
 | `REFERENCE.md` | QUESTION mode — пользователь спрашивает «как сделать X» |
 
 Не читай все файлы сразу — это и есть причина token bloat.
@@ -57,16 +59,20 @@ description: Интерактивное меню для управления Vir
 | `/virgil` без аргументов, «привет», «что там у нас» | Сводка + главное меню |
 | `/virgil run <project> <wave>` | Skip → собрать параллелизм одним вопросом → запустить |
 | `/virgil run <project> <wave> <N>` | Полный skip → `run --project X --wave Y --max-parallel N` |
-| `/virgil status` / «покажи статус» / «что сейчас работает» | Skip → `status` |
-| `/virgil status --live` | Skip → `status --live` |
-| `/virgil dag <wave>` | Skip → `dag --wave <wave>` |
-| `/virgil scan` | Skip → `scan` |
-| `/virgil pause` / `/virgil resume` | Skip → соответствующая команда |
-| `/virgil stop` | Прочитай `menu/run.md` → drill-down «Остановить» (нужно подтверждение) |
-| «запусти на antares» / «запусти Y на X» | Меню → 🚀 → новый проход с предзаполненным проектом |
-| «сколько потратили» / «какой бюджет» | Skip → спросить wave → `budget --wave X` |
-| «логи работника X» | Skip → спросить tail → `logs --worker X` |
-| «как сделать X в virgil» / «virgil умеет X?» | QUESTION mode — прочитай `REFERENCE.md`, ответь простым языком, без действий |
+| `/virgil status` / «покажи статус» / «что сейчас работает» / «как там оркестратор» | Skip → `status` |
+| `/virgil status --live` / «следи за статусом» | Skip → `status --live` (background) |
+| `/virgil dag <wave>` / «покажи план прохода X» | Skip → `dag --wave <wave>` |
+| `/virgil scan` / «список проектов» | Skip → `scan` |
+| `/virgil pause` / «поставь паузу» | Skip → `pause` |
+| `/virgil resume` / «продолжи после паузы» | Skip → `resume` |
+| `/virgil stop` / «останови» / «останови всё» | Прочитай `menu/run.md` → drill-down «Остановить» (требует двухшагового подтверждения) |
+| `/virgil doctor <slug>` / «проверь здоровье проекта X» | Skip → `doctor <slug>` |
+| `/virgil retro <wave>` / «разбор прохода X» | Skip → `retro --wave <wave>` |
+| «запусти на antares» / «запусти Y на X» / «начни проход на проекте X» | Меню → 🚀 → новый проход с предзаполненным проектом (и wave если указан) |
+| «сколько потратили» / «какой бюджет» / «сколько денег ушло на X» | Skip → спросить wave (если не указан) → `budget --wave X` или `budget` |
+| «логи работника X» / «что у воркера X» / «покажи лог w-N» | Skip → спросить tail (если не указан) → `logs --worker <name>` |
+| «чему научился» / «что в self-learning» / «уроки» | Меню → 🧪 → 🧬 Самообучение → 📚 Чему научился |
+| «как сделать X в virgil» / «virgil умеет X?» / «что за команда X?» | QUESTION mode — прочитай `REFERENCE.md`, ответь простым языком, без действий |
 
 **Правило:** явное имя команды (run/status/logs/stop/scan/pause/resume/dag) или однозначный intent («запусти», «покажи статус», «останови») → пропустить меню.
 
@@ -127,19 +133,11 @@ description: Интерактивное меню для управления Vir
 - **Stdout стримится в чат.** Foreground — результат сразу; long-running (`run`, `status --live`) — background + уведомление.
 - **Никаких mock значений** — параметр не получен → переспроси.
 
-## Откладываем на Session 3
-
-| Раздел | Что войдёт |
-|---|---|
-| `templates/confirm-destructive.md` | Двухшаговый confirm с вводом фразы («STOP HARD») для `stop --hard`, `policy-rollback`, `sl-rollback` |
-| `templates/error-handling.md` | Подробный разбор ошибок CLI (decision tree «exit code != 0 → что предложить») |
-| Полный набор skip-menu shortcuts | Доведение до 14 фраз |
-
 ## References
 
 - **Spec:** `spec/spec_virgil_skill.md`
 - **Python CLI:** `src/bmad_orchestrator/cli/main.py` (30+ команд)
 - **Methodology:** `spec/methodology-virgil.md`
 
-**Last updated:** 2026-05-19 (v0.5 — Session 2: Настройка + Качество доделано + REFERENCE.md)
-**Status:** v0.5 — все 4 раздела меню готовы (Запустить · Статус · Настройка · Качество). REFERENCE.md для QUESTION mode. Осталась Session 3: destructive confirm + error-handling + skip-menu.
+**Last updated:** 2026-05-19 (v0.6 — Session 3: destructive confirm + error-handling + skip-menu расширен)
+**Status:** v0.6 — все 3 сессии готовы. 4 раздела меню · сводка прогресса · REFERENCE для QUESTION · двухшаговый destructive confirm · разбор ошибок по pattern'ам · 18 skip-menu shortcuts.

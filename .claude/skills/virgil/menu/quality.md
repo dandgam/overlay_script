@@ -110,9 +110,9 @@ Virgil после каждого прохода извлекает уроки (�
 
 1. Текстовый вопрос: «Введи id правки для отката (timestamp из audit-лога self-learning):». Валидация — непустая строка.
 2. Подсказка: если id неизвестен — глянь «📚 Чему научился».
-3. Подтверждение `AskUserQuestion`: «⛔ Отменить» / «✅ Откатить».
-4. `Bash` (foreground): `bmad-orchestrator self-learning rollback <id>`.
-5. Результат: успех — «Откат выполнен»; ошибка — текст + подсказка проверить id.
+3. **Двухшаговое подтверждение** — прочитай `../templates/confirm-destructive.md`, фраза `ROLLBACK LEARNING`.
+4. При успехе → `Bash` (foreground): `bmad-orchestrator self-learning rollback <id>`.
+5. Результат: успех — «Откат выполнен»; ошибка — прочитай `../templates/error-handling.md` для разбора.
 
 ## Drill-down: «🧭 Корректировка курса»
 
