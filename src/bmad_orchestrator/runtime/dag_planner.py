@@ -44,14 +44,43 @@ def _ensure_sprint_status_via_skill() -> None:
 
 
 def build_graph(stories: list[dict[str, Any]]) -> nx.DiGraph:
-    """Build DAG over stories. Nodes — story dicts, edges — `depends_on`."""
+    """Build DAG over stories. Nodes — story dicts, edges — dependency relations.
+
+    Edges come from two story fields:
+      * ``depends_on`` — ``dep → self`` (self runs after dep).
+      * ``blocks``     — ``self → blocked`` (NEW-28; prose ``Блокирует:``).
+
+    NEW-28 — dependency ids may arrive in a different id convention than the
+    node ids (prose says ``2.1``; the node id is the file stem
+    ``2-1-authentik-…``). Each id is resolved through :func:`normalize_story_id`
+    against the actual node set; tokens that resolve to nothing are dropped
+    (a liberal prose extractor can emit stray tokens — see
+    ``_extract_prose_story_ids``).
+    """
     g: nx.DiGraph = nx.DiGraph()
     for story in stories:
         g.add_node(story["id"], **story)
+
+    # normalized-id → real node-id (first wins on collision).
+    norm_to_node: dict[str, str] = {}
     for story in stories:
+        norm_to_node.setdefault(normalize_story_id(str(story["id"])), story["id"])
+
+    def _resolve(raw: str) -> str | None:
+        if raw in g:
+            return raw
+        return norm_to_node.get(normalize_story_id(str(raw)))
+
+    for story in stories:
+        sid = story["id"]
         for dep in story.get("depends_on") or []:
-            if dep in g:
-                g.add_edge(dep, story["id"])
+            resolved = _resolve(str(dep))
+            if resolved is not None and resolved != sid:
+                g.add_edge(resolved, sid)
+        for blocked in story.get("blocks") or []:
+            resolved = _resolve(str(blocked))
+            if resolved is not None and resolved != sid:
+                g.add_edge(sid, resolved)
     if not nx.is_directed_acyclic_graph(g):
         cycles = list(nx.simple_cycles(g))
         raise ValueError(f"cycle in DAG: {cycles!r}")

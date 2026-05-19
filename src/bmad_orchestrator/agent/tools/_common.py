@@ -206,6 +206,47 @@ _STORY_TITLE_RE = re.compile(
     r"^\s*#\s*Story\s+[\w.\-]+\s*:\s*(.+?)\s*$", re.MULTILINE
 )
 
+# NEW-28 — real BMad story files declare dependencies in PROSE headers, not in
+# the canonical ``- **depends_on:** []`` machine field. Observed shapes (RU
+# Antares + EN equivalents):
+#     **Зависит от:** 1.1 (skeleton…), 1.2 (…), 1.3 (…)
+#     **Блокирует:**  1.4 (…), все Epic 2+ stories
+#     **Depends on:** 1.1, 1.3      /      **Blocks:** 1.4
+# Without parsing these the DagPlanner sees no edges and parallelizes
+# dependent stories (NEW-28 — pilot wave 2a ran 1.3‖1.4 though 1.4 needs 1.3).
+_PROSE_DEPENDS_RE = re.compile(
+    r"^\s*\*{0,2}\s*(?:Зависит\s+от|Depends\s+on)\s*:?\s*\*{0,2}\s*:?\s*(.+?)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_PROSE_BLOCKS_RE = re.compile(
+    r"^\s*\*{0,2}\s*(?:Блокирует|Blocks)\s*:?\s*\*{0,2}\s*:?\s*(.+?)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+# Parenthetical prose on a dependency line ("1.2 (compose stack — review)")
+# often holds noise digits (versions like ``alembic>=1.14``); strip before
+# extracting ids.
+_PAREN_RE = re.compile(r"\([^()]*\)")
+# A story-id token: dotted ``3.1`` / ``1.17b`` or kebab ``3-1`` / ``3-1-slug``.
+_STORY_ID_TOKEN_RE = re.compile(r"\b\d+\.\d+[a-z]?\b|\b\d+-\d+(?:-[a-z0-9-]+)?\b")
+
+
+def _extract_prose_story_ids(md_text: str, header_re: re.Pattern[str]) -> list[str]:
+    """Pull story-id tokens from a prose dependency header (NEW-28).
+
+    ``header_re`` matches a ``Зависит от:`` / ``Блокирует:`` (or EN) line and
+    captures its value. Parenthetical prose is stripped first so version
+    numbers inside it are not mistaken for story ids. Extraction is liberal —
+    :func:`build_graph` resolves each token against real nodes and silently
+    drops the ones that match nothing, so a stray false token is harmless.
+    """
+    ids: list[str] = []
+    for m in header_re.finditer(md_text):
+        line = _PAREN_RE.sub(" ", m.group(1))
+        for tok in _STORY_ID_TOKEN_RE.findall(line):
+            if tok not in ids:
+                ids.append(tok)
+    return ids
+
 
 def parse_story_md(md_text: str) -> dict[str, Any]:
     """Extract frontmatter-like key/value pairs from BMad story markdown.
@@ -257,6 +298,18 @@ def parse_story_md(md_text: str) -> dict[str, Any]:
     m_title = _STORY_TITLE_RE.search(md_text)
     if m_title:
         out["title"] = m_title.group(1).strip()
+
+    # NEW-28 — fall back to prose dependency headers when the canonical
+    # ``- **depends_on:**`` machine field is absent (real BMad story files).
+    # Canonical frontmatter, when present, always wins.
+    if not out.get("depends_on"):
+        prose_deps = _extract_prose_story_ids(md_text, _PROSE_DEPENDS_RE)
+        if prose_deps:
+            out["depends_on"] = prose_deps
+    if not out.get("blocks"):
+        prose_blocks = _extract_prose_story_ids(md_text, _PROSE_BLOCKS_RE)
+        if prose_blocks:
+            out["blocks"] = prose_blocks
     return out
 
 
