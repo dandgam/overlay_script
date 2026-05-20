@@ -452,22 +452,34 @@ def test_bus_bridge_ignores_unknown_event_type() -> None:
 
 
 def test_auto_split_enabled_respects_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default = ON (2026-05-20 — user request «должно быть всегда включена сплит»).
+
+    Явное отключение через ``BMAD_AUTO_SPLIT=0|off|false|no``.
+    """
     monkeypatch.delenv(AUTO_SPLIT_ENV_VAR, raising=False)
-    assert auto_split_enabled() is False
+    assert auto_split_enabled() is True  # default ON
     monkeypatch.setenv(AUTO_SPLIT_ENV_VAR, "1")
     assert auto_split_enabled() is True
     monkeypatch.setenv(AUTO_SPLIT_ENV_VAR, "true")
     assert auto_split_enabled() is True
     monkeypatch.setenv(AUTO_SPLIT_ENV_VAR, "yes")
     assert auto_split_enabled() is True
+    # Явные off-значения.
     monkeypatch.setenv(AUTO_SPLIT_ENV_VAR, "0")
     assert auto_split_enabled() is False
+    monkeypatch.setenv(AUTO_SPLIT_ENV_VAR, "off")
+    assert auto_split_enabled() is False
+    monkeypatch.setenv(AUTO_SPLIT_ENV_VAR, "false")
+    assert auto_split_enabled() is False
+    monkeypatch.setenv(AUTO_SPLIT_ENV_VAR, "no")
+    assert auto_split_enabled() is False
 
 
-def test_auto_split_env_var_unset_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_split_env_var_unset_returns_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default ON: без env var — auto-split активен."""
     monkeypatch.delenv(AUTO_SPLIT_ENV_VAR, raising=False)
     assert os.environ.get(AUTO_SPLIT_ENV_VAR) is None
-    assert auto_split_enabled() is False
+    assert auto_split_enabled() is True
 
 
 # ── agent/run.py decomposer setter ────────────────────────────────────────────

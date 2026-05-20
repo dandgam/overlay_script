@@ -85,8 +85,16 @@ class AutoSplitOutcome:
 
 
 def auto_split_enabled() -> bool:
-    """``BMAD_AUTO_SPLIT=1`` (or truthy) → opt-in to auto-split pipeline path."""
-    return os.environ.get(AUTO_SPLIT_ENV_VAR, "").strip().lower() in {"1", "true", "yes"}
+    """Auto-split срабатывает автоматом когда decomposer subscriber видит
+    ``WORKER_HALT_FILE halt_reason=loc_cap_exceeded`` или ``STORY_SPLIT_TRIGGERED``.
+
+    Default = **ON** (user request 2026-05-20): «должно быть всегда включена
+    сплит в историю». Можно явно отключить через ``BMAD_AUTO_SPLIT=0|off|false``.
+    """
+    raw = os.environ.get(AUTO_SPLIT_ENV_VAR, "").strip().lower()
+    if raw in {"0", "off", "false", "no"}:
+        return False
+    return True  # default ON
 
 
 def make_bus_bridge(
