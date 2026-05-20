@@ -23,6 +23,13 @@ SupervisorAction = Literal[
     # worker_id: ..., reason: ...}}]`` so the actions module knows which
     # registry entry to trip.
     "cancel_worker",
+    # NEW-38: cancel the running worker for story_id and emit
+    # WORKER_RESPAWN_REQUESTED so the orchestrator main loop re-queues the
+    # story for the next round. Capped at 2 respawns per story (3rd attempt
+    # → escalate_human). Requires tool_calls=[{name="respawn_worker",
+    # args={story_id, reason, max_iteration: int,
+    #       dev_prompt_hint: str|None}}].
+    "respawn_worker",
 ]
 
 WatchedEventType = Literal[
@@ -33,6 +40,8 @@ WatchedEventType = Literal[
     "COMPLIANCE_SWEEP_NEEDED",
     # NEW-33.3 — cumulative stuck-worker timeout from runtime.stuck_watchdog.
     "WORKER_STUCK_TIMEOUT",
+    # NEW-37 — review-worker stuck (no JSONL events for BMAD_REVIEW_TIMEOUT_SEC).
+    "REVIEW_STUCK_TIMEOUT",
 ]
 
 

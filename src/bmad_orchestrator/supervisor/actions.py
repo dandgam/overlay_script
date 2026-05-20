@@ -8,12 +8,16 @@ subprocess responsibilities.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from bmad_orchestrator.runtime.worker_cancellation import (
     cancel_worker as runtime_cancel_worker,
+)
+from bmad_orchestrator.runtime.worker_cancellation import (
+    get_token_for_story as _get_token_for_story,
 )
 from bmad_orchestrator.supervisor.policy import SupervisorDecision
 
@@ -128,11 +132,9 @@ async def execute_decision(
         if worker_id is None and story_id is not None:
             # Fallback: look up by story_id in the registry. Avoids forcing the
             # judge to know PID-suffixed worker_ids that orchestrator built.
-            from bmad_orchestrator.runtime.worker_cancellation import (
-                active_worker_ids,
-                get_token_for_story,
-            )
-            tok = get_token_for_story(story_id)
+            from bmad_orchestrator.runtime.worker_cancellation import active_worker_ids
+
+            tok = _get_token_for_story(story_id)
             if tok is not None:
                 worker_id = tok.worker_id
             else:
@@ -160,6 +162,74 @@ async def execute_decision(
             story_id=story_id,
             result=result,
             reason=decision.reason,
+        )
+        return
+
+    if decision.action == "respawn_worker":
+        # NEW-38: cancel the existing worker + emit WORKER_RESPAWN_REQUESTED
+        # so the orchestrator main loop re-queues the story.  This function
+        # does NOT spawn the worker directly — avoids race conditions with the
+        # main loop's scheduling logic.
+        story_id: str | None = source_payload.get("story_id")
+        reason = decision.reason
+        max_iteration = 1
+        dev_prompt_hint: str | None = None
+        for tc in decision.tool_calls:
+            if tc.name != "respawn_worker":
+                continue
+            args = tc.args or {}
+            story_id = args.get("story_id") or story_id
+            reason = args.get("reason") or reason
+            max_iteration = int(args.get("max_iteration", 1))
+            dev_prompt_hint = args.get("dev_prompt_hint")
+        if story_id is None:
+            log.warning(
+                "supervisor_respawn_worker_missing_story_id",
+                source=source_event_type,
+            )
+            return
+        # Step 1: cancel the running worker (best-effort; may already be dead).
+        cancelled_worker_id: str | None = None
+        tok = _get_token_for_story(story_id)
+        if tok is not None:
+            cancelled_worker_id = tok.worker_id
+            try:
+                await asyncio.wait_for(
+                    runtime_cancel_worker(
+                        tok.worker_id,
+                        reason=f"respawn requested: {reason}",
+                        cancelled_by="supervisor",
+                    ),
+                    timeout=30.0,
+                )
+            except TimeoutError:
+                log.warning(
+                    "supervisor_respawn_cancel_timeout",
+                    worker_id=tok.worker_id,
+                    story_id=story_id,
+                )
+            except Exception as exc:
+                log.warning(
+                    "supervisor_respawn_cancel_failed",
+                    worker_id=tok.worker_id,
+                    story_id=story_id,
+                    error=str(exc),
+                )
+        # Step 2: signal main loop via WORKER_RESPAWN_REQUESTED.
+        await bus.emit(
+            EventType.WORKER_RESPAWN_REQUESTED,
+            story_id=story_id,
+            reason=reason,
+            iteration=max_iteration,
+            dev_prompt_hint=dev_prompt_hint,
+            cancelled_worker_id=cancelled_worker_id,
+        )
+        log.info(
+            "supervisor_respawn_worker",
+            story_id=story_id,
+            reason=reason,
+            iteration=max_iteration,
+            has_hint=dev_prompt_hint is not None,
         )
         return
 

@@ -1151,6 +1151,17 @@ async def spawn_worker(
     _bootstrap_block = build_session_start_block(
         _skill_slug, story_id, resumed_state=_resumed_state
     )
+    # NEW-39 — if supervisor respawn injected ORCHESTRATOR_DEV_HINT, append it
+    # to the bootstrap block so the new worker's session starts with the hint.
+    # The var is consumed here (one-shot) and removed from merged_env to avoid
+    # polluting child envs beyond the session bootstrap injection.
+    _dev_hint = merged_env.pop("ORCHESTRATOR_DEV_HINT", None)
+    if _dev_hint:
+        _bootstrap_block = (
+            _bootstrap_block
+            + f"\n\n--- Supervisor respawn hint ---\n{_dev_hint}\n"
+            + "=== End respawn hint ==="
+        )
     merged_env = inject_into_worker_env(merged_env, _bootstrap_block)
 
     # FS7 — wrap the worker command in an OS-level sandbox (default: bwrap)
