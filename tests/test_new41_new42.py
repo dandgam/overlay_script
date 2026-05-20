@@ -22,7 +22,6 @@ NEW-42 coverage:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
@@ -33,14 +32,12 @@ from typing import Any
 import pytest
 
 from bmad_orchestrator.agent.run import (
-    _count_new_commits,
     _tail_and_emit_completion,
 )
 from bmad_orchestrator.runtime.event_loop import EventLoop, EventType
 from bmad_orchestrator.runtime.worker_spawn import HALT_REASON_RELPATH, WorkerHandle
 from bmad_orchestrator.supervisor.actions import execute_decision
 from bmad_orchestrator.supervisor.policy import Defaults, SupervisorDecision
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
