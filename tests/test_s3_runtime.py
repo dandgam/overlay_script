@@ -134,10 +134,14 @@ def test_event_loop_has_all_spec_types() -> None:
         "worker_stuck_timeout",
         # 2026-05-20 NEW-36 — auto-stage before hard-ceiling SIGKILL.
         "worker_auto_stage_recovery",
+        # 2026-05-20 NEW-37 — review-worker stuck timeout (BMAD_REVIEW_TIMEOUT_SEC).
+        "review_stuck_timeout",
+        # 2026-05-20 NEW-38 — supervisor respawn signal to orchestrator main loop.
+        "worker_respawn_requested",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 44
+    assert len(ALL_EVENT_TYPES) == 46
 
 
 @pytest.mark.asyncio

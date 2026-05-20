@@ -234,7 +234,8 @@ async def test_deletion_safety_wired_before_code_review(
     # Phase 4 Supervisor LLM-loop adds supervisor_subscriber=9,
     # Phase 5 Self-learning adds self_learning_subscriber=10.
     # 2026-05-19 BMad Phase 4 gap-closure adds correct_course=11, investigate=12.
-    assert len(bus._subs) == 12
+    # NEW-38 respawn_subscriber adds one more = 13.
+    assert len(bus._subs) == 13
     funcs = [getattr(s, "func", s) for s in bus._subs]
     assert funcs[0] is stage5_completeness_subscriber, (
         f"Patch S subscriber must be wired first; got {funcs[0]!r}"

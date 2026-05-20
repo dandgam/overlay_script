@@ -187,6 +187,22 @@ class EventType(StrEnum):
     # emitted *after* the kill; this one fires *before* and only when dirty files
     # are present.
     WORKER_AUTO_STAGE_RECOVERY = "worker_auto_stage_recovery"
+    # NEW-37 — emitted by the review-worker tail loops
+    # (``_real_security_review_runner``, ``_run_merge_gate_spec_stage``,
+    # ``_run_merge_gate_quality_stage``) when ``tail_with_stuck_watchdog``
+    # trips because no JSONL events arrived for ``BMAD_REVIEW_TIMEOUT_SEC``
+    # seconds (default 900 = 15 min). Distinct from ``WORKER_STUCK_TIMEOUT``
+    # (dev workers) so the supervisor can route differently.
+    # Payload: {story_id, stage: "security"|"spec"|"quality",
+    #           elapsed_seconds, jsonl_path}.
+    REVIEW_STUCK_TIMEOUT = "review_stuck_timeout"
+    # NEW-38 — emitted by ``supervisor/actions.py`` when the Supervisor LLM
+    # judge classifies an event and decides to respawn the story worker.
+    # The orchestrator main loop subscribes and re-queues the story_id for
+    # the next round, capped at 2 respawns per story.
+    # Payload: {story_id, reason, iteration (int), dev_prompt_hint (str|None),
+    #           cancelled_worker_id (str|None)}.
+    WORKER_RESPAWN_REQUESTED = "worker_respawn_requested"
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
 

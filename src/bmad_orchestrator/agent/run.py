@@ -1064,7 +1064,9 @@ def _wire_pipeline_subscribers(
             partial(
                 security_review_subscriber,
                 bus=bus,
-                runner=_real_security_review_runner,
+                # NEW-37: pass bus into the runner via partial so the review-worker
+                # tail loop is wrapped in tail_with_stuck_watchdog (15-min timeout).
+                runner=partial(_real_security_review_runner, bus=bus),
             ),
         )
     )
@@ -1502,12 +1504,73 @@ async def _run_real_pilot_body(
     # emission idempotent across spawn rounds and across stories within a
     # round.
     budget_autodisable_state = BudgetAutoDisableState()
+
+    # NEW-38 — respawn state: per-story attempt counters and a pending queue
+    # populated by the WORKER_RESPAWN_REQUESTED subscriber. The main round loop
+    # drains _respawn_pending at the top of each iteration and re-adds stories
+    # to the ready pool by removing them from `spawned`+`failed`.
+    _respawn_counts: dict[str, int] = {}
+    _respawn_pending: list[str] = []
+    # NEW-39 — dev hint per story for the next respawn attempt.
+    _respawn_hints: dict[str, str] = {}
+    _RESPAWN_CAP = 2  # max 2 respawns per story; 3rd → escalate_human
+
+    async def _respawn_subscriber(event: Event) -> None:
+        """Wire respawn requests from the supervisor into the pilot round loop."""
+        if event.type != EventType.WORKER_RESPAWN_REQUESTED:
+            return
+        sid = event.payload.get("story_id")
+        if not isinstance(sid, str) or not sid:
+            return
+        count = _respawn_counts.get(sid, 0) + 1
+        hint = event.payload.get("dev_prompt_hint")
+        if count > _RESPAWN_CAP:
+            log.warning(
+                "respawn_cap_reached_escalate",
+                story_id=sid,
+                respawn_count=count,
+                cap=_RESPAWN_CAP,
+            )
+            await bus.emit(
+                EventType.HUMAN_QUERY,
+                source="respawn_cap",
+                story_id=sid,
+                reason=(
+                    f"Respawn cap ({_RESPAWN_CAP}) reached for {sid} — "
+                    "manual intervention required"
+                ),
+            )
+            return
+        _respawn_counts[sid] = count
+        if hint:
+            _respawn_hints[sid] = hint
+        _respawn_pending.append(sid)
+        log.info(
+            "respawn_queued",
+            story_id=sid,
+            attempt=count,
+            has_hint=bool(hint),
+        )
+
+    bus.on(_respawn_subscriber)
+
     while (
         rounds < max_rounds
         and not daily_halt_reached
         and len(spawned) < max_stories
         and daily_spent_usd < max_spend_usd
     ):
+        # NEW-38 — drain respawn queue at round boundary: re-expose story for
+        # re-spawn by removing it from spawned + failed so find_ready / manual
+        # picks it up again. Cap check already happened inside _respawn_subscriber.
+        while _respawn_pending:
+            rsid = _respawn_pending.pop(0)
+            if rsid in spawned:
+                spawned.remove(rsid)
+            if rsid in failed:
+                failed.remove(rsid)
+            log.info("respawn_story_requeued", story_id=rsid)
+
         if manual_stories:
             ready = [s for s in manual_stories if s["id"] not in spawned]
         else:
@@ -1715,6 +1778,19 @@ async def _run_real_pilot_body(
             # single dirty story halts cleanly rather than aborting the whole
             # pilot loop (the same guard also covers the #7 halt-reason gate).
             try:
+                # NEW-39 — if a supervisor respawn requested a dev_prompt_hint,
+                # inject it as ORCHESTRATOR_DEV_HINT so the worker's session
+                # bootstrap includes the hint text and the new attempt avoids
+                # repeating the same mistake. Cleared after spawn (one-shot).
+                _spawn_env: dict[str, str] | None = None
+                _hint = _respawn_hints.pop(story["id"], None)
+                if _hint:
+                    _spawn_env = {"ORCHESTRATOR_DEV_HINT": _hint}
+                    log.info(
+                        "respawn_hint_injected",
+                        story_id=story["id"],
+                        hint_length=len(_hint),
+                    )
                 handle = await runtime_spawn_worker(
                     worktree=str(wt),
                     story_id=story["id"],
@@ -1727,6 +1803,7 @@ async def _run_real_pilot_body(
                     isolated_home=parallel_isolation,
                     cgroup_limits=DEFAULT_CGROUP_LIMITS if parallel_isolation else None,
                     auto_clean_dirty_worktree=auto_clean_dirty_worktree,
+                    env=_spawn_env,
                 )
             except WorkerHaltPrespawnError as exc:
                 log.warning(
@@ -3840,15 +3917,51 @@ async def _spawn_security_review_worker(
 
 
 async def _real_security_review_runner(
-    worktree: Path, story_id: str, wave: str
+    worktree: Path,
+    story_id: str,
+    wave: str,
+    *,
+    bus: EventLoop | None = None,
 ) -> tuple[str, str]:
-    """Production runner — spawn the security-review worker, aggregate verdict."""
+    """Production runner — spawn the security-review worker, aggregate verdict.
+
+    NEW-37: when *bus* is supplied, the JSONL tail loop is wrapped inside
+    :func:`tail_with_stuck_watchdog` (15-min stuck threshold by default,
+    overridable via ``BMAD_REVIEW_TIMEOUT_SEC``). Review workers never
+    commit code, so only the JSONL-age signal is meaningful — ``commit_counter``
+    always returns 0, ``dirty_counter`` is omitted. On trip the watchdog emits
+    ``WORKER_STUCK_TIMEOUT`` on the bus, then a synthetic ``worker_completed``
+    event exits the loop and the function returns ``(SECURITY_VERDICT_ERROR,
+    "review_stuck_timeout")`` so the upstream retry logic handles it normally.
+    When *bus* is ``None`` the pre-NEW-37 ``tail_jsonl_events`` path is used
+    (test backward-compat).
+    """
     handle = await _spawn_security_review_worker(
         worktree=str(worktree), story_id=story_id, wave=wave
     )
     verdict = SECURITY_VERDICT_ERROR
     findings = ""
-    async for ev in tail_jsonl_events(handle.jsonl_path):
+    timeout_sec = _review_timeout_sec()
+    _check_interval = max(30.0, timeout_sec / 30)
+
+    async def _zero_counter() -> int:
+        return 0
+
+    if bus is not None:
+        tail_iter = tail_with_stuck_watchdog(
+            handle.jsonl_path,
+            bus,
+            story_id=story_id,
+            worktree=str(worktree),
+            commit_counter=_zero_counter,
+            dirty_counter=None,
+            stuck_threshold_seconds=float(timeout_sec),
+            check_interval_seconds=_check_interval,
+        )
+    else:
+        tail_iter = tail_jsonl_events(handle.jsonl_path)  # type: ignore[assignment]
+
+    async for ev in tail_iter:
         extracted = parse_security_verdict_from_event(ev)
         if extracted is not None:
             verdict, findings = extracted
@@ -3975,7 +4088,26 @@ async def _run_merge_gate_spec_stage(
     verdict = "error"
     summary = ""
     metrics: ReviewMetrics | None = None
-    async for ev in tail_jsonl_events(handle.jsonl_path):
+    # NEW-37: wrap the JSONL tail loop in the stuck watchdog so a hung review
+    # subprocess (e.g. git cat-file --batch-check holding stdin) cannot block
+    # the orchestrator indefinitely. Review workers never commit — commit_counter
+    # always returns 0; dirty_counter is omitted (no worktree writes expected).
+    _rev_timeout = float(_review_timeout_sec())
+    _rev_check = max(30.0, _rev_timeout / 30)
+
+    async def _zero() -> int:
+        return 0
+
+    async for ev in tail_with_stuck_watchdog(
+        handle.jsonl_path,
+        bus,
+        story_id=story_id,
+        worktree=worktree,
+        commit_counter=_zero,
+        dirty_counter=None,
+        stuck_threshold_seconds=_rev_timeout,
+        check_interval_seconds=_rev_check,
+    ):
         extracted = _extract_verdict_from_event(ev)
         if extracted is not None:
             verdict, summary = extracted
@@ -4030,7 +4162,24 @@ async def _run_merge_gate_quality_stage(
     verdict = "error"
     summary = ""
     metrics: ReviewMetrics | None = None
-    async for ev in tail_jsonl_events(handle.jsonl_path):
+    # NEW-37: same stuck-watchdog wrapper as _run_merge_gate_spec_stage —
+    # review workers never commit, so only JSONL-age signal matters.
+    _rev_timeout = float(_review_timeout_sec())
+    _rev_check = max(30.0, _rev_timeout / 30)
+
+    async def _zero() -> int:
+        return 0
+
+    async for ev in tail_with_stuck_watchdog(
+        handle.jsonl_path,
+        bus,
+        story_id=story_id,
+        worktree=worktree,
+        commit_counter=_zero,
+        dirty_counter=None,
+        stuck_threshold_seconds=_rev_timeout,
+        check_interval_seconds=_rev_check,
+    ):
         extracted = _extract_verdict_from_event(ev)
         if extracted is not None:
             verdict, summary = extracted
@@ -4052,6 +4201,25 @@ async def _run_merge_gate_quality_stage(
         review_jsonl=str(handle.jsonl_path),
     )
     return verdict, summary, metrics, str(handle.jsonl_path)
+
+
+_REVIEW_TIMEOUT_DEFAULT_SEC: int = 900  # 15 min
+
+
+def _review_timeout_sec() -> int:
+    """NEW-37 — hard timeout for review worker tail loops.
+
+    Returns the value of ``BMAD_REVIEW_TIMEOUT_SEC`` (default 900 = 15 min).
+    Both the per-stage watchdog *stuck_threshold* and the outer
+    ``asyncio.wait_for`` cap on the full review coroutine use this value so
+    that a hung review subprocess (e.g. ``git cat-file --batch-check`` holding
+    stdin) never blocks the orchestrator beyond this ceiling.
+    """
+    raw = os.environ.get("BMAD_REVIEW_TIMEOUT_SEC", str(_REVIEW_TIMEOUT_DEFAULT_SEC))
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return _REVIEW_TIMEOUT_DEFAULT_SEC
 
 
 def _code_review_error_retry_max() -> int:

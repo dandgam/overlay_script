@@ -373,8 +373,8 @@ async def test_all_seven_canonical_subscribers_wired_in_correct_order(
     funcs = [getattr(s, "func", s) for s in bus._subs]
     # 7 canonical + elicitation_subscriber (Phase 3) + supervisor_subscriber (Phase 4)
     # + self_learning_subscriber (Phase 5) + correct_course + investigate
-    # (BMad Phase 4 gap-closure 2026-05-19).
-    assert len(funcs) == 12, f"Expected 12 subscribers, got {len(funcs)}: {funcs!r}"
+    # (BMad Phase 4 gap-closure 2026-05-19) + _respawn_subscriber (NEW-38) = 13.
+    assert len(funcs) == 13, f"Expected 13 subscribers, got {len(funcs)}: {funcs!r}"
     expected_in_order = [
         stage5_completeness_subscriber,
         build_check_subscriber,
@@ -434,8 +434,10 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     # 2026-05-19 spec_pilot_findings_closure_v6 S3 NEW-17 adds
     #   WORKER_EXIT_UNCOMMITTED → 40 + 1 = 41.
     # 2026-05-20 NEW-36 adds WORKER_AUTO_STAGE_RECOVERY → 43 + 1 = 44.
-    assert len(ALL_EVENT_TYPES) == 44, (
-        f"Expected 44 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # NEW-37 adds REVIEW_STUCK_TIMEOUT → 44 + 1 = 45.
+    # NEW-38 adds WORKER_RESPAWN_REQUESTED → 45 + 1 = 46.
+    assert len(ALL_EVENT_TYPES) == 46, (
+        f"Expected 46 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 
