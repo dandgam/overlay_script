@@ -16,7 +16,6 @@ import pytest
 
 from bmad_orchestrator.agent.run import _ff_merge_to_integration
 
-
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 GIT_ENV = {
@@ -178,6 +177,118 @@ async def test_conflicting_branch_raises_and_no_rebase_in_progress(
     # Format: "gitdir: /abs/path/to/.git/worktrees/<name>"
     git_dir = Path(git_dir_line.split("gitdir:", 1)[1].strip())
 
+    assert not (git_dir / "rebase-merge").exists(), "rebase-merge must be cleaned up"
+    assert not (git_dir / "rebase-apply").exists(), "rebase-apply must be cleaned up"
+
+
+@pytest.mark.asyncio
+async def test_new34_fresh_integration_branch_diverging_feature_succeeds(
+    tmp_path: Path,
+) -> None:
+    """NEW-34 — feature diverges from freshly-created integration branch.
+
+    Pilot 2c scenario: feature/3-2-zfs was created from an older base commit
+    (base_sha=1d86f83).  integration/2c did NOT exist yet; _ff_merge_to_integration
+    creates it from main (which is ahead of the old base).  Before the fix,
+    ``integration_branch in existing`` was False (captured before creation) →
+    rebase skipped → ff-merge raised exit-128.  After the fix the rebase guard
+    no longer relies on the stale ``existing`` set.
+    """
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "test")
+
+    # Commit 1 — base (this is where feature will be created from)
+    (repo / "base.txt").write_text("base\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "base")
+    old_base_sha = _git(repo, "rev-parse", "HEAD")
+
+    # Commit 2 — main advances (simulates work merged before pilot 2c)
+    (repo / "main_advance.txt").write_text("main advance\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "main: advance")
+
+    # feature/s1 branches off the OLD base (diverges from current main)
+    _git(repo, "checkout", "-b", "feature/s1", old_base_sha)
+    (repo / "feature_work.py").write_text("# new feature\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "feat(s1): new feature")
+
+    # Return to main (integration branch does NOT exist yet)
+    _git(repo, "checkout", "main")
+
+    # Add worktree for the feature branch
+    wt1 = tmp_path / "wt_s1"
+    _git(repo, "worktree", "add", str(wt1), "feature/s1")
+
+    # _ff_merge_to_integration must: (1) create integration/x from main,
+    # (2) rebase feature/s1 onto it (NEW-34 fix), (3) ff-merge successfully.
+    sha = await _ff_merge_to_integration(
+        target_project=repo,
+        integration_branch="integration/x",  # does NOT pre-exist
+        feature_branch="feature/s1",
+        worktree=str(wt1),
+    )
+    assert sha
+    assert (repo / "feature_work.py").exists(), "feature work must be present"
+    assert (repo / "main_advance.txt").exists(), "main advance must be present"
+
+
+@pytest.mark.asyncio
+async def test_new34_fresh_integration_conflict_escalates(tmp_path: Path) -> None:
+    """NEW-34 — conflicting rebase on fresh integration branch raises cleanly.
+
+    When integration branch is freshly created and feature diverges AND conflicts,
+    _ff_merge_to_integration must: abort the rebase and raise (so the caller's
+    except block can emit HUMAN_QUERY).  Worktree must have no rebase-in-progress
+    state.
+    """
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "test")
+
+    # Base commit — shared file that will conflict
+    (repo / "conflict.txt").write_text("original\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "base")
+    old_base_sha = _git(repo, "rev-parse", "HEAD")
+
+    # main advances AND modifies conflict.txt
+    (repo / "conflict.txt").write_text("changed by main\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "main: change conflict.txt")
+
+    # feature/s1 branches from OLD base and divergently changes the same file
+    _git(repo, "checkout", "-b", "feature/s1", old_base_sha)
+    (repo / "conflict.txt").write_text("changed by feature\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "feat(s1): divergent conflict.txt")
+
+    _git(repo, "checkout", "main")
+
+    wt1 = tmp_path / "wt_s1"
+    _git(repo, "worktree", "add", str(wt1), "feature/s1")
+
+    # _ff_merge_to_integration must raise (rebase conflict)
+    import pytest as _pytest
+
+    with _pytest.raises(Exception):
+        await _ff_merge_to_integration(
+            target_project=repo,
+            integration_branch="integration/x",  # does NOT pre-exist
+            feature_branch="feature/s1",
+            worktree=str(wt1),
+        )
+
+    # Worktree must have no rebase-in-progress state
+    wt_git_file = wt1 / ".git"
+    assert wt_git_file.is_file(), "worktree .git should be a file pointer"
+    git_dir = Path(wt_git_file.read_text().strip().split("gitdir:", 1)[1].strip())
     assert not (git_dir / "rebase-merge").exists(), "rebase-merge must be cleaned up"
     assert not (git_dir / "rebase-apply").exists(), "rebase-apply must be cleaned up"
 

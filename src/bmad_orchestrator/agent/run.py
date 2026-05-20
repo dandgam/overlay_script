@@ -4334,10 +4334,17 @@ async def _ff_merge_to_integration(
     # integration for the merge.  The rebase must run inside the worker's
     # worktree (where feature/<story> is the active branch); git refuses to
     # rebase a branch that is checked out in a different worktree.
+    #
+    # NEW-34 fix: the original guard checked ``integration_branch in existing``
+    # where ``existing`` was captured BEFORE the branch-creation block above.
+    # When integration/<wave> is freshly created (pilot 2c scenario), it is not
+    # in ``existing`` → the rebase was silently skipped → ff-merge failed with
+    # exit 128 ("Not possible to fast-forward").  The fix: drop the stale-set
+    # guard.  Rebase is safe whenever ``worktree`` points to a real git
+    # worktree; there is no correctness reason to skip it for new branches.
     if (
         worktree is not None
         and (Path(worktree) / ".git").exists()
-        and integration_branch in existing
     ):
         wt_repo = Repo(str(worktree))
         try:

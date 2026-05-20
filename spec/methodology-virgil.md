@@ -695,18 +695,18 @@ fallback), но merge упал на новом баге.
   (review/security/gate spawn helpers уже сами save+restore вокруг своих per-stage суффиксов).
   +1 unit-тест на присутствие строки в исходнике. Tests 2182→2183.
 
-- ⬜ **NEW-34 (P1) · Тип: 🐛 Баг — ff-merge diverging branch не уходит в rebase recovery** —
-  OPEN 2026-05-20, pilot 2c. Story 3-2-zfs прошла весь pipeline (dev → stage5 →
+- ✅ **NEW-34 (P1) · Тип: 🐛 Баг — ff-merge diverging branch не уходит в rebase recovery** —
+  CLOSED COMMIT_PLACEHOLDER, pilot 2c. Story 3-2-zfs прошла весь pipeline (dev → stage5 →
   build_check → gate_spec approve → gate_quality approve), но финальный
   `git merge feature/3-2-zfs --ff-only --signoff` упал с `exit 128 / Not possible to
   fast-forward, aborting` потому что feature-branch создан в 2b (HEAD=1d86f83 на
   старой базе), а integration/2c свежесоздана с другого коммита — расходящиеся базы.
-  **NEW-31 (rebase feature на integration перед ff) должен был это предотвратить**, но
-  exception всплыл сразу при ff, без перехода в recovery. Нужно: (a) обернуть ff в
-  try/except → catch `GitCommandError exit 128`, (b) вызвать NEW-31 recovery rebase
-  именно в этом случае, (c) если rebase тоже не прошёл — `HUMAN_QUERY` с diff.
-  Локация: `merge_to_integration_subscriber` в `agent/run.py`. После 3 эскалаций
-  supervisor сделал `abort_pipeline` через circuit breaker — это работало как задумано.
+  Root cause: в `_ff_merge_to_integration` set `existing` захватывался ДО создания
+  integration-ветки (строка 4328); условие rebase проверяло `integration_branch in existing`
+  → False для свежесозданной ветки → rebase skipped → ff-merge exit-128.
+  Fix: убрано `and integration_branch in existing` из guard rebase (NEW-31). Rebase
+  теперь всегда выполняется когда `worktree` указывает на реальный git worktree.
+  Конфликт rebase → `rebase --abort` + raise → caller's except → `HUMAN_QUERY`. +2 теста.
 
 ---
 
