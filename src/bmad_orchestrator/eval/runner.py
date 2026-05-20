@@ -86,7 +86,9 @@ async def _run_one_case(
     wt = worktree_root / case_id
     wt.mkdir(parents=True, exist_ok=True)
 
-    # mock-mode forces no real subprocess; real mode is not exercised yet.
+    # Q-26140-a1b2 — real-mode workers MUST share host netns or bwrap
+    # --unshare-net blocks api.anthropic.com (Step B 2026-05-20 incident).
+    # Mock-mode keeps the secure default "none" — no real LLM calls happen.
     is_mock = mode != "real"
     start = time.monotonic()
     handle = await spawn_worker(
@@ -94,6 +96,7 @@ async def _run_one_case(
         story_id=story_id,
         branch=f"feature/{story_id}",
         mock=is_mock,
+        sandbox_network="full" if not is_mock else "none",
     )
 
     emitted: list[str] = []
