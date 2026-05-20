@@ -696,7 +696,7 @@ fallback), но merge упал на новом баге.
   +1 unit-тест на присутствие строки в исходнике. Tests 2182→2183.
 
 - ✅ **NEW-34 (P1) · Тип: 🐛 Баг — ff-merge diverging branch не уходит в rebase recovery** —
-  CLOSED COMMIT_PLACEHOLDER, pilot 2c. Story 3-2-zfs прошла весь pipeline (dev → stage5 →
+  CLOSED `b93a0a3`, pilot 2c. Story 3-2-zfs прошла весь pipeline (dev → stage5 →
   build_check → gate_spec approve → gate_quality approve), но финальный
   `git merge feature/3-2-zfs --ff-only --signoff` упал с `exit 128 / Not possible to
   fast-forward, aborting` потому что feature-branch создан в 2b (HEAD=1d86f83 на
