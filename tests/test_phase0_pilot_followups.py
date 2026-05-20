@@ -33,6 +33,7 @@ from bmad_orchestrator.agent.run import (
     _kill_orphan_workers,
     _kill_stale_orchestrators,
     _resolve_worktree_head,
+    _resolve_worktree_reuse_base_sha,
     _tail_and_emit_completion,
     _tracker_has_no_usage,
     _warn_if_worktree_dirty,
@@ -553,3 +554,72 @@ async def test_phase0_resolve_worktree_head_returns_sha(
 ) -> None:
     expected = _init_repo(tmp_path)
     assert await _resolve_worktree_head(tmp_path) == expected
+
+
+# ── NEW-35 — reuse base_sha via merge-base ───────────────────────────────────
+
+
+def _setup_feature_branch(tmp_path: Path) -> tuple[Path, Path, str]:
+    """Create a target repo + feature worktree that mirrors the pilot 2d scenario.
+
+    Returns (target_project, worktree_path, merge_base_sha).
+    """
+    target = tmp_path / "target"
+    target.mkdir()
+    _git(target, "init", "-q", "-b", "master")
+    (target / "README.md").write_text("init\n")
+    _git(target, "add", "README.md")
+    _git(target, "commit", "-q", "-m", "initial commit")
+    merge_base_sha = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Create feature branch from master (go back to master first so worktree
+    # add can check it out in a separate directory).
+    _git(target, "branch", "feature/1.4")
+
+    # Simulate the worktree (git worktree add checks out the branch there)
+    wt = tmp_path / "wt-1.4"
+    subprocess.run(
+        ["git", "-C", str(target), "worktree", "add", str(wt), "feature/1.4"],
+        check=True, capture_output=True,
+    )
+
+    # Add 2 commits on the feature branch inside the worktree
+    (wt / "feat.py").write_text("# feat\n")
+    _git(wt, "add", "feat.py")
+    _git(wt, "commit", "-q", "-m", "feat(1.4): implement story")
+    (wt / "feat.py").write_text("# feat autofix\n")
+    _git(wt, "add", "feat.py")
+    _git(wt, "commit", "-q", "-m", "fix(story-1.4): audit autofix")
+
+    # Return master HEAD (= merge-base) as the expected base_sha
+    return target, wt, merge_base_sha
+
+
+@pytest.mark.asyncio
+async def test_new35_reuse_base_sha_returns_merge_base(tmp_path: Path) -> None:
+    """NEW-35: reused worktree base_sha must be merge-base(feature, upstream),
+    not the feature branch HEAD — so base_sha..HEAD > 0 for prior-pilot work.
+    """
+    target, wt, expected_base = _setup_feature_branch(tmp_path)
+    result = await _resolve_worktree_reuse_base_sha(target, wt, "feature/1.4")
+    assert result == expected_base, (
+        f"Expected merge-base {expected_base!r}, got {result!r}. "
+        "Returning feature HEAD would make commit-count 0 → silent_failure."
+    )
+
+
+@pytest.mark.asyncio
+async def test_new35_reuse_base_sha_commit_count_nonzero(tmp_path: Path) -> None:
+    """NEW-35: using merge-base as base_sha yields positive commit count for
+    a reused worktree with prior-pilot work — no false silent_failure.
+    """
+    target, wt, _ = _setup_feature_branch(tmp_path)
+    base = await _resolve_worktree_reuse_base_sha(target, wt, "feature/1.4")
+    count = await _count_new_commits(str(wt), base)
+    assert count >= 2, (
+        f"Expected ≥2 new commits past merge-base, got {count}. "
+        "Silent failure guard (count==0) would have fired incorrectly."
+    )

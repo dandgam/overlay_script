@@ -1930,7 +1930,15 @@ async def _ensure_git_worktree(
             branch=branch,
         )
         await _warn_if_worktree_dirty(worktree)
-        return await _resolve_worktree_head(worktree)
+        # NEW-35 — use merge-base with upstream HEAD so that base_sha..HEAD
+        # counts the feature branch's own commits, not zero.  Using the raw
+        # worktree HEAD here caused silent_failure for every story that already
+        # had commits from a prior pilot run.
+        return await _resolve_worktree_reuse_base_sha(
+            target_project=target_project,
+            worktree=worktree,
+            branch=branch,
+        )
 
     # If a plain dir exists from a previous failed spawn — leave it; git
     # worktree add will fail on non-empty paths, which is the right loud
@@ -2016,6 +2024,81 @@ async def _resolve_worktree_head(worktree: Path) -> str:
     if proc.returncode != 0:
         return ""
     return stdout.decode(errors="replace").strip()
+
+
+async def _resolve_worktree_reuse_base_sha(
+    target_project: Path,
+    worktree: Path,
+    branch: str,
+) -> str:
+    """NEW-35 — base_sha for a *reused* worktree.
+
+    When ``_ensure_git_worktree`` reuses an existing worktree the old code
+    returned ``HEAD`` of the feature branch.  That made ``base_sha..HEAD``
+    evaluate to 0 commits, so every story that already had work from a prior
+    pilot was flagged as ``worker_silent_failure`` even though the commits were
+    already there.
+
+    The correct reference is the *merge-base* of the feature branch with the
+    target project HEAD (the default branch the feature branched off of).  That
+    gives ``base_sha..HEAD`` == "commits on this feature branch" — which is > 0
+    for a story that did real work in a previous run and 0 only for an empty
+    branch.
+
+    Falls back to the current worktree HEAD (legacy behaviour) if the merge-base
+    subprocess fails (e.g., no common ancestor, detached HEAD).
+    """
+    # Resolve the upstream HEAD in the target repo (usually master/main).
+    upstream_ref = "HEAD"
+    upstream_sha_proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(target_project), "rev-parse", upstream_ref,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    upstream_stdout, _ = await upstream_sha_proc.communicate()
+    if upstream_sha_proc.returncode != 0:
+        log.warning(
+            "reuse_base_sha_upstream_failed",
+            worktree=str(worktree),
+            branch=branch,
+            note="falling back to worktree HEAD as base_sha",
+        )
+        return await _resolve_worktree_head(worktree)
+
+    upstream_sha = upstream_stdout.decode(errors="replace").strip()
+
+    # Compute merge-base: last commit shared by the feature branch and upstream.
+    feature_sha = await _resolve_worktree_head(worktree)
+    if not feature_sha:
+        return ""
+
+    mb_proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(target_project), "merge-base", feature_sha, upstream_sha,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    mb_stdout, _ = await mb_proc.communicate()
+    if mb_proc.returncode != 0:
+        log.warning(
+            "reuse_base_sha_merge_base_failed",
+            worktree=str(worktree),
+            branch=branch,
+            feature_sha=feature_sha,
+            upstream_sha=upstream_sha,
+            note="falling back to worktree HEAD as base_sha",
+        )
+        return feature_sha
+
+    merge_base = mb_stdout.decode(errors="replace").strip()
+    log.info(
+        "reuse_base_sha_from_merge_base",
+        worktree=str(worktree),
+        branch=branch,
+        merge_base=merge_base,
+        upstream_sha=upstream_sha,
+        feature_sha=feature_sha,
+    )
+    return merge_base
 
 
 async def _count_new_commits(worktree: str, base_sha: str) -> int:
