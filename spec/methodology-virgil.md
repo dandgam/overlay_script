@@ -717,7 +717,7 @@ fallback), но merge упал на новом баге.
   HEAD; fallback на HEAD при ошибке. +2 теста через реальный git worktree. Tests 2185→2187.
 
 - ✅ **NEW-36 (P1) · Тип: 🏗 Архитектура — брутальный subprocess_timeout убивает воркера пишущего файлы** —
-  CLOSED `<commit>`, pilot 2f. Worker 8-1 (story `8-1-landing-page-antares-ds`) 30 минут
+  CLOSED `69e0c1f`, pilot 2f. Worker 8-1 (story `8-1-landing-page-antares-ds`) 30 минут
   реально писал код (34 файла), но hits `BMAD_WORKER_TIMEOUT_SEC=1800` → SIGKILL →
   34 файла uncommitted потеряны. Три изменения:
 
