@@ -1094,7 +1094,11 @@ def _wire_pipeline_subscribers(
         # Helper: load policy judge config (model, timeout, system_prompt).
         def _load_jcfg() -> Any:
             from bmad_orchestrator.runtime.supervisor_subscriber import DEFAULT_POLICY_PATH
-            from bmad_orchestrator.supervisor.policy import JudgeConfig, PolicyNotFoundError, load_policy
+            from bmad_orchestrator.supervisor.policy import (
+                JudgeConfig,
+                PolicyNotFoundError,
+                load_policy,
+            )
             _policy_path = supervisor_policy_path or DEFAULT_POLICY_PATH
             try:
                 return load_policy(_policy_path).judge
