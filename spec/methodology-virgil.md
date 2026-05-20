@@ -716,6 +716,35 @@ fallback), но merge упал на новом баге.
   Fix: новый helper `_resolve_worktree_reuse_base_sha` берёт merge-base feature vs target
   HEAD; fallback на HEAD при ошибке. +2 теста через реальный git worktree. Tests 2185→2187.
 
+- ✅ **NEW-36 (P1) · Тип: 🏗 Архитектура — брутальный subprocess_timeout убивает воркера пишущего файлы** —
+  CLOSED `<commit>`, pilot 2f. Worker 8-1 (story `8-1-landing-page-antares-ds`) 30 минут
+  реально писал код (34 файла), но hits `BMAD_WORKER_TIMEOUT_SEC=1800` → SIGKILL →
+  34 файла uncommitted потеряны. Три изменения:
+
+  **1. Новый liveness-сигнал в `stuck_watchdog.py`:** `evaluate_stuck` получил два новых
+  параметра `last_dirty_count` / `current_dirty_count`. Если dirty count растёт →
+  reason=`worktree_growing`, stuck=False. Три независимых сигнала теперь сбрасывают таймер:
+  `events_fresh` (JSONL), `commits_growing` (git), `worktree_growing` (файлы в worktree).
+  `StuckCheckResult` получил поле `dirty_count`.
+
+  **2. `tail_with_stuck_watchdog`:** новый optional param `dirty_counter: DirtyCounter | None`.
+  На каждом тике вызывает `await dirty_counter()` (если передан), сравнивает с предыдущим —
+  при росте сбрасывает start_time (как при новом коммите). `_tail_and_emit_completion`
+  в `agent/run.py` передаёт `_dirty_counter_for_handle` — `git -C <worktree> status
+  --porcelain` с asyncio.create_subprocess_exec.
+
+  **3. Архитектурный сдвиг `worker_spawn.py`:** `_worker_timeout_sec()` →
+  `_worker_hard_timeout_sec()`. Default raised 1800 → **14400 s (4 h)** via
+  `BMAD_WORKER_HARD_TIMEOUT_SEC` env (old `BMAD_WORKER_TIMEOUT_SEC` — backward compat).
+  Первичное решение «жив/застрял» — stuck_watchdog (soft 30 мин с тремя сигналами);
+  hard ceiling — только last resort kill для runaway. Перед SIGKILL: best-effort
+  `git add -A && git commit` (функция `_auto_stage_worktree`); emits новый
+  `WORKER_AUTO_STAGE_RECOVERY` EventType с SHA (None при провале). Работа сохраняется
+  даже если hard ceiling всё же сработал.
+
+  +19 тестов (`test_new36_dirty_count_watchdog.py` + inline в `test_stuck_watchdog.py`
+  + обновлён `test_canonical_patches_p1.py`). EventType #44. Tests 2187→2206.
+
 ---
 
 ## 6. References

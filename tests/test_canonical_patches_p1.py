@@ -5,9 +5,11 @@ Tracker: .claude/initiative-tracker-canonical_patches_port.md.
 
 Coverage (20 tests):
 
-* **Patch H** (5) — ``_worker_timeout_sec()`` default changed to 1800 (was
-  86400); ``BMAD_WORKER_TIMEOUT_SEC`` env override semantics preserved across
-  the value range (positive int / zero / negative / non-digit / unset).
+* **Patch H** (5) — ``_worker_hard_timeout_sec()`` (NEW-36 rename from
+  ``_worker_timeout_sec``): hard-ceiling default raised from 1800 s → 14400 s
+  (4 h); ``BMAD_WORKER_TIMEOUT_SEC`` env override preserved; new
+  ``BMAD_WORKER_HARD_TIMEOUT_SEC`` env var; primary liveness now lives in
+  stuck_watchdog (30-min soft decision via JSONL/commit/dirty signals).
 * **Patch C policy** (5) — ``load_deletion_safety_policy`` happy path, missing
   file, malformed YAML, non-mapping top-level, schema violation.
 * **Patch C matcher** (5) — ``match_deletions`` matches by basename, by full
@@ -42,45 +44,53 @@ from bmad_orchestrator.runtime.deletion_safety import (
 from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
 from bmad_orchestrator.skills_repo import PolicyInvalidError, PolicyNotFoundError
 
-# ─────────────────────────── Patch H tests ────────────────────────────────────
+# ─────────────────────────── Patch H tests (NEW-36 updated) ──────────────────
+# NEW-36: function renamed _worker_timeout_sec → _worker_hard_timeout_sec;
+# default raised 1800 → 14400 (primary liveness = stuck_watchdog 30-min soft
+# decision; hard ceiling only fires for genuine runaway processes).
 
 
-def test_patch_h_default_is_1800_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default timeout is the canonical 30 min (1800 s), NOT the legacy 24 h."""
+def test_patch_h_default_is_14400_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """NEW-36: hard-ceiling default is 4 h (14400 s); stuck_watchdog owns 30-min soft."""
     monkeypatch.delenv("BMAD_WORKER_TIMEOUT_SEC", raising=False)
-    assert worker_spawn._worker_timeout_sec() == 1800
+    monkeypatch.delenv("BMAD_WORKER_HARD_TIMEOUT_SEC", raising=False)
+    assert worker_spawn._worker_hard_timeout_sec() == 14400
 
 
 def test_patch_h_env_override_positive_int_preserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A positive-int env override remains honoured (backward compat)."""
+    """BMAD_WORKER_TIMEOUT_SEC still overrides hard ceiling (backward compat)."""
     monkeypatch.setenv("BMAD_WORKER_TIMEOUT_SEC", "7200")
-    assert worker_spawn._worker_timeout_sec() == 7200
+    monkeypatch.delenv("BMAD_WORKER_HARD_TIMEOUT_SEC", raising=False)
+    assert worker_spawn._worker_hard_timeout_sec() == 7200
 
 
-def test_patch_h_env_override_zero_falls_back_to_default(
+def test_patch_h_hard_timeout_env_overrides_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``BMAD_WORKER_TIMEOUT_SEC=0`` is invalid → falls back to default 1800."""
-    monkeypatch.setenv("BMAD_WORKER_TIMEOUT_SEC", "0")
-    assert worker_spawn._worker_timeout_sec() == 1800
+    """BMAD_WORKER_HARD_TIMEOUT_SEC env var overrides built-in 14400 default."""
+    monkeypatch.delenv("BMAD_WORKER_TIMEOUT_SEC", raising=False)
+    monkeypatch.setenv("BMAD_WORKER_HARD_TIMEOUT_SEC", "3600")
+    assert worker_spawn._worker_hard_timeout_sec() == 3600
 
 
 def test_patch_h_env_override_non_digit_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Non-digit junk → ignored; default returned."""
+    """Non-digit junk in BMAD_WORKER_TIMEOUT_SEC → ignored; 14400 default returned."""
     monkeypatch.setenv("BMAD_WORKER_TIMEOUT_SEC", "thirty-minutes")
-    assert worker_spawn._worker_timeout_sec() == 1800
+    monkeypatch.delenv("BMAD_WORKER_HARD_TIMEOUT_SEC", raising=False)
+    assert worker_spawn._worker_hard_timeout_sec() == 14400
 
 
-def test_patch_h_env_override_negative_falls_back(
+def test_patch_h_env_override_zero_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Negative values are non-digit per ``.isdigit()`` → fall back to default."""
-    monkeypatch.setenv("BMAD_WORKER_TIMEOUT_SEC", "-60")
-    assert worker_spawn._worker_timeout_sec() == 1800
+    """``BMAD_WORKER_TIMEOUT_SEC=0`` is invalid → falls back to 14400."""
+    monkeypatch.setenv("BMAD_WORKER_TIMEOUT_SEC", "0")
+    monkeypatch.delenv("BMAD_WORKER_HARD_TIMEOUT_SEC", raising=False)
+    assert worker_spawn._worker_hard_timeout_sec() == 14400
 
 
 # ────────────────────── Patch C — policy loader ──────────────────────────────

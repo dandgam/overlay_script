@@ -2285,12 +2285,34 @@ async def _tail_and_emit_completion(
             return 0
         return await _count_new_commits(handle.worktree, handle.base_sha)
 
+    # NEW-36: count worktree dirty files so workers writing files without
+    # committing (e.g. pilot 2f story 8-1: 34 files in 30 min) are not
+    # mistaken for stuck.
+    async def _dirty_counter_for_handle() -> int:
+        if not handle.worktree:
+            return 0
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", handle.worktree, "status", "--porcelain",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return 0
+            return len(
+                [ln for ln in stdout.decode(errors="replace").splitlines() if ln.strip()]
+            )
+        except Exception:
+            return 0
+
     async for ev in tail_with_stuck_watchdog(
         handle.jsonl_path,
         bus,
         story_id=handle.story_id,
         worktree=handle.worktree,
         commit_counter=_commit_counter_for_handle,
+        dirty_counter=_dirty_counter_for_handle,
         stuck_threshold_seconds=_stuck_timeout,
         check_interval_seconds=_stuck_check,
     ):

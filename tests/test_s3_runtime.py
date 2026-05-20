@@ -132,10 +132,12 @@ def test_event_loop_has_all_spec_types() -> None:
         # 2026-05-20 NEW-32.
         "integration_test_failed",
         "worker_stuck_timeout",
+        # 2026-05-20 NEW-36 — auto-stage before hard-ceiling SIGKILL.
+        "worker_auto_stage_recovery",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 43
+    assert len(ALL_EVENT_TYPES) == 44
 
 
 @pytest.mark.asyncio

@@ -93,17 +93,34 @@ DEFAULT_SKILL_INVOCATION = (
     "exits, report only its exit code and the last 3 lines of stderr."
 )
 
-# Patch H (canonical port 2026-05-18): default 30 min, was 24h. Long-running
-# legitimate stories should set BMAD_WORKER_TIMEOUT_SEC explicitly; the default
-# now matches Odyssey's bmad-auto-dev-runner.sh upstream value (1800s) so
-# stuck workers are killed within one orchestrator round instead of stalling
-# the wave overnight. Reference: ~/.claude/skills/bmad-auto-dev/scripts/bmad-auto-dev-runner.sh
-# lines 91-127 (`# Patch H 2026-...`).
-def _worker_timeout_sec() -> int:
+# NEW-36: Architecture change — two-tier timeout system.
+#
+# PRIMARY liveness decision: stuck_watchdog (stuck_watchdog.py) — uses three
+# signals (JSONL event age, new commits, worktree dirty-file growth) to detect
+# real inactivity. Default 30 min without ANY of these signals → emits
+# WORKER_STUCK_TIMEOUT + HUMAN_QUERY, yields synthetic terminal event.
+#
+# SECONDARY (hard ceiling): _worker_hard_timeout_sec() — the brute-force
+# subprocess kill. Default raised from 30 min → 4 hours (14400 s) so a worker
+# genuinely writing 34+ files (pilot 2f story 8-1 pattern) can finish without
+# hitting SIGKILL. The stuck_watchdog handles the common "looks stuck but isn't"
+# case long before this fires.
+#
+# Before firing SIGKILL the hard ceiling performs a best-effort auto-stage
+# commit (git add -A && git commit) so work is not silently lost (NEW-36
+# recovery, mirrors Patch S from the bmad-auto-dev-runner canonical chain).
+# Emits WORKER_AUTO_STAGE_RECOVERY with the resulting SHA (or None on failure)
+# so audit consumers can distinguish "hard kill with preserved work" from a
+# silent loss. BMAD_WORKER_TIMEOUT_SEC still overrides the hard ceiling for
+# backwards compatibility.
+def _worker_hard_timeout_sec() -> int:
+    """Hard-ceiling subprocess timeout. Primary liveness = stuck_watchdog."""
     raw = os.environ.get("BMAD_WORKER_TIMEOUT_SEC", "")
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
-    return 1800
+    # NEW-36: raised from 1800 (30 min) to 14400 (4 h) — stuck_watchdog now
+    # handles the 30-min soft decision; this is only the last-resort kill.
+    return int(os.environ.get("BMAD_WORKER_HARD_TIMEOUT_SEC", "14400"))
 
 # FS1 B8: workers do NOT call LLMs (per spec §16.3 dev role isolation), so the
 # only env vars they need are the bare-minimum runtime ones. Everything else —
@@ -674,6 +691,59 @@ def _read_review_iteration(worktree: str, story_id: str) -> int:
     return max(1, count + 1)
 
 
+async def _auto_stage_worktree(worktree: str, story_id: str) -> str | None:
+    """NEW-36: best-effort ``git add -A && git commit`` before SIGKILL.
+
+    Returns the new commit SHA on success, or None on any failure.  Never
+    raises — auto-stage is opportunistic; the caller kills the process either
+    way.
+    """
+    wt = Path(worktree)
+    if not (wt / ".git").exists() and not (wt / ".git").is_file():
+        return None
+    git_bin = shutil.which("git") or "git"
+    try:
+        # Check if there is anything to stage.
+        status_proc = await asyncio.create_subprocess_exec(
+            git_bin, "-C", worktree, "status", "--porcelain",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(status_proc.communicate(), timeout=15)
+        dirty_lines = [ln for ln in stdout.decode(errors="replace").splitlines() if ln.strip()]
+        if not dirty_lines:
+            return None  # nothing to stage
+        # Stage all.
+        add_proc = await asyncio.create_subprocess_exec(
+            git_bin, "-C", worktree, "add", "-A",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(add_proc.wait(), timeout=30)
+        if add_proc.returncode != 0:
+            return None
+        # Commit.
+        commit_proc = await asyncio.create_subprocess_exec(
+            git_bin, "-C", worktree, "commit",
+            "-m", f"worker auto-stage before SIGKILL (NEW-36 recovery) [{story_id}]",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(commit_proc.wait(), timeout=30)
+        if commit_proc.returncode != 0:
+            return None
+        # Retrieve the new HEAD SHA.
+        rev_proc = await asyncio.create_subprocess_exec(
+            git_bin, "-C", worktree, "rev-parse", "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        sha_out, _ = await asyncio.wait_for(rev_proc.communicate(), timeout=10)
+        return sha_out.decode().strip() or None
+    except Exception:
+        return None
+
+
 async def _wait_and_finalize(
     process: asyncio.subprocess.Process,
     jsonl_path: Path,
@@ -685,10 +755,16 @@ async def _wait_and_finalize(
 ) -> None:
     """Wait for subprocess exit; append final worker_completed event.
 
-    FS3 H15: hard upper bound on the wait (configurable via BMAD_WORKER_TIMEOUT_SEC,
-    default 24h) so a deadlocked worker can't pin the background task forever.
-    On timeout: SIGKILL + emit subprocess_timeout audit + emit
-    worker_completed with status=failure.
+    NEW-36 architecture change: the primary liveness decision (stuck vs.
+    alive) moved to stuck_watchdog, which checks JSONL event age, new commits,
+    AND worktree dirty-file growth. The hard ceiling here (``_worker_hard_timeout_sec``,
+    default 4 h via BMAD_WORKER_HARD_TIMEOUT_SEC) is a last-resort kill for
+    runaway processes only.
+
+    Before SIGKILL fires, a best-effort auto-stage commit is attempted so
+    uncommitted work survives the kill (mirrors Patch S recovery in the
+    bmad-auto-dev-runner canonical chain). Emits WORKER_AUTO_STAGE_RECOVERY
+    before subprocess_timeout so audit consumers can reconstruct what was saved.
 
     Initiative #1 Task 1.4: if ``isolated_home_overlay`` was used, rm-rf the
     snapshot tmpdir after process exit (best-effort; never raises).
@@ -698,10 +774,23 @@ async def _wait_and_finalize(
     surfaced into the worker_completed event so the orchestrator's
     ``_gate_iteration_cap`` can trip on runaway review→fix loops.
     """
-    timeout = _worker_timeout_sec()
+    timeout = _worker_hard_timeout_sec()
     try:
         rc = await asyncio.wait_for(process.wait(), timeout=timeout)
     except TimeoutError:
+        # NEW-36: best-effort auto-stage before kill so work isn't lost.
+        auto_stage_sha = await _auto_stage_worktree(worktree, story_id)
+        # Count dirty files for the audit event (after stage, should be 0 on success).
+        _emit(
+            jsonl_path,
+            {
+                "event_type": "worker_auto_stage_recovery",
+                "worktree": worktree,
+                "story_id": story_id,
+                "auto_stage_sha": auto_stage_sha,
+                "hard_timeout_sec": timeout,
+            },
+        )
         process.kill()
         rc = await process.wait()
         _emit(

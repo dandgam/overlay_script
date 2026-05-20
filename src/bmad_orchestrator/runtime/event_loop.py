@@ -178,6 +178,15 @@ class EventType(StrEnum):
     WORKER_EXIT_UNCOMMITTED = "worker_exit_uncommitted"
     INTEGRATION_TEST_FAILED = "integration_test_failed"
     WORKER_STUCK_TIMEOUT = "worker_stuck_timeout"
+    # NEW-36 — emitted by ``runtime.worker_spawn._wait_and_finalize`` immediately
+    # before SIGKILL when the hard-ceiling timeout fires and the worktree has
+    # uncommitted changes. An ``git add -A && git commit`` auto-stage is attempted
+    # first so the work survives the kill. Payload: {story_id, worktree,
+    # auto_stage_sha (str|None — None if git commit failed), dirty_files (int),
+    # hard_timeout_sec (int)}. Distinct from ``subprocess_timeout`` which is
+    # emitted *after* the kill; this one fires *before* and only when dirty files
+    # are present.
+    WORKER_AUTO_STAGE_RECOVERY = "worker_auto_stage_recovery"
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
 

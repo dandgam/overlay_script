@@ -273,6 +273,175 @@ async def test_watchdog_resets_on_new_commits(tmp_path: Path) -> None:
     assert not any(e.type == EventType.WORKER_STUCK_TIMEOUT for e in queued)
 
 
+# ── NEW-36 — worktree dirty-count signal ────────────────────────────────────
+
+
+def test_evaluate_stuck_worktree_growing_not_stuck(tmp_path: Path) -> None:
+    """NEW-36: dirty count growing → reason='worktree_growing', not stuck."""
+    p = tmp_path / "events.jsonl"
+    # Stale events (frozen JSONL, no commits), but dirty files increased.
+    stale = (datetime.now(UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
+    p.write_text(f'{{"event_type":"x","ts":"{stale}"}}\n', encoding="utf-8")
+    r = evaluate_stuck(
+        jsonl_path=p,
+        start_time=datetime.now(UTC) - timedelta(hours=2),
+        now=datetime.now(UTC),
+        last_commit_count=0,
+        current_commit_count=0,
+        last_dirty_count=10,
+        current_dirty_count=34,  # 24 new files — worker is writing
+        stuck_threshold_seconds=600,
+    )
+    assert r.stuck is False
+    assert r.reason == "worktree_growing"
+    assert r.dirty_count == 34
+
+
+def test_evaluate_stuck_worktree_unchanged_still_stuck(tmp_path: Path) -> None:
+    """NEW-36: stale events + no new commits + dirty count unchanged → stuck."""
+    p = tmp_path / "events.jsonl"
+    stale = (datetime.now(UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
+    p.write_text(f'{{"event_type":"x","ts":"{stale}"}}\n', encoding="utf-8")
+    r = evaluate_stuck(
+        jsonl_path=p,
+        start_time=datetime.now(UTC) - timedelta(hours=2),
+        now=datetime.now(UTC),
+        last_commit_count=5,
+        current_commit_count=5,
+        last_dirty_count=10,
+        current_dirty_count=10,  # unchanged — nothing happening
+        stuck_threshold_seconds=600,
+    )
+    assert r.stuck is True
+    assert r.reason == "events_stale"
+
+
+def test_evaluate_stuck_dirty_defaults_backwards_compat(tmp_path: Path) -> None:
+    """NEW-36: omitting dirty params defaults to 0/0 — old callers still work."""
+    p = tmp_path / "events.jsonl"
+    stale = (datetime.now(UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
+    p.write_text(f'{{"event_type":"x","ts":"{stale}"}}\n', encoding="utf-8")
+    # Call without dirty params — should not raise, should still detect stuck.
+    r = evaluate_stuck(
+        jsonl_path=p,
+        start_time=datetime.now(UTC) - timedelta(hours=2),
+        now=datetime.now(UTC),
+        last_commit_count=0,
+        current_commit_count=0,
+        stuck_threshold_seconds=600,
+    )
+    assert r.stuck is True
+    assert r.dirty_count == 0
+
+
+@pytest.mark.asyncio
+async def test_watchdog_dirty_grows_events_frozen_not_stuck(tmp_path: Path) -> None:
+    """NEW-36: frozen JSONL + growing dirty count → watchdog does not trip."""
+    bus = EventLoop()
+
+    jsonl = tmp_path / "events.jsonl"  # never created
+    fake_now = [datetime.now(UTC)]
+    dirty_files = [5]  # starts at 5, keeps growing
+
+    def now_factory() -> datetime:
+        return fake_now[0]
+
+    async def zero_commits() -> int:
+        return 0
+
+    async def growing_dirty() -> int:
+        dirty_files[0] += 3
+        return dirty_files[0]
+
+    def inner_factory(_path: Path) -> AsyncIterator[dict[str, Any]]:
+        return _fake_inner_no_events(_path)
+
+    async def consume() -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        async for ev in tail_with_stuck_watchdog(
+            jsonl,
+            bus,
+            story_id="s-8-1",
+            worktree="/tmp/wt-8-1",
+            commit_counter=zero_commits,
+            dirty_counter=growing_dirty,
+            stuck_threshold_seconds=10,
+            check_interval_seconds=0.1,
+            now_factory=now_factory,
+            inner_factory=inner_factory,
+        ):
+            out.append(ev)
+        return out
+
+    task = asyncio.create_task(consume())
+    # Let watchdog tick several times; dirty grows, no trip.
+    for _ in range(5):
+        await asyncio.sleep(0.12)
+        fake_now[0] += timedelta(seconds=20)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    queued: list[Any] = []
+    while not bus.queue.empty():
+        queued.append(bus.queue.get_nowait())
+    assert not any(e.type == EventType.WORKER_STUCK_TIMEOUT for e in queued)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_trips_when_dirty_and_events_both_frozen(tmp_path: Path) -> None:
+    """NEW-36: frozen JSONL + frozen dirty count + no commits → watchdog trips."""
+    bus = EventLoop()
+
+    jsonl = tmp_path / "events.jsonl"  # never created
+    fake_now = [datetime.now(UTC)]
+
+    def now_factory() -> datetime:
+        return fake_now[0]
+
+    async def zero_commits() -> int:
+        return 0
+
+    async def frozen_dirty() -> int:
+        return 7  # constant — worker wrote 7 files and stopped
+
+    def inner_factory(_path: Path) -> AsyncIterator[dict[str, Any]]:
+        return _fake_inner_no_events(_path)
+
+    yielded: list[dict[str, Any]] = []
+
+    async def consume() -> None:
+        async for ev in tail_with_stuck_watchdog(
+            jsonl,
+            bus,
+            story_id="s-frozen",
+            worktree="/tmp/wt-frozen",
+            commit_counter=zero_commits,
+            dirty_counter=frozen_dirty,
+            stuck_threshold_seconds=10,
+            check_interval_seconds=0.1,
+            now_factory=now_factory,
+            inner_factory=inner_factory,
+        ):
+            yielded.append(ev)
+
+    task = asyncio.create_task(consume())
+    # One tick at start_time (warmup, not stuck yet); then advance past threshold.
+    await asyncio.sleep(0.15)
+    fake_now[0] = datetime.now(UTC) + timedelta(seconds=20)
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert len(yielded) == 1
+    assert yielded[0]["event_type"] == "worker_completed"
+    assert yielded[0]["status"] == "stuck_timeout"
+    queued_types: set[EventType] = set()
+    while not bus.queue.empty():
+        queued_types.add(bus.queue.get_nowait().type)
+    assert EventType.WORKER_STUCK_TIMEOUT in queued_types
+
+
 # ── NEW-33.4 — wave-env propagation ────────────────────────────────────────
 
 
