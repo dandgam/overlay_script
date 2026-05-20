@@ -203,6 +203,18 @@ class EventType(StrEnum):
     # Payload: {story_id, reason, iteration (int), dev_prompt_hint (str|None),
     #           cancelled_worker_id (str|None)}.
     WORKER_RESPAWN_REQUESTED = "worker_respawn_requested"
+    # NEW-41 — emitted by ``agent.run._tail_and_emit_completion`` when a
+    # worker exits status=success, exit_code=0 with new commits BUT its
+    # internal Stage 6 reviewer left a ``halt-reason.txt`` with
+    # ``reason=review-NEEDS-FIX`` after >= 2 review iterations.  The internal
+    # halt is cleared so the external Opus merge-gate can review the code on
+    # its merits (pilot 2j: 3 stories stuck in this state — 3-2-zfs, 3-1,
+    # 2-2).  If the external reviewer also rejects, ``code_review_subscriber``
+    # writes ``external-reviewer-confirmed.txt`` and escalates via HUMAN_QUERY
+    # so the operator sees that both reviewers agree the story needs work.
+    # Payload: {story_id, worktree, internal_review_iteration (int),
+    #           internal_findings_count (int), halt_reason_path (str)}.
+    INTERNAL_REVIEW_OVERRIDDEN_BY_EXTERNAL = "internal_review_overridden_by_external"
 
 ALL_EVENT_TYPES: tuple[EventType, ...] = tuple(EventType)
 

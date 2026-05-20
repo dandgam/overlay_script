@@ -14,6 +14,9 @@ defaults:
   max_actions_per_minute: 10        # global rate limit (Q3 — global, not per-type)
   max_consecutive_escalations: 3    # after 3 in a row → abort pipeline (signal noise)
   fail_safe_on_judge_error: true    # LLM timeout/error → escalate human (Q5)
+  # NEW-42: drain pending WORKER_COMPLETED(success) events before aborting so
+  # stories that already finished dev can still reach integration.
+  abort_pipeline_drain_pending: true
 
 judge:
   model: claude-sonnet-4-6

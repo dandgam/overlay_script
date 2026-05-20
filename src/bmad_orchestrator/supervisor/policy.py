@@ -124,6 +124,13 @@ class Defaults(BaseModel):
     max_actions_per_minute: int = Field(default=10, ge=1)
     max_consecutive_escalations: int = Field(default=3, ge=1)
     fail_safe_on_judge_error: bool = True
+    # NEW-42 — when True (default), the abort_pipeline action handler drains
+    # any pending WORKER_COMPLETED(status=success) events from the bus before
+    # emitting the HUMAN_QUERY(abort) signal.  This gives stories that already
+    # finished dev (but whose merge_gate hasn't run yet) a chance to reach
+    # integration before the orchestrator shuts down.  Set to False to restore
+    # the old instant-abort behaviour.
+    abort_pipeline_drain_pending: bool = True
 
 
 class SupervisorPolicy(BaseModel):

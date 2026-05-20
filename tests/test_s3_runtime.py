@@ -138,10 +138,12 @@ def test_event_loop_has_all_spec_types() -> None:
         "review_stuck_timeout",
         # 2026-05-20 NEW-38 — supervisor respawn signal to orchestrator main loop.
         "worker_respawn_requested",
+        # 2026-05-20 NEW-41 — internal Stage-6 halt overridden by external Opus reviewer.
+        "internal_review_overridden_by_external",
     }
     actual = {e.value for e in ALL_EVENT_TYPES}
     assert actual == expected, f"missing: {expected - actual}, extra: {actual - expected}"
-    assert len(ALL_EVENT_TYPES) == 46
+    assert len(ALL_EVENT_TYPES) == 47
 
 
 @pytest.mark.asyncio

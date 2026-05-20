@@ -26,6 +26,44 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger("supervisor.actions")
 
+async def _drain_pending_success_completions(bus: EventLoop) -> int:
+    """NEW-42 — drain pending WORKER_COMPLETED(status=success) events from the
+    bus queue before the orchestrator aborts, giving already-finished stories a
+    chance to reach the merge gate and integration branch.
+
+    Only drains events that are *already in the queue* at abort time (idle
+    poll timeout = 0.05 s — same as ``EventLoop.drain``).  Does NOT wait for
+    new events to arrive.  Stops when the queue is empty or a non-success
+    WORKER_COMPLETED event is at the head (those are re-queued for normal
+    dispatch).  Returns the count of drained events.
+    """
+    from bmad_orchestrator.runtime.event_loop import EventType
+
+    # idle_timeout matches EventLoop.drain default — short enough that the
+    # function returns promptly when the queue is empty.
+    _idle_timeout = 0.05
+    drained = 0
+    while True:
+        event = await bus.dispatch_one(timeout=_idle_timeout)
+        if event is None:
+            break
+        drained += 1
+        payload = event.payload or {}
+        if (
+            event.type == EventType.WORKER_COMPLETED
+            and payload.get("status") == "success"
+        ):
+            log.info(
+                "abort_drain_worker_completed",
+                story_id=payload.get("story_id"),
+                drained_count=drained,
+            )
+        else:
+            # Non-target event — re-queue it and stop draining.
+            await bus.emit(event)
+            break
+    return drained
+
 
 async def execute_decision(
     decision: SupervisorDecision,
@@ -33,6 +71,7 @@ async def execute_decision(
     source_event_type: str,
     source_payload: dict[str, Any],
     bus: EventLoop,
+    drain_pending: bool = True,
 ) -> None:
     """Translate a Supervisor decision into bus events.
 
@@ -94,6 +133,19 @@ async def execute_decision(
         return
 
     if decision.action == "abort_pipeline":
+        # NEW-42 — drain pending WORKER_COMPLETED(success) events before
+        # emitting the abort HUMAN_QUERY.  Stories that already finished dev
+        # but whose merge_gate hasn't run yet get a last chance to reach the
+        # integration branch.  Controlled by ``drain_pending`` (default True,
+        # mapped from policy ``defaults.abort_pipeline_drain_pending``).
+        if drain_pending:
+            drained = await _drain_pending_success_completions(bus)
+            if drained:
+                log.info(
+                    "abort_drain_completed",
+                    drained_events=drained,
+                    reason=decision.reason,
+                )
         # Abort is a strong signal — emit on bus, let stop_orchestrator wire
         # handle the actual halt path.
         await bus.emit(

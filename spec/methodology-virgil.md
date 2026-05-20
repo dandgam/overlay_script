@@ -769,6 +769,42 @@ fallback), но merge упал на новом баге.
     + расширенный extension guide с примерами обеих.
   - +20 тестов (`test_supervisor_claude_p_judge.py` + 3 wiring в subscriber). Tests 2231→2251.
 
+- ✅ **NEW-41 (P1) · Тип: 🐛 Баг — internal-halt stories застревают без шанса на external review** —
+  CLOSED `<hash>`, pilot 2j analytics. 3 истории (3-2-zfs, 3-1, 2-2) сделали dev + autofix, но
+  internal Stage-6 Sonnet reviewer дважды выдал NEEDS-FIX → worker exit `status=success exit_code=0
+  review_iteration=2` + `halt-reason.txt` в `_bmad/auto-dev-state/`. Оркестратор считал это success
+  и продолжал, но следующий spawn блокировался на `WORKER_HALT_PRESPAWN` из-за стоящего файла.
+
+  **A.** В `_tail_and_emit_completion` (`agent/run.py`): детект паттерна `exit_code==0,
+  status=success, review_iteration>=2, new_commits_count>0, halt-reason.txt=reason=review-NEEDS-FIX`
+  → `halt_path.unlink()` + emit `INTERNAL_REVIEW_OVERRIDDEN_BY_EXTERNAL` (EventType #47)
+  + `WORKER_COMPLETED` с `internal_halt_overridden=True`.
+
+  **B.** `INTERNAL_REVIEW_OVERRIDDEN_BY_EXTERNAL` payload: `{story_id, worktree,
+  internal_review_iteration, internal_findings_count, halt_reason_path}` — audit trail.
+
+  **C.** В `code_review_subscriber`: если `internal_halt_overridden=True` И external Opus verdict ≠
+  approve → записать `external-reviewer-confirmed.txt` + emit `HUMAN_QUERY(both_reviewers_rejected)`
+  — оператор видит что обе стороны отклонили.
+
+  +11 тестов (`test_new41_new42.py`). EventType #47. Tests 2272→2283.
+
+- ✅ **NEW-42 (P2) · Тип: 🏗 Архитектура — circuit-breaker abort убивает pipeline до того как finished stories дошли до merge** —
+  CLOSED `<hash>`, pilot 2j analytics. Circuit-breaker (4 эскалации от silent_failure 1.4 +
+  stuck_watchdog 6-1) abort_pipeline'нул ПРЕЖДЕ чем bus drain дошёл до `WORKER_COMPLETED` для
+  2-2/3-1/3-2-zfs — commits есть в feature/* ветках, но никогда не попали в integration.
+
+  **Fix:** `execute_decision(abort_pipeline)` (`supervisor/actions.py`) перед emit HUMAN_QUERY
+  выполняет `_drain_pending_success_completions(bus)` — вытягивает уже-стоящие в очереди
+  `WORKER_COMPLETED(status=success)` события через `dispatch_one(timeout=0.05)`, давая им шанс
+  пройти через merge_gate. Non-WORKER_COMPLETED события re-queue'ятся и drain останавливается.
+
+  **Policy flag:** `defaults.abort_pipeline_drain_pending: true` (default) в `supervisor-policy.yaml`
+  и `Defaults` Pydantic schema. `False` = старое поведение (instant abort). Передаётся через
+  `make_supervisor_subscriber → execute_decision(drain_pending=...)`.
+
+  +6 тестов в `test_new41_new42.py`. Tests 2272→2283.
+
 ---
 
 ## 6. References
@@ -791,6 +827,6 @@ fallback), но merge упал на новом баге.
 
 ---
 
-**Last updated:** 2026-05-19 (v13.13 — pilot run #6 (Antares 1.5 после v6 merge `55825cb`): NEW-14/15/16/19 validated вживую; 1.5 НЕ смержена — security_review verdict=error без fallback; new backlog NEW-20/21/22, NEW-21 корневой (review runner не пишет jsonl) → next initiative pilot_findings_closure_v7; v13.12 — pilot run #5 (Antares 1a replay after v5 merge `dbeb936`): NEW-11 validated, но NEW-12 РЕГРЕССИРОВАЛ; результат `succeeded=1 failed=1`, фактически 0 stories merged; new backlog NEW-14..19 (4×P1, +NEW-19 replay-from-worktree режим), spec `spec_pilot_findings_closure_v6.md` v1.0 READY → next initiative pilot_findings_closure_v6; v13.11 — NEW-11/12/13 closed in integration/pilot_findings_closure_v5 (S1..S2): ruff graceful-skip + pre-commit no-config env flag + security_review error→retry/escalate-story (not abort); EventType #37 SECURITY_REVIEW_ERROR; tests 2061→2078, mypy/ruff clean; v13.10 — pilot run #4 findings: FIRST integration merge success (`integration/1a`, story 1.3), NEW-7 validated, new backlog NEW-11/12/13; v4 merged `48febc0`; v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
+**Last updated:** 2026-05-20 (v13.14 — NEW-41/42 closed (pilot 2j analytics); v13.13 — pilot run #6 (Antares 1.5 после v6 merge `55825cb`): NEW-14/15/16/19 validated вживую; 1.5 НЕ смержена — security_review verdict=error без fallback; new backlog NEW-20/21/22, NEW-21 корневой (review runner не пишет jsonl) → next initiative pilot_findings_closure_v7; v13.12 — pilot run #5 (Antares 1a replay after v5 merge `dbeb936`): NEW-11 validated, но NEW-12 РЕГРЕССИРОВАЛ; результат `succeeded=1 failed=1`, фактически 0 stories merged; new backlog NEW-14..19 (4×P1, +NEW-19 replay-from-worktree режим), spec `spec_pilot_findings_closure_v6.md` v1.0 READY → next initiative pilot_findings_closure_v6; v13.11 — NEW-11/12/13 closed in integration/pilot_findings_closure_v5 (S1..S2): ruff graceful-skip + pre-commit no-config env flag + security_review error→retry/escalate-story (not abort); EventType #37 SECURITY_REVIEW_ERROR; tests 2061→2078, mypy/ruff clean; v13.10 — pilot run #4 findings: FIRST integration merge success (`integration/1a`, story 1.3), NEW-7 validated, new backlog NEW-11/12/13; v4 merged `48febc0`; v13.9 — NEW-9/NEW-10/NEW-5-recheck closed in integration/pilot_findings_closure_v4 (S1..S2), tests 2038→2061, mypy/ruff clean; v13.8 — NEW-1-completion/NEW-3-completion/NEW-5/NEW-6/NEW-7/NEW-8 closed in integration/pilot_findings_closure_v3 (S1..S4), EventType #36 INTEGRATION_MERGE_SKIPPED, tests 2009→2038; v13.7 — +validation replay findings NEW-1-completion/NEW-3-completion/NEW-5..8 в §5 backlog; v13.6 — pilot findings NEW-1..NEW-4 closed in integration/pilot_findings_closure_v2; v13.5 — Phase 3 ✅ DONE, pilot findings P1/P2/P3 + R1/R2 closed in integration/pilot_findings_closure)
 **Status:** v13.10 — **Phase 4 (Deploy) in progress.** `pilot_findings_closure_v4` merged в main `48febc0` (S1..S2: NEW-9 verdict source-of-truth + NEW-10 observability + NEW-5 recheck, tests 2038→2061, mypy/ruff clean). **FIRST end-to-end production success** — pilot run #4 (Antares 1a, `BMAD_AUTO_SPLIT=1`) создал ветку `integration/1a`, story 1.3 смержена автономно через verdict→reconcile→merge (NEW-7 pipeline VALIDATED). `spawned=3 succeeded=2 failed=1`. Stories 1.4/1.5 не дошли до integration — new backlog **NEW-11/12/13** (P2, fixable: ruff halt · pre-commit config missing · security_review error→circuit breaker) → next initiative `pilot_findings_closure_v5`.
 **Owner:** user + Claude orchestrator

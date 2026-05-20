@@ -171,6 +171,7 @@ from bmad_orchestrator.runtime.worker_silent_failure import (
     parse_inner_exit_code,
 )
 from bmad_orchestrator.runtime.worker_spawn import (
+    HALT_REASON_RELPATH,
     WorkerHaltPrespawnError,
     WorkerHandle,
     tail_jsonl_events,
@@ -2713,6 +2714,60 @@ async def _tail_and_emit_completion(
                         "status resolved by " + status_decided_by
                     ),
                 )
+            # NEW-41 — detect internal-halt-but-external-review-needed pattern.
+            # When the worker exited success with commits but the internal Stage
+            # 6 reviewer left ``halt-reason.txt`` containing
+            # ``reason=review-NEEDS-FIX`` after >= 2 iterations, clear the halt
+            # file and flag the WORKER_COMPLETED so the external Opus merge-gate
+            # can review the code on its own merits. Without clearing the file
+            # the next spawn pre-flight would block on WORKER_HALT_PRESPAWN.
+            review_iter_final = int(ev.get("review_iteration", 1) or 1)
+            internal_halt_overridden = False
+            if (
+                status == "success"
+                and exit_code == 0
+                and new_commits_count > 0
+                and review_iter_final >= 2
+                and handle.worktree
+            ):
+                halt_path = Path(handle.worktree) / HALT_REASON_RELPATH
+                if halt_path.exists():
+                    halt_text = halt_path.read_text(encoding="utf-8", errors="replace")
+                    if "reason=review-NEEDS-FIX" in halt_text:
+                        # Count findings lines for audit payload (non-empty lines
+                        # other than the reason= line itself).
+                        findings_count = sum(
+                            1
+                            for ln in halt_text.splitlines()
+                            if ln.strip() and not ln.strip().startswith("reason=")
+                        )
+                        try:
+                            halt_path.unlink()
+                            internal_halt_overridden = True
+                        except OSError as exc:
+                            log.warning(
+                                "internal_halt_clear_failed",
+                                story_id=handle.story_id,
+                                halt_path=str(halt_path),
+                                error=str(exc),
+                            )
+                        if internal_halt_overridden:
+                            log.info(
+                                "internal_review_overridden_by_external",
+                                story_id=handle.story_id,
+                                worktree=handle.worktree,
+                                internal_review_iteration=review_iter_final,
+                                internal_findings_count=findings_count,
+                            )
+                            await bus.emit(
+                                EventType.INTERNAL_REVIEW_OVERRIDDEN_BY_EXTERNAL,
+                                story_id=handle.story_id,
+                                worktree=handle.worktree,
+                                internal_review_iteration=review_iter_final,
+                                internal_findings_count=findings_count,
+                                halt_reason_path=str(halt_path),
+                            )
+                            completion_extra["internal_halt_overridden"] = True
             await bus.emit(
                 EventType.WORKER_COMPLETED,
                 story_id=handle.story_id,
@@ -2721,7 +2776,7 @@ async def _tail_and_emit_completion(
                 exit_code=exit_code,
                 status=status,
                 mock=False,
-                review_iteration=int(ev.get("review_iteration", 1) or 1),
+                review_iteration=review_iter_final,
                 **completion_extra,
             )
             return "completed" if status == "success" else "failed"
@@ -4625,12 +4680,67 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
             review_iteration=review_iteration,
         )
 
+    # ── NEW-41 Case C — both reviewers reject: create audit marker + escalate.
+    # When the internal Stage 6 reviewer was overridden (``internal_halt_overridden``
+    # in the WORKER_COMPLETED payload) AND the external Opus reviewer *also* rejects,
+    # that's a strong signal the story genuinely needs more work.  Write
+    # ``external-reviewer-confirmed.txt`` so the next spawn pre-flight knows why
+    # this story is halted, then escalate to human so the operator sees both
+    # reviewers agree.
+    internal_halt_overridden = bool(payload.get("internal_halt_overridden"))
+    if internal_halt_overridden and verdict not in ("approve",):
+        confirmed_path = (
+            Path(worktree)
+            / "_bmad"
+            / "auto-dev-state"
+            / "external-reviewer-confirmed.txt"
+        )
+        try:
+            confirmed_path.parent.mkdir(parents=True, exist_ok=True)
+            confirmed_path.write_text(
+                f"reason=external-reviewer-confirmed\n"
+                f"story_id={story_id}\n"
+                f"verdict={verdict}\n"
+                f"review_iteration={review_iteration}\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            log.warning(
+                "external_reviewer_confirmed_write_failed",
+                story_id=story_id,
+                error=str(exc),
+            )
+        log.warning(
+            "both_reviewers_rejected",
+            story_id=story_id,
+            verdict=verdict,
+            review_iteration=review_iteration,
+            worktree=worktree,
+            note="internal Stage-6 + external Opus both rejected — escalating human",
+        )
+        await bus.emit(
+            EventType.HUMAN_QUERY,
+            chat_id=cfg.escalation_chat_id if cfg is not None else None,
+            story_id=story_id,
+            worktree=worktree,
+            verdict="both_reviewers_rejected",
+            review_verdict=verdict,
+            text=(
+                f"Story {story_id}: оба reviewer'а отклонили — internal Stage-6 "
+                f"(iteration {review_iteration}) и external Opus merge-gate.\n\n"
+                f"Verdict: {verdict}\nSummary: {summary}\n\n"
+                f"Worktree: {worktree}\n"
+                f"Audit marker: {confirmed_path}"
+            ),
+            actions=["manual_fix", "abandon"],
+        )
     log.info(
         "code_review_dispatched",
         story_id=story_id,
         verdict=verdict,
         worktree=worktree,
         review_jsonl=handle_jsonl_str,
+        internal_halt_overridden=internal_halt_overridden,
     )
     emit_payload: dict[str, Any] = {
         "story_id": story_id,
@@ -4643,6 +4753,8 @@ async def code_review_subscriber(event: Event, bus: EventLoop) -> None:
     }
     if gate_reasons:
         emit_payload["gate_reasons"] = gate_reasons
+    if internal_halt_overridden:
+        emit_payload["internal_halt_overridden"] = True
     await bus.emit(EventType.CODE_REVIEW_VERDICT, **emit_payload)
 
     # ── E6 — L2 live tuning. Feed metrics into BudgetGuard's rolling windows

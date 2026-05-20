@@ -121,6 +121,9 @@ def make_supervisor_subscriber(
                 source_event_type=event.type.value.upper(),
                 source_payload=payload,
                 bus=bus,
+                # NEW-42 — drain pending WORKER_COMPLETED events before
+                # abort_pipeline so finished stories still reach integration.
+                drain_pending=engine.policy.defaults.abort_pipeline_drain_pending,
             )
         except Exception as exc:
             log.exception("supervisor_execute_failed", error=str(exc))

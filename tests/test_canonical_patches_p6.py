@@ -436,8 +436,9 @@ def test_event_type_inventory_count_is_twenty_three() -> None:
     # 2026-05-20 NEW-36 adds WORKER_AUTO_STAGE_RECOVERY → 43 + 1 = 44.
     # NEW-37 adds REVIEW_STUCK_TIMEOUT → 44 + 1 = 45.
     # NEW-38 adds WORKER_RESPAWN_REQUESTED → 45 + 1 = 46.
-    assert len(ALL_EVENT_TYPES) == 46, (
-        f"Expected 46 EventType members; got {len(ALL_EVENT_TYPES)}: "
+    # NEW-41 adds INTERNAL_REVIEW_OVERRIDDEN_BY_EXTERNAL → 46 + 1 = 47.
+    assert len(ALL_EVENT_TYPES) == 47, (
+        f"Expected 47 EventType members; got {len(ALL_EVENT_TYPES)}: "
         f"{[e.name for e in ALL_EVENT_TYPES]}"
     )
 
