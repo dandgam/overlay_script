@@ -261,3 +261,92 @@ def test_load_engine_judge_factory_no_api_key_falls_back_to_stub():
         engine = load_supervisor_engine(judge_factory=_factory)
 
     assert isinstance(engine.judge, StubJudge)
+
+
+# ── M4-followup: ClaudePJudge factory tests ────────────────────────────────────
+
+
+def test_load_engine_factory_claude_p_mode():
+    """mode=claude-p → ClaudePJudge (subscription path)."""
+    import os
+
+    from bmad_orchestrator.supervisor.judges.claude_p_judge import ClaudePJudge
+
+    def _factory() -> object:
+        mode = os.environ.get("BMAD_SUPERVISOR_LLM", "").strip().lower()
+        if mode in {"claude-p", "claude_p", "subscription", "cli"}:
+            return ClaudePJudge(system_prompt="You are a supervisor.")
+        from bmad_orchestrator.supervisor.llm_judge import StubJudge
+        return StubJudge()
+
+    with patch.dict(os.environ, {"BMAD_SUPERVISOR_LLM": "claude-p"}):
+        engine = load_supervisor_engine(judge_factory=_factory)
+
+    assert isinstance(engine.judge, ClaudePJudge)
+
+
+def test_load_engine_factory_auto_picks_claude_p_when_cli_exists():
+    """mode=1 + CLI exists → ClaudePJudge (auto-pick subscription)."""
+    import os
+    from pathlib import Path
+
+    from bmad_orchestrator.supervisor.judges.claude_p_judge import ClaudePJudge
+
+    def _factory() -> object:
+        mode = os.environ.get("BMAD_SUPERVISOR_LLM", "").strip().lower()
+        _cli = "/home/server/.local/bin/claude"
+        if mode in {"1", "true"}:
+            if Path(_cli).exists():
+                return ClaudePJudge(system_prompt="You are a supervisor.")
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if api_key:
+                import anthropic
+
+                from bmad_orchestrator.supervisor.judges.anthropic_judge import AnthropicJudge
+                return AnthropicJudge(
+                    client=anthropic.AsyncAnthropic(api_key=api_key),
+                    model="claude-sonnet-4-6",
+                    system_prompt="You are a supervisor.",
+                )
+        from bmad_orchestrator.supervisor.llm_judge import StubJudge
+        return StubJudge()
+
+    with patch.dict(os.environ, {"BMAD_SUPERVISOR_LLM": "1", "ANTHROPIC_API_KEY": ""}):
+        with patch("pathlib.Path.exists", return_value=True):
+            engine = load_supervisor_engine(judge_factory=_factory)
+
+    assert isinstance(engine.judge, ClaudePJudge)
+
+
+def test_load_engine_factory_auto_picks_anthropic_if_no_cli():
+    """mode=1 + no CLI + API key → AnthropicJudge."""
+    import os
+    from pathlib import Path
+
+    import anthropic
+
+    from bmad_orchestrator.supervisor.judges.anthropic_judge import AnthropicJudge
+
+    def _factory() -> object:
+        mode = os.environ.get("BMAD_SUPERVISOR_LLM", "").strip().lower()
+        _cli = "/home/server/.local/bin/claude"
+        if mode in {"1", "true"}:
+            if Path(_cli).exists():
+                from bmad_orchestrator.supervisor.judges.claude_p_judge import ClaudePJudge
+                return ClaudePJudge(system_prompt="You are a supervisor.")
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if api_key:
+                return AnthropicJudge(
+                    client=anthropic.AsyncAnthropic(api_key=api_key),
+                    model="claude-sonnet-4-6",
+                    system_prompt="You are a supervisor.",
+                )
+        from bmad_orchestrator.supervisor.llm_judge import StubJudge
+        return StubJudge()
+
+    env = {"BMAD_SUPERVISOR_LLM": "1", "ANTHROPIC_API_KEY": "fake-key"}
+    with patch.dict(os.environ, env):
+        with patch("pathlib.Path.exists", return_value=False):
+            engine = load_supervisor_engine(judge_factory=_factory)
+
+    assert isinstance(engine.judge, AnthropicJudge)

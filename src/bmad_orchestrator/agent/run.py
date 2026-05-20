@@ -1085,34 +1085,66 @@ def _wire_pipeline_subscribers(
     supervisor_policy_path = getattr(settings, "supervisor_policy_path", None)
 
     def _supervisor_judge_factory() -> Any:
+        from pathlib import Path as _Path
+
         from bmad_orchestrator.supervisor.llm_judge import StubJudge
 
         mode = os.environ.get("BMAD_SUPERVISOR_LLM", "").strip().lower()
-        if mode in {"1", "true", "anthropic", "sonnet"}:
-            # M4 — real AnthropicJudge path.
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-            if not api_key:
-                log.warning(
-                    "supervisor_llm_anthropic_no_api_key",
-                    hint="ANTHROPIC_API_KEY not set — falling back to StubJudge",
-                )
-                return StubJudge()
-            # Load policy params for judge config (model, timeout, system_prompt).
-            from bmad_orchestrator.runtime.supervisor_subscriber import (
-                DEFAULT_POLICY_PATH,
-            )
-            from bmad_orchestrator.supervisor.judges.anthropic_judge import (
-                AnthropicJudge,
-            )
-            from bmad_orchestrator.supervisor.policy import PolicyNotFoundError, load_policy
 
+        # Helper: load policy judge config (model, timeout, system_prompt).
+        def _load_jcfg() -> Any:
+            from bmad_orchestrator.runtime.supervisor_subscriber import DEFAULT_POLICY_PATH
+            from bmad_orchestrator.supervisor.policy import JudgeConfig, PolicyNotFoundError, load_policy
             _policy_path = supervisor_policy_path or DEFAULT_POLICY_PATH
             try:
-                _pol = load_policy(_policy_path)
-                _jcfg = _pol.judge
+                return load_policy(_policy_path).judge
             except PolicyNotFoundError:
-                from bmad_orchestrator.supervisor.policy import JudgeConfig
-                _jcfg = JudgeConfig()
+                return JudgeConfig()
+
+        _claude_bin = "/home/server/.local/bin/claude"
+        _cli_available = _Path(_claude_bin).exists()
+
+        # Subscription path — primary production mode (no ANTHROPIC_API_KEY needed).
+        if mode in {"claude-p", "claude_p", "subscription", "cli"}:
+            from bmad_orchestrator.supervisor.judges.claude_p_judge import ClaudePJudge
+            _jcfg = _load_jcfg()
+            log.info(
+                "supervisor_llm_claude_p_judge_active",
+                model=_jcfg.model,
+                timeout_seconds=_jcfg.timeout_seconds,
+            )
+            return ClaudePJudge(
+                claude_bin=_claude_bin,
+                model=_jcfg.model,
+                system_prompt=_jcfg.system_prompt,
+                timeout_seconds=_jcfg.timeout_seconds,
+            )
+
+        # SDK path — requires ANTHROPIC_API_KEY.
+        if mode in {"anthropic", "sonnet"}:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if not api_key:
+                if _cli_available:
+                    # Auto-fallback to ClaudePJudge when CLI is present.
+                    from bmad_orchestrator.supervisor.judges.claude_p_judge import ClaudePJudge
+                    _jcfg = _load_jcfg()
+                    log.info(
+                        "supervisor_llm_anthropic_no_key_fallback_to_claude_p",
+                        model=_jcfg.model,
+                    )
+                    return ClaudePJudge(
+                        claude_bin=_claude_bin,
+                        model=_jcfg.model,
+                        system_prompt=_jcfg.system_prompt,
+                        timeout_seconds=_jcfg.timeout_seconds,
+                    )
+                log.warning(
+                    "supervisor_llm_no_path_fallback_stub",
+                    hint="ANTHROPIC_API_KEY not set and claude CLI not found",
+                )
+                return StubJudge()
+            from bmad_orchestrator.supervisor.judges.anthropic_judge import AnthropicJudge
+            _jcfg = _load_jcfg()
             log.info(
                 "supervisor_llm_anthropic_judge_active",
                 model=_jcfg.model,
@@ -1123,6 +1155,39 @@ def _wire_pipeline_subscribers(
                 system_prompt=_jcfg.system_prompt,
                 timeout_seconds=_jcfg.timeout_seconds,
             )
+
+        # Generic "1"/"true" — auto-pick: ClaudePJudge if CLI available,
+        # else AnthropicJudge if API key set, else StubJudge.
+        if mode in {"1", "true"}:
+            if _cli_available:
+                from bmad_orchestrator.supervisor.judges.claude_p_judge import ClaudePJudge
+                _jcfg = _load_jcfg()
+                log.info(
+                    "supervisor_llm_auto_claude_p_judge",
+                    model=_jcfg.model,
+                )
+                return ClaudePJudge(
+                    claude_bin=_claude_bin,
+                    model=_jcfg.model,
+                    system_prompt=_jcfg.system_prompt,
+                    timeout_seconds=_jcfg.timeout_seconds,
+                )
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if api_key:
+                from bmad_orchestrator.supervisor.judges.anthropic_judge import AnthropicJudge
+                _jcfg = _load_jcfg()
+                log.info("supervisor_llm_auto_anthropic_judge", model=_jcfg.model)
+                return AnthropicJudge(
+                    model=_jcfg.model,
+                    system_prompt=_jcfg.system_prompt,
+                    timeout_seconds=_jcfg.timeout_seconds,
+                )
+            log.warning(
+                "supervisor_llm_auto_no_path_fallback_stub",
+                hint="Neither claude CLI nor ANTHROPIC_API_KEY found",
+            )
+            return StubJudge()
+
         return StubJudge()
 
     supervisor_engine = _load_supervisor_engine(

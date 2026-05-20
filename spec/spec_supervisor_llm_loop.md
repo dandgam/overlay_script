@@ -319,7 +319,30 @@ llm_judge_prompts:
 
 ---
 
-## 10a. Multi-LLM Extension Guide
+## 10a. Subscription mode (claude -p)
+
+**`ClaudePJudge`** is the primary production judge for environments without `ANTHROPIC_API_KEY`.
+
+| Setting | Effect |
+|---|---|
+| `BMAD_SUPERVISOR_LLM=claude-p` | Always `ClaudePJudge` |
+| `BMAD_SUPERVISOR_LLM=subscription` | Same |
+| `BMAD_SUPERVISOR_LLM=1` | Auto-pick: CLI → `ClaudePJudge`; no CLI + key → `AnthropicJudge`; else `StubJudge` |
+| `BMAD_SUPERVISOR_LLM=anthropic` (no key) | Auto-fallback to `ClaudePJudge` if CLI found |
+
+**Transport:** `asyncio.create_subprocess_exec(claude_bin, "-p", "--model", model, prompt)`.  
+Timeout default **30 s** (CLI has process startup + auth overhead vs SDK's direct HTTP).
+
+**JSON recovery layers:**
+1. Direct `json.loads`.
+2. Strip Markdown fences (` ```json ... ``` `) → re-parse.
+3. Regex extract first `{...}` block (strips commentary prefix/suffix) → re-parse.
+4. One repair subprocess call with explicit correction instruction.
+5. `raise JudgeError` if all fail.
+
+---
+
+## 10b. Multi-LLM Extension Guide
 
 To add a new provider (e.g. Gemini, OpenAI, Yandex, Ollama):
 

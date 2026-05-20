@@ -82,8 +82,8 @@ class HardRule(BaseModel):
 
 
 JudgeProvider = Annotated[
-    Literal["anthropic", "gemini", "openai", "yandex", "ollama"],
-    "LLM provider for Tier 1 judge. Only 'anthropic' is implemented (M4).",
+    Literal["anthropic", "claude_p", "gemini", "openai", "yandex", "ollama"],
+    "LLM provider for Tier 1 judge. 'claude_p' = subscription CLI (primary); 'anthropic' = SDK (needs API key).",
 ]
 
 
@@ -92,11 +92,13 @@ class JudgeConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # M4: provider field for future multi-LLM routing.  Currently only
-    # "anthropic" has a real implementation; others are planned.
-    provider: JudgeProvider = "anthropic"
+    # M4-followup: 'claude_p' = subscription mode via ``claude -p`` CLI
+    # (default — production env has no ANTHROPIC_API_KEY).
+    # 'anthropic' = AsyncAnthropic SDK (needs ANTHROPIC_API_KEY).
+    # Others planned: gemini, openai, yandex, ollama.
+    provider: JudgeProvider = "claude_p"
     model: str = "claude-sonnet-4-6"
-    timeout_seconds: float = Field(default=5.0, gt=0)
+    timeout_seconds: float = Field(default=30.0, gt=0)
     system_prompt: str = (
         "You are a pipeline supervisor for a BMad orchestrator. "
         "Classify each event and output a JSON decision."

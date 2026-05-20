@@ -756,6 +756,19 @@ fallback), но merge упал на новом баге.
     `AnthropicJudge` при наличии `ANTHROPIC_API_KEY`; StubJudge при отсутствии ключа.
   - +25 unit-тестов (`test_supervisor_anthropic_judge.py`) + 2 subscriber wiring тесты. Tests 2206→2231.
 
+- ✅ **M4-followup: ClaudePJudge — subscription path live** (2026-05-20) — вторая реализация
+  `LLMJudgeProtocol` для production-среды без `ANTHROPIC_API_KEY` (Claude Code subscription).
+  - `supervisor/judges/claude_p_judge.py` — `ClaudePJudge`: asyncio subprocess `claude -p --model`,
+    timeout 30 s (vs 5 s у SDK), JSON recovery: direct → fence strip → `{}`-regex → repair retry.
+  - `JudgeConfig.provider` default изменён `"anthropic"` → `"claude_p"` (primary production path).
+  - `_supervisor_judge_factory` расширен: `BMAD_SUPERVISOR_LLM=claude-p/subscription/cli` →
+    `ClaudePJudge`; `BMAD_SUPERVISOR_LLM=1` — auto-pick: CLI есть → `ClaudePJudge`, иначе
+    API key есть → `AnthropicJudge`, иначе `StubJudge`; `anthropic` без ключа → auto-fallback
+    на `ClaudePJudge` если CLI доступен.
+  - `supervisor/judges/__init__.py` обновлён: 2 реализации (`AnthropicJudge` + `ClaudePJudge`)
+    + расширенный extension guide с примерами обеих.
+  - +20 тестов (`test_supervisor_claude_p_judge.py` + 3 wiring в subscriber). Tests 2231→2251.
+
 ---
 
 ## 6. References
