@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from bmad_orchestrator.supervisor.audit import log_decision
 from bmad_orchestrator.supervisor.engine import SupervisorEngine
+from bmad_orchestrator.supervisor.judges import AnthropicJudge
 from bmad_orchestrator.supervisor.llm_judge import (
     JudgeError,
     JudgeInput,
@@ -39,6 +40,7 @@ from bmad_orchestrator.supervisor.policy import (
 )
 
 __all__ = [
+    "AnthropicJudge",
     "HardRule",
     "HardRuleMatch",
     "JudgeError",

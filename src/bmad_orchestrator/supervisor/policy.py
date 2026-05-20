@@ -6,7 +6,7 @@ See spec/spec_supervisor_llm_loop.md §3.4.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -81,11 +81,20 @@ class HardRule(BaseModel):
     reason: str = ""
 
 
+JudgeProvider = Annotated[
+    Literal["anthropic", "gemini", "openai", "yandex", "ollama"],
+    "LLM provider for Tier 1 judge. Only 'anthropic' is implemented (M4).",
+]
+
+
 class JudgeConfig(BaseModel):
     """Settings for Tier 1 LLM-judge."""
 
     model_config = ConfigDict(extra="forbid")
 
+    # M4: provider field for future multi-LLM routing.  Currently only
+    # "anthropic" has a real implementation; others are planned.
+    provider: JudgeProvider = "anthropic"
     model: str = "claude-sonnet-4-6"
     timeout_seconds: float = Field(default=5.0, gt=0)
     system_prompt: str = (

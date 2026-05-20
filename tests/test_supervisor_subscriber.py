@@ -198,3 +198,66 @@ async def test_subscriber_survives_audit_failures(tmp_path: Path):
             Event(type=EventType.HUMAN_QUERY, payload={"story_id": "x"}),
             bus,
         )
+
+
+# ── M4 judge factory integration tests ────────────────────────────────────────
+
+
+def test_load_engine_judge_factory_anthropic_path():
+    """M4: BMAD_SUPERVISOR_LLM=anthropic + ANTHROPIC_API_KEY=fake → AnthropicJudge."""
+    from bmad_orchestrator.supervisor.judges.anthropic_judge import AnthropicJudge
+
+    def _factory() -> object:
+        import os
+
+        mode = os.environ.get("BMAD_SUPERVISOR_LLM", "").strip().lower()
+        if mode in {"1", "true", "anthropic", "sonnet"}:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if not api_key:
+                from bmad_orchestrator.supervisor.llm_judge import StubJudge
+                return StubJudge()
+            import anthropic
+            return AnthropicJudge(
+                client=anthropic.AsyncAnthropic(api_key=api_key),
+                model="claude-sonnet-4-6",
+                system_prompt="You are a supervisor.",
+            )
+        from bmad_orchestrator.supervisor.llm_judge import StubJudge
+        return StubJudge()
+
+    import os
+    env = {"BMAD_SUPERVISOR_LLM": "anthropic", "ANTHROPIC_API_KEY": "fake-key-for-test"}
+    with patch.dict(os.environ, env):
+        engine = load_supervisor_engine(judge_factory=_factory)
+
+    assert isinstance(engine.judge, AnthropicJudge)
+
+
+def test_load_engine_judge_factory_no_api_key_falls_back_to_stub():
+    """M4: BMAD_SUPERVISOR_LLM=anthropic but no API key → StubJudge + warning."""
+    from bmad_orchestrator.supervisor.llm_judge import StubJudge
+
+    def _factory() -> object:
+        import os
+
+        mode = os.environ.get("BMAD_SUPERVISOR_LLM", "").strip().lower()
+        if mode in {"1", "true", "anthropic", "sonnet"}:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if not api_key:
+                return StubJudge()
+            import anthropic
+
+            from bmad_orchestrator.supervisor.judges.anthropic_judge import AnthropicJudge
+            return AnthropicJudge(
+                client=anthropic.AsyncAnthropic(api_key=api_key),
+                model="claude-sonnet-4-6",
+                system_prompt="You are a supervisor.",
+            )
+        return StubJudge()
+
+    import os
+    env = {"BMAD_SUPERVISOR_LLM": "anthropic", "ANTHROPIC_API_KEY": ""}
+    with patch.dict(os.environ, env):
+        engine = load_supervisor_engine(judge_factory=_factory)
+
+    assert isinstance(engine.judge, StubJudge)

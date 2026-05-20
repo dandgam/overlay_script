@@ -1089,11 +1089,39 @@ def _wire_pipeline_subscribers(
 
         mode = os.environ.get("BMAD_SUPERVISOR_LLM", "").strip().lower()
         if mode in {"1", "true", "anthropic", "sonnet"}:
-            # M4 placeholder: real Sonnet judge wiring goes here. Until then
-            # behave like stub but log so audit captures the intent.
+            # M4 — real AnthropicJudge path.
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if not api_key:
+                log.warning(
+                    "supervisor_llm_anthropic_no_api_key",
+                    hint="ANTHROPIC_API_KEY not set — falling back to StubJudge",
+                )
+                return StubJudge()
+            # Load policy params for judge config (model, timeout, system_prompt).
+            from bmad_orchestrator.runtime.supervisor_subscriber import (
+                DEFAULT_POLICY_PATH,
+            )
+            from bmad_orchestrator.supervisor.judges.anthropic_judge import (
+                AnthropicJudge,
+            )
+            from bmad_orchestrator.supervisor.policy import PolicyNotFoundError, load_policy
+
+            _policy_path = supervisor_policy_path or DEFAULT_POLICY_PATH
+            try:
+                _pol = load_policy(_policy_path)
+                _jcfg = _pol.judge
+            except PolicyNotFoundError:
+                from bmad_orchestrator.supervisor.policy import JudgeConfig
+                _jcfg = JudgeConfig()
             log.info(
-                "supervisor_llm_real_requested_but_deferred",
-                hint="real-Anthropic judge lands with spec_supervisor_llm_loop M4",
+                "supervisor_llm_anthropic_judge_active",
+                model=_jcfg.model,
+                timeout_seconds=_jcfg.timeout_seconds,
+            )
+            return AnthropicJudge(
+                model=_jcfg.model,
+                system_prompt=_jcfg.system_prompt,
+                timeout_seconds=_jcfg.timeout_seconds,
             )
         return StubJudge()
 
