@@ -708,6 +708,14 @@ fallback), но merge упал на новом баге.
   теперь всегда выполняется когда `worktree` указывает на реальный git worktree.
   Конфликт rebase → `rebase --abort` + raise → caller's except → `HUMAN_QUERY`. +2 теста.
 
+- ✅ **NEW-35 (P1) · Тип: 🐛 Баг — reused worktree base_sha → false silent_failure** —
+  CLOSED `ff973a9`, pilot 2d. Оба воркера (1.4 + 3-2-zfs) ушли в `worker_silent_failure`
+  хотя в 3-2-zfs worktree был commit `d52a32d` от 2c. Корень: `_ensure_git_worktree` для
+  reused worktree возвращал `_resolve_worktree_head(worktree)` = HEAD feature-ветки →
+  `base_sha == HEAD` → `git rev-list base_sha..HEAD` = 0 → silent_failure false-positive.
+  Fix: новый helper `_resolve_worktree_reuse_base_sha` берёт merge-base feature vs target
+  HEAD; fallback на HEAD при ошибке. +2 теста через реальный git worktree. Tests 2185→2187.
+
 ---
 
 ## 6. References
