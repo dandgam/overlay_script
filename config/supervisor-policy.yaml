@@ -26,6 +26,16 @@ judge:
       * abort_pipeline   — stop orchestrator cleanly (manual restart required)
       * escalate_human   — notify operator + wait
       * no_op            — event handled by another subscriber, do nothing
+      * cancel_worker    — cancel a single stuck worker by worker_id or story_id
+      * respawn_worker   — cancel the running worker + re-queue the story for a
+                           fresh attempt. Use when the worker has commits but the
+                           review stage rejected it or it timed out. Include
+                           tool_calls=[{name: "respawn_worker", args: {story_id,
+                           reason, max_iteration: <int>,
+                           dev_prompt_hint: "<summary of review findings>"}}].
+                           dev_prompt_hint helps the new worker avoid repeating
+                           the same mistakes. DO NOT use more than twice per
+                           story — the 3rd attempt will auto-escalate to human.
 
     Output strict JSON: {action, confidence, reason, tool_calls?}.
     confidence must be in [0.0, 1.0]; below 0.6 → escalate_human regardless.
@@ -60,4 +70,15 @@ hard_rules:
       event: WORKER_STUCK_TIMEOUT
     action: escalate_human
     reason: "Cumulative stuck-worker (NEW-33.2) — нужно человеческое решение: retry / abort / манипуляция wave-env"
+
+  # NEW-37 — review worker (security / merge-gate spec / quality) hung for
+  # BMAD_REVIEW_TIMEOUT_SEC (default 900 s = 15 min).  Default: escalate_human
+  # so the operator decides (respawn / abort).  Override to auto_respond with
+  # tool_calls=[{name: respawn_worker, args: {story_id, max_iteration: 1}}]
+  # for fully automated recovery once respawn_worker is validated in prod.
+  - id: review-stuck-timeout
+    when:
+      event: REVIEW_STUCK_TIMEOUT
+    action: escalate_human
+    reason: "Review worker stuck for 15+ min (NEW-37) — operator должен решить: respawn / abort / inspect review JSONL"
 
