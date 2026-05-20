@@ -685,6 +685,29 @@ fallback), но merge упал на новом баге.
   `worker_events.current_wave_dir()` писал `runs/default/` вместо `runs/2b/`.
   Tests 2166→2182 (+16), ruff clean.
 
+- ⬜ **NEW-33.4 v2 · Тип: 🐛 Баг — wave env не выставлялся в os.environ оркестратора** —
+  OPEN→CLOSED 2026-05-20, найден pilot 2c. NEW-33.4 v1 добавил `BMAD_CURRENT_WAVE` в
+  `ALLOWED_WORKER_ENV` + `_SANDBOX_DEFAULT_ENV_ALLOWLIST` (passthrough из env родителя),
+  но **сам родитель-оркестратор переменную не ставил** — `--wave` был только CLI-аргументом.
+  Результат: bwrap `--clearenv` чистил всё, и так как BMAD_CURRENT_WAVE не было в env
+  оркестратора, allowlist не пропускал её внутрь. events.jsonl уходили в `runs/default/`.
+  Фикс: `os.environ["BMAD_CURRENT_WAVE"] = wave` в начале `_run_real_pilot_body`
+  (review/security/gate spawn helpers уже сами save+restore вокруг своих per-stage суффиксов).
+  +1 unit-тест на присутствие строки в исходнике. Tests 2182→2183.
+
+- ⬜ **NEW-34 (P1) · Тип: 🐛 Баг — ff-merge diverging branch не уходит в rebase recovery** —
+  OPEN 2026-05-20, pilot 2c. Story 3-2-zfs прошла весь pipeline (dev → stage5 →
+  build_check → gate_spec approve → gate_quality approve), но финальный
+  `git merge feature/3-2-zfs --ff-only --signoff` упал с `exit 128 / Not possible to
+  fast-forward, aborting` потому что feature-branch создан в 2b (HEAD=1d86f83 на
+  старой базе), а integration/2c свежесоздана с другого коммита — расходящиеся базы.
+  **NEW-31 (rebase feature на integration перед ff) должен был это предотвратить**, но
+  exception всплыл сразу при ff, без перехода в recovery. Нужно: (a) обернуть ff в
+  try/except → catch `GitCommandError exit 128`, (b) вызвать NEW-31 recovery rebase
+  именно в этом случае, (c) если rebase тоже не прошёл — `HUMAN_QUERY` с diff.
+  Локация: `merge_to_integration_subscriber` в `agent/run.py`. После 3 эскалаций
+  supervisor сделал `abort_pipeline` через circuit breaker — это работало как задумано.
+
 ---
 
 ## 6. References

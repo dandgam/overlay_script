@@ -297,3 +297,18 @@ def test_build_worker_env_forwards_bmad_current_wave(monkeypatch) -> None:
     monkeypatch.setenv("BMAD_CURRENT_WAVE", "2b")
     env = _build_worker_env(extra=None)
     assert env.get("BMAD_CURRENT_WAVE") == "2b"
+
+
+def test_run_real_pilot_body_sets_bmad_current_wave_env() -> None:
+    """NEW-33.4 v2 — _run_real_pilot_body must set os.environ[BMAD_CURRENT_WAVE].
+
+    Without this, ALLOWED_WORKER_ENV / _SANDBOX_DEFAULT_ENV_ALLOWLIST passthrough
+    is a no-op because the var is missing from the orchestrator process env in
+    the first place (pilot 2b/2c root cause: events.jsonl wrote to runs/default/).
+    """
+    import inspect
+
+    from bmad_orchestrator.agent.run import _run_real_pilot_body
+
+    src = inspect.getsource(_run_real_pilot_body)
+    assert 'os.environ["BMAD_CURRENT_WAVE"] = wave' in src

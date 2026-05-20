@@ -1380,6 +1380,18 @@ async def _run_real_pilot_body(
     # ``enforce_and_reserve_story`` call.
     worker_model = models.dev
 
+    # NEW-33.4 v2 — propagate wave id into orchestrator env so:
+    #   - ``runtime.worker_events.current_wave_dir()`` reads it inside the
+    #     sandboxed worker (forwarded via ``ALLOWED_WORKER_ENV`` +
+    #     ``_SANDBOX_DEFAULT_ENV_ALLOWLIST`` — see NEW-33.4 v1)
+    #   - review/security/gate spawn helpers can save+restore it around
+    #     their own per-stage suffixed wave (they already do that).
+    # Pilot 2b root cause: BMAD_CURRENT_WAVE was an argument-only parameter
+    # — never landed in os.environ, so worker JSONLs wrote to runs/default/
+    # instead of runs/<wave>/ and the orchestrator's tail loop hung waiting
+    # for terminal events on a file it did not watch.
+    os.environ["BMAD_CURRENT_WAVE"] = wave
+
     bus.start_backstop_task()
 
     # NEW-5 — dirty reused worktree policy. ``BMAD_AUTO_CLEAN_DIRTY_WORKTREE``
