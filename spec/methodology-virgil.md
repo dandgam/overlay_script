@@ -770,7 +770,7 @@ fallback), но merge упал на новом баге.
   - +20 тестов (`test_supervisor_claude_p_judge.py` + 3 wiring в subscriber). Tests 2231→2251.
 
 - ✅ **NEW-41 (P1) · Тип: 🐛 Баг — internal-halt stories застревают без шанса на external review** —
-  CLOSED `<hash>`, pilot 2j analytics. 3 истории (3-2-zfs, 3-1, 2-2) сделали dev + autofix, но
+  CLOSED `f1e1b2a`, pilot 2j analytics. 3 истории (3-2-zfs, 3-1, 2-2) сделали dev + autofix, но
   internal Stage-6 Sonnet reviewer дважды выдал NEEDS-FIX → worker exit `status=success exit_code=0
   review_iteration=2` + `halt-reason.txt` в `_bmad/auto-dev-state/`. Оркестратор считал это success
   и продолжал, но следующий spawn блокировался на `WORKER_HALT_PRESPAWN` из-за стоящего файла.
@@ -790,7 +790,7 @@ fallback), но merge упал на новом баге.
   +11 тестов (`test_new41_new42.py`). EventType #47. Tests 2272→2283.
 
 - ✅ **NEW-42 (P2) · Тип: 🏗 Архитектура — circuit-breaker abort убивает pipeline до того как finished stories дошли до merge** —
-  CLOSED `<hash>`, pilot 2j analytics. Circuit-breaker (4 эскалации от silent_failure 1.4 +
+  CLOSED `f1e1b2a`, pilot 2j analytics. Circuit-breaker (4 эскалации от silent_failure 1.4 +
   stuck_watchdog 6-1) abort_pipeline'нул ПРЕЖДЕ чем bus drain дошёл до `WORKER_COMPLETED` для
   2-2/3-1/3-2-zfs — commits есть в feature/* ветках, но никогда не попали в integration.
 
