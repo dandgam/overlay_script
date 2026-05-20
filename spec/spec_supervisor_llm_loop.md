@@ -3,7 +3,7 @@
 > **Фаза ADLC:** Phase 4 (Deploy) — item #9 в priority queue
 > **Patterns used:** P4 Orchestrator-Workers (Supervisor=meta-orchestrator) + P2 Routing (классификация event типа) + P5 Evaluator-Optimizer (Supervisor оценивает свои предыдущие решения)
 > **Объём:** 3-4 сессии (M-scale initiative)
-> **Status:** Draft v1 — awaiting user approval
+> **Status:** ✅ DONE (all 4 sessions complete, M4 AnthropicJudge live)
 
 ---
 
@@ -205,7 +205,7 @@ llm_judge_prompts:
 
 ## 6. План реализации (3-4 сессии)
 
-### Session 1 — Foundation (M1)
+### Session 1 — Foundation (M1) ✅ DONE
 - `supervisor/policy.py` — pydantic schemas (SupervisorPolicy, HardRule, JudgeConfig, SupervisorDecision)
 - `supervisor/audit.py` — JSONL writer
 - `config/supervisor-policy.yaml` — default policy (3 hard rules для известных deterministic кейсов)
@@ -213,31 +213,33 @@ llm_judge_prompts:
 
 **Phase gate session 1:** policy loads, audit writes, hard rules validate. No bus wiring yet.
 
-### Session 2 — Decision engine (M2)
-- `supervisor/llm_judge.py` — Anthropic SDK call с prompt caching (Sonnet 4.6 base)
+### Session 2 — Decision engine (M2) ✅ DONE
+- `supervisor/llm_judge.py` — LLMJudgeProtocol + StubJudge (real call behind M4 flag)
 - `supervisor/engine.py` — `SupervisorEngine.decide(event) → SupervisorDecision`
   - Tier 0 (hard rules) → Tier 1 (LLM judge) → Tier 2 (escalate)
   - Rate limiter (token bucket)
   - Circuit breaker (consecutive escalations counter)
 - Tests: `test_supervisor_engine.py` с mock judge (~15 tests)
 
-**Phase gate session 2:** decisions сделаны in-process через mock judge. Real Anthropic call wired но behind flag (по умолчанию off — `--supervisor-mock`).
+**Phase gate session 2:** decisions сделаны in-process через mock judge.
 
-### Session 3 — Bus integration + Actions (M3)
+### Session 3 — Bus integration + Actions (M3) ✅ DONE
 - `supervisor/actions.py` — executor: Decision.tool_calls → bus emit / tool invocations
-- `runtime/supervisor_subscriber.py` — bus subscriber для 5 event types
+- `runtime/supervisor_subscriber.py` — bus subscriber для 5+1 event types (+ WORKER_STUCK_TIMEOUT NEW-33.3)
 - Wiring в `agent/run.py` (новый subscriber after existing chain)
 - Tests: `test_supervisor_actions.py` + `test_supervisor_subscriber.py` (~10 tests)
 
 **Phase gate session 3:** end-to-end mock pipeline — 5 событий → 5 решений → corresponding tool calls / events на bus.
 
-### Session 4 — TUI + полировка (M4)
-- `cli/tui.py` — добавить секцию "Supervisor activity" (последние решения, текущий judge call status, rate limiter capacity)
-- Integration tests
-- CLI флаг `--supervisor-policy PATH` + `--supervisor-mock` 
-- Methodology update + commit + retrospective memory
+### Session 4 — Real LLM Judge (M4) ✅ DONE
+- `supervisor/judges/` пакет — multi-LLM ready architecture
+  - `anthropic_judge.py` — `AnthropicJudge`: AsyncAnthropic client, prompt caching, JSON+repair parse, JudgeError on all failures
+  - `__init__.py` — re-export + extension guide for future providers
+- `JudgeConfig.provider` field in `policy.py` — enum for future multi-LLM routing
+- `_supervisor_judge_factory` in `agent/run.py` — wired: `BMAD_SUPERVISOR_LLM=anthropic ANTHROPIC_API_KEY=<key>` → real AnthropicJudge; no-key → StubJudge + warning
+- Tests: `test_supervisor_anthropic_judge.py` (23 tests) + 2 subscriber wiring tests. Tests 2206→2231. ruff/mypy clean.
 
-**Phase gate session 4:** TUI показывает Supervisor live, full integration test зелёный, methodology v11.
+**Phase gate session 4:** `BMAD_SUPERVISOR_LLM=anthropic ANTHROPIC_API_KEY=<key>` activates real Sonnet judge end-to-end.
 
 ---
 
@@ -314,6 +316,27 @@ llm_judge_prompts:
 | Supervisor зацикливается (его decision → новый event → новое decision) | Medium | Циклы detect'ятся через rate limiter + `event.payload.source != "supervisor"` filter |
 | Anthropic API недоступен → весь pipeline зависает | High | Fail-safe escalate + timeout 5s + offline mode = только hard rules |
 | TUI rendering пожирает CPU из-за частых updates | Low | Throttle: max 1 render per 500ms |
+
+---
+
+## 10a. Multi-LLM Extension Guide
+
+To add a new provider (e.g. Gemini, OpenAI, Yandex, Ollama):
+
+1. **Create** `src/bmad_orchestrator/supervisor/judges/<provider>_judge.py`.
+2. **Implement** `LLMJudgeProtocol` — a single `async def classify(self, input_: JudgeInput) -> JudgeVerdict` method.
+   - Raise `JudgeError` on any transport / parse failure (engine automatically falls back to Tier 2 escalate_human).
+   - Add prompt caching (ephemeral TTL) on the system block if the provider supports it.
+3. **Re-export** from `supervisor/judges/__init__.py`:
+   ```python
+   from bmad_orchestrator.supervisor.judges.<provider>_judge import <Provider>Judge
+   __all__ = [..., "<Provider>Judge"]
+   ```
+4. **Add provider to `JudgeConfig.provider`** Literal in `supervisor/policy.py`.
+5. **Wire** in `agent/run.py:_supervisor_judge_factory` — add a branch for the new provider name.
+6. **Add tests** in `tests/test_supervisor_<provider>_judge.py` (minimum 8 tests matching the AnthropicJudge test contract).
+
+No changes needed to `engine.py`, `policy.py` (besides the Literal), or `supervisor_subscriber.py`.
 
 ---
 

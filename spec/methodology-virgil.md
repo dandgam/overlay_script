@@ -745,6 +745,17 @@ fallback), но merge упал на новом баге.
   +19 тестов (`test_new36_dirty_count_watchdog.py` + inline в `test_stuck_watchdog.py`
   + обновлён `test_canonical_patches_p1.py`). EventType #44. Tests 2187→2206.
 
+- ✅ **M4 — AnthropicJudge (real Sonnet supervisor judge)** (2026-05-20) — заменяет StubJudge
+  за флагом `BMAD_SUPERVISOR_LLM=anthropic ANTHROPIC_API_KEY=<key>`.
+  - `supervisor/judges/` пакет: `AnthropicJudge` (Sonnet, async, prompt caching),
+    `__init__.py` с multi-LLM extension guide (Gemini/OpenAI/Yandex/Ollama — scope documented).
+  - `JudgeConfig.provider` field в `policy.py` для будущей маршрутизации.
+  - Prompt caching: `cache_control={"type": "ephemeral"}` на system block → 5-мин TTL.
+  - JSON parsing с 1 repair retry; все failure modes → `JudgeError` → engine fail-safe escalate.
+  - `_supervisor_judge_factory` в `agent/run.py` разблокирован: возвращает реальный
+    `AnthropicJudge` при наличии `ANTHROPIC_API_KEY`; StubJudge при отсутствии ключа.
+  - +25 unit-тестов (`test_supervisor_anthropic_judge.py`) + 2 subscriber wiring тесты. Tests 2206→2231.
+
 ---
 
 ## 6. References
