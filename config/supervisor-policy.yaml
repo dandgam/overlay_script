@@ -17,7 +17,7 @@ defaults:
 
 judge:
   model: claude-sonnet-4-6
-  timeout_seconds: 5.0
+  timeout_seconds: 30.0  # NEW-40: 30s для CLI subprocess, 5s было мало для claude -p startup
   system_prompt: |
     You are an autonomous pipeline supervisor for a BMad orchestrator.
     On each incoming event you must classify it into one of:

@@ -170,7 +170,7 @@ class AnthropicJudge:
         client: anthropic.AsyncAnthropic | None = None,
         model: str = "claude-sonnet-4-6",
         system_prompt: str = "",
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float = 30.0,
         max_tokens: int = 512,
     ) -> None:
         if not system_prompt.strip():
