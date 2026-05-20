@@ -8,15 +8,17 @@ such regressions and emits INTEGRATION_TEST_FAILED + HUMAN_QUERY.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from bmad_orchestrator.agent import run
-from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
 
+if TYPE_CHECKING:
+    from bmad_orchestrator.runtime.build_check import BuildCheckResult
+from bmad_orchestrator.runtime.event_loop import Event, EventLoop, EventType
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -28,17 +30,17 @@ def _approve_event(story_id: str = "1.5", worktree: str = "") -> Event:
     )
 
 
-def _ok_result(name: str = "pytest") -> "BuildCheckResult":
+def _ok_result(name: str = "pytest") -> BuildCheckResult:
     from bmad_orchestrator.runtime.build_check import BuildCheckResult
     return BuildCheckResult(name=name, run="pytest", exit_code=0, tail="")
 
 
-def _fail_result(name: str = "pytest") -> "BuildCheckResult":
+def _fail_result(name: str = "pytest") -> BuildCheckResult:
     from bmad_orchestrator.runtime.build_check import BuildCheckResult
     return BuildCheckResult(name=name, run="pytest", exit_code=1, tail="FAILED test")
 
 
-def _skipped_result(name: str = "ruff") -> "BuildCheckResult":
+def _skipped_result(name: str = "ruff") -> BuildCheckResult:
     from bmad_orchestrator.runtime.build_check import BuildCheckResult
     return BuildCheckResult(
         name=name, run="ruff check", exit_code=0, tail="",
@@ -73,7 +75,6 @@ async def test_clean_integration_test_no_events(
     # Patch cleanup_worktree to no-op
     monkeypatch.setattr(run, "cleanup_worktree", lambda path, root: None)
 
-    from bmad_orchestrator.runtime.build_check import BuildCheckPolicy
 
     from bmad_orchestrator.runtime.build_check import BuildCheckCommand as _BCC
     from bmad_orchestrator.runtime.build_check import BuildCheckPolicy as _BCP
@@ -199,7 +200,6 @@ async def test_no_test_command_configured_skips_silently(
     )
     monkeypatch.setattr(run, "cleanup_worktree", lambda path, root: None)
 
-    from bmad_orchestrator.runtime.build_check import BuildCheckPolicy
     from bmad_orchestrator.skills_repo import PolicyNotFoundError
 
     with patch(
