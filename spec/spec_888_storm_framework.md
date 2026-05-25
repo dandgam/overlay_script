@@ -1,7 +1,7 @@
 # Спека — 888 Storm Framework v1.0
 
 **Дата:** 2026-05-26
-**Статус:** Approved (decisions §12 resolved 2026-05-26)
+**Статус:** Approved v1.3 (§19 regression detection added 2026-05-26)
 **Owner:** AABIT Server
 **Контекст:** консолидация обсуждения architectural brief / Virgil-reactive-patching / 888-feature-creep / scripts-vs-LLM на сессии 2026-05-26
 
@@ -117,8 +117,9 @@ session end → [audit-trail] → events.jsonl
 | **T8** | Merge | `git merge`, `git push origin main` | #34 Pre-mortem of merge + #42 Critique + #17 Red Team via adversarial-protocol | `_bmad/reviews/<branch>.md` | merge-guard exit 2 | P8 |
 | **T9** | Stuck signal | «топчусь», «в кругу», «нагороэжение», «куда мы идём» | Forced STOP-session: #50 Lessons Learned + #15 Meta-Prompting + #11 Tree of Thoughts | `_storm_audit/pause_<date>.md` | Inject в context «STOP. Не патчить.»; ручной resume | P1, P2 |
 | **T10** | Destructive op | `rm -rf`, `DROP TABLE`, force-push, `git reset --hard` | Double-confirm с явным justification | Audit entry в events.jsonl | destructive-guard exit 2 до touch override-file | P9 |
+| **T11** | Regression detected | Авто-детект от R1-R5 (§19): error fingerprint repeat / hot-file / commit cycle / test regression | #40 5 Whys, #35 FMA, #36 Devil's Advocate, #50 Lessons Learned | `spec/regression_<fingerprint_hash>_storm.md` | code-gate блокирует Edit в affected scope до artifact | P1 (regressions) |
 
-**Расширяемость:** новый триггер = одна строка в `intent-classifier.py` + один scenario.md в `scenarios/`. Closed-set: 10 категорий, всё остальное мапится. Расширение через явный акт (правило M3).
+**Расширяемость:** новый триггер = одна строка в `intent-classifier.py` + один scenario.md в `scenarios/`. Closed-set: 11 категорий, всё остальное мапится. Расширение через явный акт (правило M3).
 
 ---
 
@@ -868,3 +869,125 @@ prompt:
 | User override (step 4) | Активно — можно accept/decline/replace | **Skipped** automatically |
 | Audit trail в events.jsonl | Активно | **Усилен** — full reasoning обязателен |
 | Storm может провалиться | Возможен (user reject все) | Если LLM-judge crash → fallback to required-only + warning |
+
+---
+
+## §19. Regression & Pattern Detection (T11)
+
+Базовый patch-counter (§5.2) ловит только grossest case: ≥5 `fix(<scope>)` в 14d. Реальные regressions часто subtler: тот же error повторяется под разными scope'ами, hot-file копится, тесты регрессируют, commit cycle. §19 закрывает эти случаи через **5 авто-детекторов** R1-R5 → запускают T11.
+
+### R1 — Error Fingerprint Tracker
+
+**Что:** каждый halt/error логируется как fingerprint в `~/.claude/skills/888/storm/error-fingerprints.jsonl`.
+
+**Format:**
+```json
+{"ts": "<iso>", "fingerprint": "<sha1 от (file:line:exception_type:normalized_msg)>", "scope": "<scope>", "raw_error": "<truncated>", "commit_after": "<hash|null>"}
+```
+
+**Trigger:** если same fingerprint встречается ≥3 раз в 30d → emit T11 event «regression_detected: error fingerprint X».
+
+**Where:** Stop hook OR PostToolUse on Bash (capture exit ≠ 0).
+
+**LOC:** ~80 в `fingerprint_tracker.py`.
+
+### R2 — Hot-file Counter
+
+**Что:** PostToolUse on Edit|Write → инкрементирует `hot-files.json[<file>]` (sliding 14d window).
+
+**Threshold:** >10 edits в одном файле за 14d → emit T11 «hot_file: <path>».
+
+**Storage:** `~/.claude/skills/888/storm/hot-files.json`:
+```json
+{"src/runtime/sandbox.py": ["2026-05-12T...", "2026-05-13T...", ...], "...": [...]}
+```
+
+**LOC:** ~50 в `hot_files.py`.
+
+### R3 — Commit Cycle Detector
+
+**Что:** PostToolUse on `git commit` → сравнивает текущий commit subject с предыдущими 10 в этом scope через difflib (Python stdlib). Если ≥3 commits с similarity ≥70% в 30d → T11.
+
+**Storage:** `commit-history.jsonl` (append-only, scope-tagged subjects).
+
+**Limitation:** false positives на formulaic messages типа «fix(virgil): typo». Mitigation: ignore commits с body <40 chars.
+
+**LOC:** ~60 в `cycle_detector.py`.
+
+### R4 — Test Regression Detector
+
+**Что:** PostToolUse on Bash matcher=`pytest|cargo test|npm test` → парсит output, extract'ит failed tests, log в `test-failures.jsonl`.
+
+**Pattern:** если test X **failed → passed → failed** в течение 7 коммитов → T11 «test_regression: X».
+
+**LOC:** ~80 в `test_regression.py` (output parsers для pytest/cargo/npm).
+
+### R5 — Daily Pattern Report
+
+**Что:** systemd timer / cron daily — анализ events.jsonl + fingerprints + hot-files + cycles за 24h. Генерация:
+- `~/.claude/skills/888/storm/_storm_audit/pattern_report_<date>.md`
+- Top-3 patterns с recommended T11 storm scopes
+
+**Doesn't block:** только report. User читает, решает запускать T11 storm руками.
+
+**LOC:** ~150 в `pattern_report.py`.
+
+### T11 storm — scenario contract
+
+`scenarios/T11_regression_detected.md`:
+```yaml
+trigger_id: T11
+trigger_name: regression_detected
+detection: automatic via R1-R5 (NOT keyword-based)
+required_artifact: spec/regression_<fingerprint_hash>_storm.md
+required_methods: [40, 35, 36, 50]  # 5 Whys + FMA + Devil's Advocate + Lessons Learned
+optional_methods_pool: [39, 17, 11]   # First Principles, Red Team, Tree of Thoughts
+selection_rules:
+  - if: scope содержит "security|auth|crypto"
+    add: [17]
+  - if: ≥3 occurrences in test code
+    add: [35]  # extra FMA для test infrastructure
+selection_fallback: llm_judge_picks_1_to_2
+max_optional_selected: 2
+block_until: artifact_exists AND user_acknowledged
+closes_gap: [P1 — reactive-patching, subtle regressions]
+```
+
+### Integration с existing hooks
+
+| Hook | Что добавляется в S2 для §19 |
+|---|---|
+| `patch-counter.sh` | + invoke `cycle_detector.py` after counter increment |
+| `code-gate.sh` | + check T11 active for scope: если есть regression_<hash>_storm.md pending → block until acknowledged |
+| `audit-trail.sh` (Stop) | + invoke `pattern_report.py` если ≥24h с последнего report'а |
+| **NEW** `error-trap.sh` | PostToolUse on Bash exit ≠ 0 → invoke `fingerprint_tracker.py` |
+| **NEW** `test-result.sh` | PostToolUse on Bash matcher=`pytest|cargo test|npm test` → invoke `test_regression.py` |
+
+### Effect on S1-S5 plan
+
+| Session | Add to existing scope |
+|---|---|
+| **S1** | +1 hook: `error-trap.sh` (~30 LOC). Stub только; реальная имплементация in S2. |
+| **S2** | +5 Python модулей: fingerprint_tracker, hot_files, cycle_detector, test_regression, pattern_report (~420 LOC total). +1 hook test-result.sh. |
+| **S3** | NO change (embedded skills уже покрывают) |
+| **S4** | +1 scenario: T11_regression_detected.md |
+| **S5** | +regression test scenario: симулировать 3 same fingerprints → T11 должен trigger automatically, code-gate должен block |
+
+**Total addition:** ~600 LOC. **+1 hook**. **+1 scenario**. **+1 trigger T11**. **+1 session estimate** (S2 теперь ~3 сессии вместо 2).
+
+**Updated total:** S1-S5 = ~11-16 часов (было 10-15), 6 коммитов (было 5).
+
+### Real-world пример (NEW-26 reconstruction)
+
+Если бы §19 был активен **до** реального NEW-26 в Virgil:
+
+| Real timeline | С §19 |
+|---|---|
+| Commit 1: fix(review-runner): isolated_home | R1 logs fingerprint A (stdin_blocked) |
+| Commit 2: fix(review-runner): EOF on stdin | R1: same fingerprint A → counter=2 |
+| Commit 3: fix(review-runner): subprocess pty | R1: counter=3 → **T11 fires** + R3 cycle detector matches «fix(review-runner): ...» similarity ≥70% |
+| LLM пытается 4-й fix | code-gate **BLOCKS** до `spec/regression_<A>_storm.md` |
+| Storm проходит: 5 Whys → root cause = «review-skill интерактивен, не subprocess pty issue» | Real fix через workaround = directive-prompt (то что в итоге сработало) |
+| ROI: ~3 wasted sessions сэкономлены |
+
+Это **точно** то что произошло (см. memory `project_milestone_new26_27_skill_isolation`). С §19 — поймали бы на 3-м commit'е.

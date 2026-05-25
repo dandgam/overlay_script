@@ -23,21 +23,23 @@
 - subagent_type: general-purpose
 - model: sonnet
 - prompt: |
-    Прочитай spec/spec_888_storm_framework.md §5 (hook contracts) и §10 (S1 acceptance).
+    Прочитай spec/spec_888_storm_framework.md §5 (hook contracts), §10 (S1 acceptance), §19 (regression detection — +error-trap.sh +test-result.sh).
     Прочитай существующий ~/.claude/settings.json — НЕ перезаписывать, только merge hooks section.
-    Напиши 6 bash-хук-скриптов в ~/.claude/hooks/:
+    Напиши 8 bash-хук-скриптов в ~/.claude/hooks/:
       intent-detector.sh (UserPromptSubmit)
       patch-counter.sh (PostToolUse on Bash matcher=git commit)
-      code-gate.sh (PreToolUse on Edit|Write)
+      code-gate.sh (PreToolUse on Edit|Write — включая T11 check per §19)
       merge-guard.sh (PreToolUse on Bash matcher=git merge|push)
       destructive-guard.sh (PreToolUse on Bash dangerous patterns)
-      audit-trail.sh (Stop hook)
+      audit-trail.sh (Stop hook — включая pattern_report.py invocation если ≥24h)
+      error-trap.sh (PostToolUse on Bash exit ≠ 0 — §19 R1)
+      test-result.sh (PostToolUse on Bash matcher=pytest|cargo test|npm test — §19 R4)
     Каждый хук: shebang #!/bin/bash, jq fallback (command -v jq || exit 0), 
     exit codes per spec, stderr messages per spec.
     Python-вызовы внутри хуков — stub'ы пока (echo + exit 0); реальная имплементация в S2.
     Обнови settings.json (merge hooks section, не replace).
-    Запусти test scenarios: 6 ручных тестов (echo JSON | hook.sh) — все хуки должны срабатывать корректно.
-    Output: список созданных файлов + результаты 6 тестов в формате PASS/FAIL.
+    Запусти test scenarios: 8 ручных тестов (echo JSON | hook.sh) — все хуки должны срабатывать корректно.
+    Output: список созданных файлов + результаты 8 тестов в формате PASS/FAIL.
     НЕ коммить — это сделает orchestrator.
 
 **ACCEPTANCE CHECK после S1:**
@@ -49,22 +51,30 @@
 
 ---
 
-**S2 — Storm Core (Layer 2)**
+**S2 — Storm Core (Layer 2) + §19 detectors**
 - subagent_type: general-purpose
 - model: sonnet
 - prompt: |
-    Прочитай spec/spec_888_storm_framework.md §6 (Python contracts) и §10 (S2 acceptance) + §18 (auto-selection cascade).
+    Прочитай spec/spec_888_storm_framework.md §6 (Python contracts), §10 (S2 acceptance), §18 (auto-selection cascade), §19 (regression detection полностью).
     Создай ~/.claude/skills/888/storm/ directory + написать:
-      intent-classifier.py (§6.1 contract, ~100 LOC)
+      intent-classifier.py (§6.1 contract, ~100 LOC) — добавить T11 detection support
       storm-orchestrator.py (§6.2 contract, ~200 LOC, поддержка HEADLESS_MODE)
       taxonomy-checker.py (§6.3 contract, ~80 LOC)
       audit-trail.py (§6.4 contract, ~120 LOC)
       patch_counter.py (~60 LOC, per-scope window 14d)
       scope_from_path.py (~40 LOC)
-    Init files: state.json={"initiatives":[]}, events.jsonl=empty, decision-log.md=header only, patch-counter.json={}
-    Type hints обязательны (Python 3.11+). Append-only логика для events.jsonl.
+    §19 detectors (новые модули):
+      fingerprint_tracker.py (~80 LOC, R1)
+      hot_files.py (~50 LOC, R2)
+      cycle_detector.py (~60 LOC, R3 — difflib similarity)
+      test_regression.py (~80 LOC, R4 — pytest/cargo/npm parsers)
+      pattern_report.py (~150 LOC, R5 — daily aggregate)
+    Init files: state.json={"initiatives":[]}, events.jsonl=empty, decision-log.md=header only, 
+    patch-counter.json={}, error-fingerprints.jsonl=empty, hot-files.json={}, 
+    commit-history.jsonl=empty, test-failures.jsonl=empty.
+    Type hints обязательны (Python 3.11+). Append-only логика для всех jsonl.
     Selection cascade (§18): required → static_rules → llm-judge fallback → user_override.
-    Write unit tests: tests/test_storm_*.py — coverage ≥80%. Run pytest.
+    Write unit tests: tests/test_storm_*.py + tests/test_regression_*.py — coverage ≥80%. Run pytest.
     НЕ коммить.
 
 **ACCEPTANCE CHECK после S2:**
@@ -107,7 +117,7 @@
 - model: opus
 - prompt: |
     Прочитай spec/spec_888_storm_framework.md §4, §8, §17 (phase mapping), §18 (selection cascade), §10 (S4 acceptance).
-    Создай 10 scenario файлов в ~/.claude/skills/888/storm/scenarios/T1-T10*.md per §8 template.
+    Создай 11 scenario файлов в ~/.claude/skills/888/storm/scenarios/T1-T11*.md per §8 template (включая T11_regression_detected.md per §19).
     Каждый scenario с full YAML frontmatter: trigger_id, detection_keywords, required_methods, 
     optional_methods_pool, selection_rules (минимум 2 rules per scenario), selection_fallback, 
     max_optional_selected, block_until, closes_gap.
@@ -128,7 +138,7 @@
     НЕ коммить.
 
 **ACCEPTANCE CHECK после S4:**
-- 10 файлов scenarios/T*.md созданы
+- 11 файлов scenarios/T*.md созданы (включая T11)
 - 7 файлов с phase-embedded edits применены (grep verify)
 - 888 SKILL.md содержит storm section
 - Smoke: imitate "хочу внедрить foo" prompt → intent-detector hook + classifier → T1 detected
@@ -153,6 +163,11 @@
       `HEADLESS_MODE=1 python3 storm-orchestrator.py T2 bar-baz-headless`
       Verify: storm method selection via static_rules + LLM-judge fallback (если), 
       artifact создан, full reasoning в events.jsonl.
+    
+    Run Scenario C (regression detection, §19):
+      Simulate 3 identical error fingerprints через `python3 fingerprint_tracker.py inject test-error-X` 3 раза.
+      Verify: после 3-го T11 fired в events.jsonl, code-gate блокирует Edit в scope test-error-X.
+      Затем `storm-orchestrator.py T11 test-error-X` → создаёт regression artifact → code-gate пропускает.
     
     Документируй: каждый bug найденный в e2e + fix (если тривиальный) или escalate (если major).
     Если major bug → НЕ патчи в S5, документируй в spec/_storm_s5_findings.md как Q-260526-STRM-<N>.
