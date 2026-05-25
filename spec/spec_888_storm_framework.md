@@ -1,0 +1,613 @@
+# Спека — 888 Storm Framework v1.0
+
+**Дата:** 2026-05-26
+**Статус:** Approved (decisions §12 resolved 2026-05-26)
+**Owner:** AABIT Server
+**Контекст:** консолидация обсуждения architectural brief / Virgil-reactive-patching / 888-feature-creep / scripts-vs-LLM на сессии 2026-05-26
+
+---
+
+## §1. Цель и main claim
+
+**Цель:** превратить 888 из LLM-dispatcher'а который полагается на «правила в промпте» в **self-contained систему с детерминированным enforcement** ключевых дисциплин разработки.
+
+**Main claim:** все 10 gap'ов выявленных в сессии (reactive-patching, feature-creep, comparator shallow, ...) закрываются **3-слойной архитектурой** Hooks + Storm Core + Embedded Skills. После имплементации `~/.claude/CLAUDE.md` правила перестают полагаться на «надеюсь LLM вспомнит» и переходят в **«физически не может пропустить»**.
+
+**Не-цель:** заменить bmad-agent-builder, BMad Method, или Anthropic SDK. Storm framework — **слой поверх** этих инструментов, добавляющий enforcement которого у них нет.
+
+---
+
+## §2. Проблема — что мы выявили в обсуждении
+
+| # | Проблема | Источник в memory |
+|---|---|---|
+| P1 | Virgil reactive-patching цикл NEW-1..NEW-27 без taxonomy | project_pilot_antares_*, project_milestone_pilot_findings_closure_v* |
+| P2 | 888 feature-creep через накопление feedback_*-memory без enumeration | feedback_888_auto_park, feedback_888_human_names, feedback_888_queue_fresh, feedback_888_explain_simply, feedback_menu_ux_no_jargon |
+| P3 | Comparator v1 shallow — docs-only 9-dim parse, пропускает code-grounding | feedback_comparator_shallow_template |
+| P4 | Правила в CLAUDE.md / SKILL.md забываются из-за context rot | feedback_llm_worker_overthinks_skills + общая physics LLM attention |
+| P5 | BMAD bmad-agent-builder не имеет Phase 4.5 (adversarial review до build) | вердикт сессии после Read build-process.md |
+| P6 | LLM-dispatcher над LLM-workers — anti-pattern из брифа | бриф §1, §7; vision_888_self_contained |
+| P7 | Bug fixes без minimal reproducer | feedback_no_full_story_replay |
+| P8 | Merge'ы без обязательного review | NEW-22, NEW-26 lessons |
+| P9 | Destructive operations без double-confirm | risk из user-level CLAUDE.md §Risky actions |
+| P10 | Skills могут ломаться upstream → 888 ломается каскадом | bmb_integration_888, vision_888_self_contained |
+
+---
+
+## §3. Решение — 3-слойная архитектура
+
+```
+LAYER 1 — HOOKS  (deterministic, .claude/hooks/*.sh + settings.json)
+    ↓ inject context / exit 2 block
+LAYER 2 — STORM CORE  (Python, ~/.claude/skills/888/storm/)
+    ↓ invokes embedded methods
+LAYER 3 — EMBEDDED SKILLS  (~/.claude/skills/888/storm/embedded/)
+```
+
+### Layer 1 — Hooks (физическая гарантия)
+
+6 хуков в `~/.claude/hooks/`, зарегистрированы в `~/.claude/settings.json`:
+
+| Hook | Event | Что делает |
+|---|---|---|
+| `intent-detector.sh` | UserPromptSubmit | Классифицирует prompt → inject storm requirement в context |
+| `patch-counter.sh` | PostToolUse, matcher=Bash with `git commit` | Инкрементирует counter по scope; emit warning при N≥5 |
+| `code-gate.sh` | PreToolUse, matcher=Edit\|Write | Блокирует если scope с counter≥5 не имеет taxonomy artifact'а |
+| `merge-guard.sh` | PreToolUse, matcher=Bash with `git merge\|push` | Блокирует merge/push без review artifact |
+| `destructive-guard.sh` | PreToolUse, matcher=Bash | Блокирует rm -rf, DROP TABLE, force-push без double-confirm |
+| `audit-trail.sh` | Stop | Append session_end в events.jsonl |
+
+Графически:
+```
+user prompt → [intent-detector] → context inject → LLM
+LLM tool call (Edit) → [code-gate] → exit 2 если нет artifact'а
+LLM tool call (Bash git commit) → success → [patch-counter] → log
+LLM tool call (Bash git merge) → [merge-guard] → exit 2 если нет review
+session end → [audit-trail] → events.jsonl
+```
+
+### Layer 2 — Storm Core (Python orchestration)
+
+Файлы в `~/.claude/skills/888/storm/`:
+
+| Файл | Назначение |
+|---|---|
+| `storm-orchestrator.py` | Главный entry: `storm-orchestrator.py <trigger_id> <slug>` → запускает scenario → пишет artifact |
+| `intent-classifier.py` | Принимает текст prompt'а → возвращает JSON `{triggers, scenarios, context_inject}` |
+| `taxonomy-checker.py` | Для scope проверяет существование taxonomy artifact'а |
+| `audit-trail.py` | Append-only event log: events.jsonl + state.json + decision-log.md |
+| `patch_counter.py` | Per-scope counter с time window (14d default) |
+| `scope_from_path.py` | Маппит file path → scope name (например `runtime/sandbox.py` → `virgil-sandbox`) |
+| `sync_manifest.py` | Сравнивает embedded files с upstream source, генерирует divergence log |
+| `state.json` | Current state всех активных initiatives |
+| `events.jsonl` | Append-only log всех событий (storm started/completed, halts, overrides) |
+| `decision-log.md` | Append-only список решений с justification |
+| `patch-counter.json` | `{<scope>: [<iso-timestamp>, ...]}` |
+
+### Layer 3 — Embedded Skills (no external refs)
+
+Файлы в `~/.claude/skills/888/storm/embedded/`:
+
+| Файл | Origin | Назначение |
+|---|---|---|
+| `elicitation-methods.csv` | bmad-advanced-elicitation/methods.csv | 50 методов критического мышления |
+| `edge-case-hunter.md` | bmad-review-edge-case-hunter/SKILL.md | Чек-лист edge cases по branch'ам |
+| `adversarial-protocol.md` | bmad-review-adversarial-general/SKILL.md | Cynical Review protocol |
+| `code-review-triage.md` | bmad-code-review/SKILL.md | Triage таксономия Blind Hunter / Edge Case / Acceptance Auditor |
+| `readiness-checklist.md` | bmad-check-implementation-readiness/SKILL.md | PRD/UX/Architecture/Epics проверка |
+| `comparator-rubric-9d.md` | 888-persona-comparator/SKILL.md | 9-dim сравнительная рубрика |
+| `failure-mode-template.md` | NEW (888 original) | Шаблон FMA для любого scope |
+| `taxonomy-template.md` | NEW (888 original) | Шаблон closed-set taxonomy |
+
+Все файлы — **копии**, не symlinks. Manifest tracks origin + version + last-sync.
+
+---
+
+## §4. Карта 10 trigger-сценариев
+
+| ID | Trigger | Detection | Required Storm | Output Artifact | Block Condition | Closes Gap |
+|---|---|---|---|---|---|---|
+| **T1** | Feature intent | Keywords: «хочу внедрить», «добавим», «новая фича», «build feature» | #39 First Principles, #11 Tree of Thoughts, #34 Pre-mortem, #20 ADR, #42 Critique | `spec/feature_<slug>_storm.md` | code-gate блокирует Edit в scope `<slug>` | P2 |
+| **T2** | Agent create | «создам агента», «новый агент», «build agent» | #34 Pre-mortem, #35 FMA, #11 Tree of Thoughts, #17 Red Team, #4 User Persona | `spec/agent_<slug>_storm.md` | bmad-agent-builder Phase 5 не запускается без artifact | P5 |
+| **T3** | Agent edit | «изменю агента», «отредактирую агента», «обнови агент» | #20 ADR (why change), #34 Pre-mortem (what breaks), cross-impact tracing | `spec/agent_<slug>_change_storm.md` | code-gate на агентовские файлы | P5 |
+| **T4** | Comparator | «сравни», «vs», «лучше чем», «compare» | #33 Comparative Matrix, #36 Devil's Advocate, code-grounding (grep counts), dedup-grep, counter-example gate | `spec/compare_<slug>_storm.md` | Comparator verdict не публикуется без passes на rigor checks | P3 |
+| **T5** | Improvement | «хочу улучшить», «оптимизирую», «refactor» | #42 Critique, #15 Meta-Prompting, #11 Tree of Thoughts | `spec/improve_<slug>_storm.md` | code-gate в scope | P2 |
+| **T6** | Doubt resolution | «не уверен», «сомневаюсь», «правильно ли», «как лучше» | #41 Socratic, #40 5 Whys, #39 First Principles | `_storm_audit/doubt_<date>.md` | None (informational); inject в context | P4 |
+| **T7** | Bug fix counter | git commit с `fix(<scope>)` | Increment counter; if N≥5 in 14d → forced #35 FMA + taxonomy | `_storm_audit/patch-counter.json` + `spec/taxonomy_<scope>.md` (если N≥5) | code-gate блокирует следующий fix в этом scope без taxonomy | P1 |
+| **T8** | Merge | `git merge`, `git push origin main` | #34 Pre-mortem of merge + #42 Critique + #17 Red Team via adversarial-protocol | `_bmad/reviews/<branch>.md` | merge-guard exit 2 | P8 |
+| **T9** | Stuck signal | «топчусь», «в кругу», «нагороэжение», «куда мы идём» | Forced STOP-session: #50 Lessons Learned + #15 Meta-Prompting + #11 Tree of Thoughts | `_storm_audit/pause_<date>.md` | Inject в context «STOP. Не патчить.»; ручной resume | P1, P2 |
+| **T10** | Destructive op | `rm -rf`, `DROP TABLE`, force-push, `git reset --hard` | Double-confirm с явным justification | Audit entry в events.jsonl | destructive-guard exit 2 до touch override-file | P9 |
+
+**Расширяемость:** новый триггер = одна строка в `intent-classifier.py` + один scenario.md в `scenarios/`. Closed-set: 10 категорий, всё остальное мапится. Расширение через явный акт (правило M3).
+
+---
+
+## §5. Hook contracts — детальные
+
+### 5.1 intent-detector.sh
+
+**Trigger:** UserPromptSubmit
+**Input (stdin):** `{"prompt": "<user text>", "session_id": "..."}`
+**Action:**
+1. Извлечь prompt
+2. Вызвать `python3 ~/.claude/skills/888/storm/intent-classifier.py <prompt>`
+3. Если найдены triggers — emit `context_inject` text в stdout (попадает в контекст LLM)
+4. Exit 0 always (не блокирует)
+
+**Edge cases:**
+- prompt пустой → exit 0 silent
+- intent-classifier.py упал → log в events.jsonl, exit 0 silent (не блокирует user)
+- jq отсутствует → exit 0 + warning в stderr
+
+### 5.2 patch-counter.sh
+
+**Trigger:** PostToolUse, matcher=`Bash`
+**Input (stdin):** `{"tool_input": {"command": "..."}, ...}`
+**Action:**
+1. Если command содержит `git commit` И message содержит `fix(<scope>)` → парсим scope
+2. `python3 patch_counter.py increment <scope>` (запись в `patch-counter.json`)
+3. `python3 patch_counter.py get <scope> --window 14d`
+4. Если count ≥ 5 → echo warning в stderr:
+   ```
+   ⚠ PATCH COUNTER: <scope> = <count> fixes за 14 дней.
+   Правило №8: следующий fix будет заблокирован code-gate'ом до создания taxonomy.
+   Запусти: /888 storm T7-enumeration <scope>
+   ```
+5. Exit 0 (не блокирует уже произошедший commit)
+
+**Edge cases:**
+- Не fix commit → exit 0 noop
+- scope невозможно распарсить → log + exit 0
+
+### 5.3 code-gate.sh
+
+**Trigger:** PreToolUse, matcher=`Edit|Write`
+**Input (stdin):** `{"tool_input": {"file_path": "..."}, ...}`
+**Action:**
+1. Извлечь file_path
+2. `scope=$(python3 scope_from_path.py <file>)`
+3. Проверить:
+   - **T7 gate:** `patch_counter.py get <scope> --window 14d`. Если ≥5 — нужен `spec/taxonomy_<scope>.md`. Нет → exit 2.
+   - **T1/T2/T3/T5 gate:** Если в `state.json` есть active initiative для этого scope с status=storm-pending — нужен соответствующий artifact. Нет → exit 2.
+4. Иначе exit 0.
+
+**Exit 2 message format:**
+```
+BLOCKED by 888 storm code-gate:
+  Reason: <T7 patch count exceeded | T1 storm pending | ...>
+  Scope: <scope>
+  Required artifact: <path>
+  How to fix: <command>
+  Override (last resort): echo "<reason>" > /tmp/.888_override_<scope> && retry
+  (override file удаляется автоматически после use; reason логируется в events.jsonl)
+```
+
+### 5.4 merge-guard.sh
+
+**Trigger:** PreToolUse, matcher=`Bash`
+**Input (stdin):** `{"tool_input": {"command": "..."}}`
+**Action:**
+1. Если command содержит `git merge` или `git push origin main` или `git push.*main` → проверка
+2. branch = `git rev-parse --abbrev-ref HEAD`
+3. Проверить `_bmad/reviews/<branch>.md` exists
+4. Если нет → exit 2 с инструкцией создать через `/888 storm T8-merge`
+5. Иначе exit 0
+
+### 5.5 destructive-guard.sh
+
+**Trigger:** PreToolUse, matcher=`Bash`
+**Input (stdin):** `{"tool_input": {"command": "..."}}`
+**Action:**
+1. Pattern list (regex):
+   - `rm -rf`
+   - `DROP TABLE`
+   - `git push.*--force`
+   - `git push.*\+`
+   - `git reset --hard`
+   - `DELETE FROM.*WHERE.*1\s*=\s*1`
+   - `find.*-delete`
+2. Если match:
+   - Compute hash: `confirm_file=/tmp/.888_destructive_confirm_$(md5sum cmd | head -c8)`
+   - Если confirm_file exists И содержит non-empty reason → удалить + log reason в events.jsonl + exit 0
+   - Если нет ИЛИ файл пустой → exit 2 с инструкцией `echo "<reason>" > <confirm_file>`
+3. Иначе exit 0
+
+### 5.6 audit-trail.sh
+
+**Trigger:** Stop
+**Input (stdin):** `{"session_id": "...", "stop_hook_active": false}`
+**Action:**
+1. Append `{"event": "session_end", "session_id": "...", "timestamp": "<iso>", "summary": {...}}` в events.jsonl
+2. Exit 0
+
+---
+
+## §6. Storm Core — Python contracts
+
+### 6.1 intent-classifier.py
+
+```python
+def classify(prompt: str) -> dict:
+    """
+    Input: raw user prompt text
+    Output: {
+        "triggers": ["T1", "T6", ...],     # IDs which matched
+        "scenarios": ["T1_feature_intent.md", ...],
+        "context_inject": "⚠ STORM REQUIRED ...",  # инжектится в context LLM
+        "block": false                     # классификатор сам не блокирует
+    }
+    """
+```
+
+**Trigger patterns** определены как module-level dict (см. псевдокод в session chat §7).
+
+### 6.2 storm-orchestrator.py
+
+```bash
+storm-orchestrator.py <trigger_id> <slug> [--method <id>]+
+# Examples:
+storm-orchestrator.py T1 multi-llm-routing
+storm-orchestrator.py T7-enumeration virgil-sandbox
+storm-orchestrator.py T2 my-new-agent --method 34 --method 35 --method 11
+```
+
+**Что делает:**
+1. Загружает scenario template из `scenarios/<trigger_id>_*.md`
+2. Для каждого required method — открывает interactive prompt LLM-у с method description из methods.csv
+3. Собирает output в structured YAML
+4. Записывает `spec/<artifact_name>_<slug>_storm.md`
+5. Update `state.json`: добавляет initiative с status=storm-complete
+
+### 6.3 taxonomy-checker.py
+
+```bash
+taxonomy-checker.py <scope>
+# Возвращает 0 если spec/taxonomy_<scope>.md существует И прошёл schema check
+# Возвращает 1 если отсутствует
+# Возвращает 2 если файл есть, но шаблон не заполнен (TODO/N/A/empty sections)
+```
+
+**Schema check:** taxonomy artifact обязан содержать:
+- `## Categories` секцию с ≥3 пунктами
+- `## Reactions` секцию где каждой категории присвоено действие (с одним из 4 уровней: try-fix / soft-warn / LLM-judge / hard-halt)
+- `## Coverage` секцию с явным «новый случай → мапится в категорию N или расширяет схему»
+
+### 6.4 audit-trail.py
+
+```python
+# Event types:
+# - "intent_detected"      : trigger fired
+# - "storm_started"        : storm-orchestrator invoked
+# - "storm_completed"      : artifact written
+# - "code_gate_blocked"    : edit/write blocked
+# - "merge_gate_blocked"   : merge blocked
+# - "destructive_blocked"  : destructive op blocked
+# - "destructive_confirmed": override + retry
+# - "patch_counter_warn"   : counter exceeded threshold
+# - "session_end"          : Stop hook
+# - "manual_override"      : user touch'нул override file
+
+# Все события идут в:
+# - ~/.claude/skills/888/storm/events.jsonl (append-only)
+# - state.json (current state, updated)
+# - decision-log.md (если событие = decision, append)
+```
+
+---
+
+## §7. Embedded Skills — manifest
+
+`~/.claude/skills/888/storm/manifest.json`:
+
+```json
+{
+  "version": "888.storm.v1.0.0",
+  "absorbed_at": "2026-05-26",
+  "originals": [
+    {
+      "absorbed_file": "embedded/elicitation-methods.csv",
+      "source_path": "~/.claude/skills/888/vendor/BMAD-METHOD/bmad-advanced-elicitation/methods.csv",
+      "source_version": "BMAD-METHOD@<commit-sha-at-absorb>",
+      "absorbed_at": "2026-05-26",
+      "last_sync": "2026-05-26",
+      "update_protocol": "diff against vendor → manual review → opt-in adopt",
+      "divergence_file": null
+    },
+    {
+      "absorbed_file": "embedded/edge-case-hunter.md",
+      "source_path": "~/.claude/skills/bmad-review-edge-case-hunter/SKILL.md",
+      "source_version": "user-local@2026-05-20",
+      "absorbed_at": "2026-05-26",
+      "last_sync": "2026-05-26",
+      "update_protocol": "diff against source path → manual review",
+      "divergence_file": null
+    },
+    {"absorbed_file": "embedded/adversarial-protocol.md", "source_path": "~/.claude/skills/bmad-review-adversarial-general/SKILL.md", "...": "..."},
+    {"absorbed_file": "embedded/code-review-triage.md", "source_path": "~/.claude/skills/bmad-code-review/SKILL.md", "...": "..."},
+    {"absorbed_file": "embedded/readiness-checklist.md", "source_path": "~/.claude/skills/bmad-check-implementation-readiness/SKILL.md", "...": "..."},
+    {"absorbed_file": "embedded/comparator-rubric-9d.md", "source_path": "~/.claude/skills/888-persona-comparator/SKILL.md", "...": "..."}
+  ],
+  "originals_added": [
+    {"file": "embedded/failure-mode-template.md", "author": "888-storm-v1", "purpose": "FMA template for any scope"},
+    {"file": "embedded/taxonomy-template.md", "author": "888-storm-v1", "purpose": "Closed-set taxonomy template"}
+  ],
+  "update_command": "python3 ~/.claude/skills/888/storm/sync_manifest.py check-upstream",
+  "review_cadence": "monthly",
+  "divergence_policy": "manual_review_required"
+}
+```
+
+**Update workflow:**
+1. Monthly cron OR manual: `python3 sync_manifest.py check-upstream`
+2. Скрипт сравнивает каждый absorbed_file с source_path
+3. Если diff != ∅ → пишется `embedded/divergence/<name>.diff.md`
+4. User читает, выбирает: ADOPT (refresh + update version) / REJECT (log как conscious divergence) / DEFER
+5. Никакого автоматического sync
+
+---
+
+## §8. Scenario template — структура
+
+Все scenarios в `~/.claude/skills/888/storm/scenarios/T<N>_<name>.md` следуют общему шаблону:
+
+```markdown
+---
+trigger_id: T<N>
+trigger_name: <name>
+detection_keywords: [<list>]
+required_artifact: <path template, e.g. spec/feature_<slug>_storm.md>
+required_methods: [<list of method IDs from elicitation-methods.csv>]
+optional_methods: [<list>]
+block_until: <condition>
+closes_gap: [<P1-P10>]
+---
+
+# Storm: <Name>
+
+## Trigger context
+<когда срабатывает, какой user intent ловится>
+
+## Mandatory storm
+<список методов с краткой инструкцией каждого>
+
+## Optional storms (если условие X)
+<conditional methods>
+
+## Output schema (YAML in markdown)
+<structured fields>
+
+## Block condition (когда code-gate блокирует)
+<когда какой хук блокирует что>
+```
+
+10 scenario файлов будут написаны в S4 по этому шаблону.
+
+---
+
+## §9. Файловая структура (target)
+
+```
+~/.claude/
+├── settings.json                              ← обновлён: hooks section
+├── hooks/
+│   ├── intent-detector.sh                    ← NEW
+│   ├── patch-counter.sh                      ← NEW
+│   ├── code-gate.sh                          ← NEW
+│   ├── merge-guard.sh                        ← NEW
+│   ├── destructive-guard.sh                  ← NEW
+│   └── audit-trail.sh                        ← NEW
+└── skills/
+    └── 888/
+        ├── SKILL.md                           ← обновлён: storm references
+        ├── storm/                             ← NEW
+        │   ├── manifest.json
+        │   ├── storm-orchestrator.py
+        │   ├── intent-classifier.py
+        │   ├── taxonomy-checker.py
+        │   ├── audit-trail.py
+        │   ├── patch_counter.py
+        │   ├── scope_from_path.py
+        │   ├── sync_manifest.py
+        │   ├── state.json                     ← init: {"initiatives": []}
+        │   ├── events.jsonl                   ← init: пустой
+        │   ├── decision-log.md                ← init: header only
+        │   ├── patch-counter.json             ← init: {}
+        │   ├── scenarios/
+        │   │   ├── T1_feature_intent.md
+        │   │   ├── T2_agent_create.md
+        │   │   ├── T3_agent_edit.md
+        │   │   ├── T4_comparator.md
+        │   │   ├── T5_improvement.md
+        │   │   ├── T6_doubt_resolution.md
+        │   │   ├── T7_bug_fix.md
+        │   │   ├── T8_merge.md
+        │   │   ├── T9_stuck_signal.md
+        │   │   └── T10_destructive_op.md
+        │   └── embedded/
+        │       ├── elicitation-methods.csv
+        │       ├── edge-case-hunter.md
+        │       ├── adversarial-protocol.md
+        │       ├── code-review-triage.md
+        │       ├── readiness-checklist.md
+        │       ├── comparator-rubric-9d.md
+        │       ├── failure-mode-template.md
+        │       ├── taxonomy-template.md
+        │       └── divergence/                ← initially empty
+        └── vendor/                            ← остаётся read-only reference
+            └── ...                            ← как сейчас
+```
+
+---
+
+## §10. Implementation roadmap (5 сессий)
+
+### S1 — Hooks (Layer 1)
+**Эффорт:** 1 сессия ~ 2 часа
+**Файлы:**
+- `~/.claude/hooks/intent-detector.sh` (~50 LOC bash)
+- `~/.claude/hooks/patch-counter.sh` (~60 LOC)
+- `~/.claude/hooks/code-gate.sh` (~80 LOC)
+- `~/.claude/hooks/merge-guard.sh` (~40 LOC)
+- `~/.claude/hooks/destructive-guard.sh` (~60 LOC)
+- `~/.claude/hooks/audit-trail.sh` (~30 LOC)
+- `~/.claude/settings.json` — добавить hooks section
+
+**Зависимости:** S2 stub'ы для Python вызовов (можно noop'ить пока)
+
+**Acceptance:**
+- Каждый хук вызывается через ручной test (echo JSON | hook.sh)
+- 6 test scenarios: один edit/commit/merge/destructive/prompt/session-end, все блокируются/inject'ятся корректно
+- Settings.json валиден через `jq`
+
+### S2 — Storm Core (Layer 2)
+**Эффорт:** 2 сессии ~ 4 часа
+**Файлы:**
+- `intent-classifier.py` (~100 LOC)
+- `storm-orchestrator.py` (~200 LOC)
+- `taxonomy-checker.py` (~80 LOC)
+- `audit-trail.py` (~120 LOC)
+- `patch_counter.py` (~60 LOC)
+- `scope_from_path.py` (~40 LOC)
+- `state.json`, `events.jsonl`, `decision-log.md`, `patch-counter.json` — init
+
+**Acceptance:**
+- `python3 intent-classifier.py "хочу внедрить multi-LLM"` → returns `{triggers: ["T1"], ...}`
+- `python3 storm-orchestrator.py T1 test-feature` → создаёт `spec/feature_test-feature_storm.md` с заполненными секциями
+- `python3 taxonomy-checker.py virgil-sandbox` → exit 1 (artifact missing)
+- Unit tests: 80%+ coverage
+
+### S3 — Embedded skills + sync (Layer 3)
+**Эффорт:** 0.5 сессии ~ 1 час
+**Файлы:**
+- `embedded/*.md` — копирование 6 source файлов
+- `embedded/elicitation-methods.csv` — копия
+- `embedded/failure-mode-template.md` + `taxonomy-template.md` — NEW
+- `manifest.json` — заполнение
+- `sync_manifest.py` (~80 LOC)
+
+**Acceptance:**
+- Все 8 файлов в `embedded/` присутствуют
+- `manifest.json` валиден, проходит JSON schema check
+- `sync_manifest.py check-upstream` запускается без ошибок, генерирует пустой divergence report для свежеабсорбированных файлов
+
+### S4 — Scenarios + 888 integration
+**Эффорт:** 1.5 сессии ~ 3 часа
+**Файлы:**
+- `scenarios/T1-T10.md` — 10 файлов по template из §8
+- `~/.claude/skills/888/SKILL.md` — добавить секцию «Storm framework» с описанием как dispatcher интегрируется с storm
+
+**Acceptance:**
+- 10 scenario файлов валидируются schema (YAML frontmatter корректен)
+- 888 SKILL.md ссылается на storm как обязательный layer
+- End-to-end smoke: user prompt «хочу внедрить X» → intent-detector → context inject → 888 dispatcher предлагает запустить storm → orchestrator → artifact
+
+### S5 — End-to-end test + bug iteration
+**Эффорт:** 1 сессия ~ 2 часа
+**Сценарий:** Реальный «создам нового агента foo-bar-baz» через всю систему:
+1. User prompt активирует T2
+2. context inject
+3. 888 предлагает запустить T2 storm
+4. Storm orchestrator проходит 5 методов
+5. Artifact создан
+6. bmad-agent-builder Phase 5 запускается (code-gate проверяет artifact, пропускает)
+7. Сессия завершается
+8. audit-trail записал session_end
+
+**Acceptance:**
+- Полный цикл проходит без падений
+- Все 5 storm методов отработали
+- Artifact содержит реальное содержание (не TODO/N/A)
+- events.jsonl содержит ≥6 событий цикла
+- Документированный список найденных bugs + fixes
+
+**Total:** ~10-15 часов работы, 5 сессий.
+
+---
+
+## §11. Risks & mitigations
+
+| # | Risk | Probability | Impact | Mitigation |
+|---|---|---|---|---|
+| R1 | Хуки блокируют legitimate работу (false positives) | High | Medium | Override через `echo "<reason>" > /tmp/.888_override_<scope>` + auto-delete после use. Логирование override с reason → если ≥3/неделю → review правил |
+| R2 | Embedded copies устаревают | Medium | Low | `sync_manifest.py` monthly + manual divergence review |
+| R3 | Storm artifact = checkbox theatre | Medium | High | `taxonomy-checker.py` schema check + LLM-judge через #41 Socratic spot-check |
+| R4 | Слишком много triggers → user раздражение | Medium | Medium | Adaptive sensitivity per scope: 3 user-refuses → снижение sensitivity, log в events |
+| R5 | Hooks не работают (missing jq/python3) | Low | High | Каждый hook: `command -v jq >/dev/null \|\| exit 0` silent fallback + warning |
+| R6 | 888 self-modifying ломает storm | Low | Critical | Manifest hash check на старте сессии; storm/ files in `.gitignore` для prevent accidental modification из других проектов |
+| R7 | Cross-platform issues (Linux only) | Low | Medium | bash + python3 only, no macOS-specific tools. Tested на Linux 6.17 |
+| R8 | settings.json conflict с существующими hooks | Medium | Medium | Перед S1 — read existing settings.json, merge не replace |
+
+---
+
+## §12. Resolved decisions (approved 2026-05-26)
+
+| # | Вопрос | Решение | Обоснование |
+|---|---|---|---|
+| Q1 | T6 doubt resolution — informational vs blocking | **Informational inject** | Сомнения сами по себе не риск; блок остановит нормальный диалог |
+| Q2 | T4 comparator output | **Hybrid: artifact обязателен + summary в чате** | Artifact = source of truth для persist; summary = UX |
+| Q3 | Patch counter window | **14d uniform** | 7d слишком жёстко; per-scope — overengineering; расширим если данные покажут |
+| Q4 | Override mechanism | **`echo "<reason>" > /tmp/.888_override_<scope>` + auto-delete после use** | `touch` слишком легко; reason заставляет user'а сформулировать почему; одноразовый |
+| Q5 | Manifest review cadence | **Monthly + on-demand** | Skills меняются медленно; cron monthly + `sync_manifest.py check-upstream` руками когда нужно |
+| Q6 | vendor/ vs embedded/ | **Keep vendor/ read-only for diff'ов** | Удалить = `sync_manifest.py` не с чем сравнивать; vendor становится исторический snapshot |
+| Q7 | Patch counter scopes | **Default separate + опциональный `scope_aliases.json`** | Default: scopes независимы; alias `{"virgil-*": "virgil"}` агрегирует если user видит связь |
+| Q8 | 888 dispatcher | **Оставляем LLM + детерминированные gates через хуки** | Переписать на Python = 10+ сессий + потеря conversational UX; LLM-dispatcher + хуки-gates = «вариант 2 done right» из брифа |
+
+**Принцип:** везде где можно — детерминированный хук-gate; везде где LLM реально нужен (диалог, intent, semantic check) — оставляем LLM. Без over-engineering: uniform window, monthly cadence, separate scopes by default — всё с опциональным расширением если данные покажут.
+
+---
+
+## §13. Acceptance criteria — full system
+
+После S5 система считается **готовой** если:
+
+- [ ] Все 6 хуков срабатывают на correct trigger'ы (verified test scenarios)
+- [ ] 10 scenario файлов проходят schema validation
+- [ ] manifest.json валиден, sync tool работает
+- [ ] events.jsonl растёт корректно при каждом cycle
+- [ ] code-gate реально блокирует Edit при отсутствии artifact (verified manual test)
+- [ ] merge-guard реально блокирует merge без review (verified)
+- [ ] destructive-guard требует double-confirm для rm -rf (verified)
+- [ ] Patch counter инкрементируется на fix-commit (verified)
+- [ ] Real-world cycle «создам агента» проходит end-to-end
+- [ ] Audit trail сохраняет все события сцикла
+- [ ] Override mechanism работает (touch override-file → next attempt проходит)
+- [ ] sync_manifest.py обнаруживает divergence когда упстрим меняется (manual test через изменение source файла)
+
+---
+
+## §14. Cross-references
+
+**Память проекта:**
+- `feedback_build_discipline_rules` — 10 правил-дисциплины (входной материал)
+- `feedback_llm_dev_best_practices` — 10 best practices
+- `feedback_comparator_shallow_template` — мотивация T4 rigor
+- `feedback_888_auto_park` — мотивация audit trail
+- `feedback_research_persistence` — persist artifact требование
+- `project_vision_888_self_contained` — vision alignment
+
+**Specs в queue:**
+- `spec/spec_verifier_contracts.md` — частично пересекается с T7-T8 (рассмотреть консолидацию)
+- `spec/spec_step_file_runtime_architecture.md` — связано но orthogonal
+- `spec/spec_comparator_full_fat.md` — закрывается через T4 scenario
+- `spec/spec_adversarial_review_bundled.md` — embedded в T8 scenario
+- `spec/spec_operator_first_class_modes.md` — orthogonal, оставлен как отдельная инициатива
+
+**External refs:**
+- BMAD-METHOD/bmad-advanced-elicitation (vendor/)
+- bmad-builder build-process.md (vendor/, для Phase 4.5 design)
+- Anthropic «Building Effective Agents» (концептуальный фреймворк)
+- Architecture brief из сессии 2026-05-26 (chat artifact)
+
+---
+
+## §15. Phase 0 — review этого spec'а (THIS session)
+
+Перед стартом S1:
+
+1. User читает §1-§14
+2. Возражает к open questions §12
+3. Adjusts triggers/scenarios/file structure if needed
+4. Approves → создаётся git commit с spec'ом
+5. S1 запускается в **отдельной** сессии (свежий context, чтобы не упереться в context limit)
+
+**Это применение правила №5 (enumeration ДО кода) к самому storm framework. Дисциплина начинается с этого spec'а.**
