@@ -357,7 +357,16 @@ trigger_name: <name>
 detection_keywords: [<list>]
 required_artifact: <path template, e.g. spec/feature_<slug>_storm.md>
 required_methods: [<list of method IDs from elicitation-methods.csv>]
-optional_methods: [<list>]
+optional_methods_pool: [<list of candidates>]
+selection_rules:
+  - if: <context signal regex>
+    add: [<method IDs>]
+    rationale: "<why these methods for this context>"
+  - if: <another signal>
+    add: [<method IDs>]
+    rationale: "..."
+selection_fallback: llm_judge_picks_1_to_2  # если 0 static rules matched
+max_optional_selected: 2
 block_until: <condition>
 closes_gap: [<P1-P10>]
 ---
@@ -368,13 +377,13 @@ closes_gap: [<P1-P10>]
 <когда срабатывает, какой user intent ловится>
 
 ## Mandatory storm
-<список методов с краткой инструкцией каждого>
+<список required методов с краткой инструкцией каждого>
 
-## Optional storms (если условие X)
-<conditional methods>
+## Conditional storms (auto-selection — см. §18)
+<какие optional методы при каких context signals; описание из selection_rules>
 
 ## Output schema (YAML in markdown)
-<structured fields>
+<structured fields для artifact>
 
 ## Block condition (когда code-gate блокирует)
 <когда какой хук блокирует что>
@@ -741,3 +750,121 @@ Phase 5 build commands invoke Edit/Write. `code-gate.sh` will exit 2 if `spec/ag
 4. **Если skipped C-path** — code-gate / merge-guard / patch-counter всё равно перехватят
 
 Таким образом auto-mode имеет **усиленный** enforcement: меньше reactive (нет user keywords), больше proactive (phase-embedded) + все хуки активны.
+
+---
+
+## §18. Method Auto-Selection (cascade)
+
+Каждый scenario имеет `required_methods` (фиксированные) + `optional_methods_pool` (кандидаты). Реально-запускаемое подмножество выбирается через **3-step cascade**.
+
+### Cascade
+
+```
+1. REQUIRED      ← всегда запускаются, не выбираются (deterministic baseline)
+2. STATIC RULES  ← matched context signals добавляют методы из pool (deterministic)
+3. LLM-JUDGE     ← fallback только если step 2 ничего не добавил
+4. USER OVERRIDE ← interactive only; headless skips
+```
+
+### Step 1: Required methods (no choice)
+
+Из scenario YAML `required_methods: [<list>]`. Всегда запускаются все. Не зависят от context, mode или signals.
+
+**Пример T1:** required = `[39 First Principles, 11 Tree of Thoughts, 34 Pre-mortem, 20 ADR, 42 Critique]` — это 5 баз для **любой** feature.
+
+### Step 2: Static rules (deterministic context match)
+
+YAML `selection_rules` — список правил вида:
+```yaml
+- if: <regex applied to scope name + slug + recent events.jsonl>
+  add: [<method IDs>]
+  rationale: "<why>"
+```
+
+**Алгоритм:**
+1. Для каждого правила — проверка matched
+2. Если matched → add методы из правила в selected set
+3. Дедупликация (избегаем дублей)
+4. Cap по `max_optional_selected` (default 2)
+
+**Пример T1 (security feature):**
+- scope = `feature_payment-flow`
+- rule matched: `scope содержит "security|auth|payment|crypto"`
+- added: `[17 Red Team, 23 Security Audit Personas]`
+- final = required (5) + selected (2) = 7 методов
+
+### Step 3: LLM-judge fallback (только если step 2 = ∅)
+
+Если `static_rules` не добавили ни одного метода — вызывается LLM-judge:
+
+```
+prompt:
+  "Scope: <slug>. Context: <PRD excerpt or recent events>.
+   Available pool: <optional_methods_pool with descriptions from CSV>.
+   Pick 1-2 methods most relevant. Output JSON {methods: [N,M], rationale: '...'}"
+```
+
+Это узкий single-purpose LLM call. Cost ~$0.01-0.05 per storm. Audited в events.jsonl с full reasoning.
+
+**Когда срабатывает в реальности:** для exploratory scopes без явных signals (например, scope=`feature_dashboard-revamp` — нет security/UI/novel match).
+
+### Step 4: User override (interactive only)
+
+В **interactive** mode:
+- После step 1-3 — system показывает финальный список: «Selected required: [...]. Selected optional via static_rules: [...]. Final 7 methods. Override? (y/n/replace)»
+- User может: accept (y) / decline optional (n) / replace selection (replace with method IDs)
+
+В **headless** mode:
+- Step 4 skipped automatically
+- Final selection логируется в events.jsonl
+- Storm запускается без вопросов
+
+### Headless mode — особенности
+
+**Critical для качества:** в headless нет step 4 (user override), поэтому steps 1-3 = единственный shot.
+
+Защитные меры:
+- **Static rules — primary** (deterministic, audit-able)
+- **LLM-judge — только fallback** (не primary, чтобы не зависеть от LLM в каждом случае)
+- **Selection logged** в events.jsonl с полным reasoning (rule matched / LLM rationale)
+- **Если headless storm падает** (LLM-judge ошибка, методы конфликтуют) → code-gate всё равно блокирует Phase 5 (artifact не создан или taxonomy-checker invalid)
+
+### Audit format
+
+Каждая storm session пишет в events.jsonl:
+```json
+{
+  "event": "storm_method_selection",
+  "trigger_id": "T1",
+  "slug": "payment-flow",
+  "mode": "headless",
+  "required": [39, 11, 34, 20, 42],
+  "static_rules_matched": [
+    {"rule_id": 0, "rule_if": "scope contains security|auth|payment|crypto", "added": [17, 23]}
+  ],
+  "llm_judge_invoked": false,
+  "llm_judge_picks": null,
+  "user_override": null,
+  "final_methods": [39, 11, 34, 20, 42, 17, 23],
+  "timestamp": "<iso>"
+}
+```
+
+Это даёт **полный audit trail** того что и почему выбрано в каждой сессии. Через месяц можно spot patterns («static rules слишком часто пропускают X — расширить»).
+
+### Расширение selection_rules
+
+Новый context signal → одна строка в `selection_rules` соответствующего scenario.md. **Closed-set с расширением через явный акт** (правило M3).
+
+Если static rules слишком часто промахиваются (LLM-judge fallback >30% от всех storm sessions) → review правил, добавление новых rules. Триггер: monthly manifest review (§7).
+
+### Сравнение режимов
+
+| Mechanism | Interactive | Headless |
+|---|---|---|
+| Required methods | Все 5 | Все 5 |
+| Static rules cascade | Полностью работает | Полностью работает |
+| LLM-judge fallback | Полностью работает | Полностью работает |
+| User override (step 4) | Активно — можно accept/decline/replace | **Skipped** automatically |
+| Audit trail в events.jsonl | Активно | **Усилен** — full reasoning обязателен |
+| Storm может провалиться | Возможен (user reject все) | Если LLM-judge crash → fallback to required-only + warning |
