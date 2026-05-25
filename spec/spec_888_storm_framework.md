@@ -490,22 +490,32 @@ closes_gap: [<P1-P10>]
 - `manifest.json` валиден, проходит JSON schema check
 - `sync_manifest.py check-upstream` запускается без ошибок, генерирует пустой divergence report для свежеабсорбированных файлов
 
-### S4 — Scenarios + 888 integration
+### S4 — Scenarios + 888/BMAD phase-embedded integration
 **Эффорт:** 1.5 сессии ~ 3 часа
 **Файлы:**
 - `scenarios/T1-T10.md` — 10 файлов по template из §8
-- `~/.claude/skills/888/SKILL.md` — добавить секцию «Storm framework» с описанием как dispatcher интегрируется с storm
+- `~/.claude/skills/888/SKILL.md` — секция «Storm framework» + dispatcher integration
+- **Phase-embedded edits** (см. §17 mapping):
+  - `vendor/bmad-builder/.../build-process.md` — добавить Phase 4.5 с auto-call `storm-orchestrator.py T2`
+  - `~/.claude/skills/888-persona-analyst/SKILL.md` — call T1 на завершении фазы
+  - `~/.claude/skills/888-persona-architect/SKILL.md` — call T1+T2 на старте фазы
+  - `~/.claude/skills/888-persona-implementer/SKILL.md` — T7 check на старте
+  - `~/.claude/skills/888-persona-qa/SKILL.md` — T8 на старте
+  - `~/.claude/skills/888-persona-improver/SKILL.md` — T9 check
+  - `~/.claude/skills/bmad-auto-dev/SKILL.md` — T1 + T34 на story-start, T8 pre-merge
 
 **Acceptance:**
 - 10 scenario файлов валидируются schema (YAML frontmatter корректен)
 - 888 SKILL.md ссылается на storm как обязательный layer
-- End-to-end smoke: user prompt «хочу внедрить X» → intent-detector → context inject → 888 dispatcher предлагает запустить storm → orchestrator → artifact
+- 7 phase-embedded edits применены (verify via grep `storm-orchestrator.py` в каждом)
+- End-to-end smoke interactive: user prompt «хочу внедрить X» → intent-detector → context inject → 888 dispatcher предлагает storm → orchestrator → artifact
 
-### S5 — End-to-end test + bug iteration
+### S5 — End-to-end test (interactive + headless) + bug iteration
 **Эффорт:** 1 сессия ~ 2 часа
-**Сценарий:** Реальный «создам нового агента foo-bar-baz» через всю систему:
-1. User prompt активирует T2
-2. context inject
+
+**Сценарий A — Interactive:** Реальный «создам нового агента foo-bar-baz»:
+1. User prompt активирует T2 (intent-detector A-path)
+2. Context inject
 3. 888 предлагает запустить T2 storm
 4. Storm orchestrator проходит 5 методов
 5. Artifact создан
@@ -513,11 +523,20 @@ closes_gap: [<P1-P10>]
 7. Сессия завершается
 8. audit-trail записал session_end
 
+**Сценарий B — Headless/auto:** `claude -p --headless "build agent bar-baz from spec/agent_bar-baz_brief.md"`:
+1. NO user keywords → intent-detector A-path silent
+2. bmad-agent-builder loaded, доходит до Phase 4.5
+3. Phase 4.5 **proactively** вызывает `python3 storm-orchestrator.py T2 bar-baz` (C-path)
+4. Storm проходит 5 методов automatically (с pre-defined responses or LLM-judge in non-interactive mode)
+5. Artifact создан
+6. Phase 5 проходит code-gate
+7. session_end в audit
+
 **Acceptance:**
-- Полный цикл проходит без падений
-- Все 5 storm методов отработали
-- Artifact содержит реальное содержание (не TODO/N/A)
-- events.jsonl содержит ≥6 событий цикла
+- Сценарий A: полный цикл без падений, ≥6 событий в events.jsonl
+- Сценарий B: полный цикл без падений в headless mode, storm вызван из workflow не из hook
+- Все 5 storm методов отработали (оба сценария)
+- Artifact содержит реальное содержание (не TODO/N/A) — verified taxonomy-checker.py
 - Документированный список найденных bugs + fixes
 
 **Total:** ~10-15 часов работы, 5 сессий.
@@ -611,3 +630,114 @@ closes_gap: [<P1-P10>]
 5. S1 запускается в **отдельной** сессии (свежий context, чтобы не упереться в context limit)
 
 **Это применение правила №5 (enumeration ДО кода) к самому storm framework. Дисциплина начинается с этого spec'а.**
+
+---
+
+## §16. Invocation Modes — как вызывается elicitation
+
+Storm может быть вызван **четырьмя путями**. Каждый mode имеет primary path + backup.
+
+| Mode | Когда работает | Primary path | Backup |
+|---|---|---|---|
+| **A. Interactive (user в чате)** | User пишет текст с keyword'ами | `intent-detector.sh` (UserPromptSubmit) → context inject → LLM зовёт storm-orchestrator.py | `code-gate.sh` блокирует Edit если artifact missing |
+| **B. Code-gate backfill** | LLM пытается Edit без artifact'а | `code-gate.sh` (PreToolUse) → exit 2 → форс запустить storm-orchestrator.py | — (это сам backup) |
+| **C. Phase-embedded (proactive)** | На определённой фазе workflow | Прямой `python3 storm-orchestrator.py T<N> <slug>` внутри SKILL.md / build-process.md | code-gate + merge-guard страхуют если skipped |
+| **D. Headless/auto-mode (`-H`)** | `claude -p --headless ...` | C (phase-embedded, primary) — workflow proactively вызывает storm | B + merge-guard + patch-counter + destructive-guard (все работают независимо от mode) |
+
+### Принцип
+
+- **Interactive mode** → primary A (reactive on keywords), backup B
+- **Auto mode** → primary C (proactive on phase entry), backup B+merge-guard+patch-counter
+- **Hooks ВСЕ работают независимо от mode** (B, merge-guard, patch-counter, destructive-guard, audit-trail) — это последний safety net
+- **Phase-embedded C** — главная страховка для auto-mode, где A не срабатывает
+
+### Что меняется в headless mode
+
+| Mechanism | Interactive | Headless |
+|---|---|---|
+| `intent-detector.sh` keyword parsing | Активно работает | Может не сработать (нет user-keywords) |
+| `code-gate.sh` artifact check | Активно | Активно |
+| `merge-guard.sh` | Активно | Активно |
+| `patch-counter.sh` + threshold | Активно | Активно |
+| `destructive-guard.sh` | Активно | Активно с required-reason |
+| Phase-embedded storm call | Optional (полагается на intent-detector) | **Обязательное** |
+| Storm interactivity | Step-by-step user choice | Pre-defined methods + LLM-judge in non-interactive mode |
+
+### Storm orchestrator behavior в headless
+
+`storm-orchestrator.py` детектит mode через `os.isatty(0)` (или env `HEADLESS_MODE=1`):
+
+| Mode | Method invocation |
+|---|---|
+| Interactive | Пошагово показывает 5 методов, ждёт user input (как `/bmad-advanced-elicitation`) |
+| Headless | Запускает 5 методов автоматически: каждый метод = LLM-call с structured prompt + structured output → собирает в YAML → пишет artifact без user interaction |
+
+---
+
+## §17. Phase-Embedded Mapping (proactive storm calls)
+
+Для каждого workflow — какие storm-вызовы добавляются на каких фазах:
+
+| Workflow | Фаза | Storm trigger | Когда вызывается | Что закрывает |
+|---|---|---|---|---|
+| **bmad-agent-builder** | **Phase 4.5** (новая, между Draft и Build) | T2 (agent_create) | Сразу после Phase 4 (Draft & Refine), до Phase 5 (Build) | Gap P5 (BMAD без Phase 4.5) |
+| **888-persona-analyst** | End of Phase 1 | T1 (feature_intent) | Перед handoff в Architect | Feature без First Principles → Architect |
+| **888-persona-architect** | Start of Phase 2 | T1 + T20 ADR | На старте architecture work | Architecture решения без явных trade-offs |
+| **888-persona-implementer** | Start of Phase 2.5 | T7 check (patch counter) | Перед началом implementation | Reactive-patching без taxonomy |
+| **888-persona-qa** | Start of Phase 3 | T8 (merge prep) | Перед review handoff | Merge без adversarial review |
+| **888-persona-improver** | Start of Phase 5 | T9 check (stuck signal) | На retro session | Reactive pattern не замечен |
+| **bmad-auto-dev** | story-start | T1 + #34 Pre-mortem | Перед dev-story | Story без pre-mortem |
+| **bmad-auto-dev** | pre-merge | T8 | Перед finalize | Merge без review |
+
+### Конкретный пример для bmad-agent-builder Phase 4.5
+
+Edit в `vendor/bmad-builder/src/skills/bmad-agent-builder/build-process.md` после §Phase 4 и до §Phase 5:
+
+```markdown
+## Phase 4.5: Adversarial Review (NEW — 888 storm v1.0)
+
+**MANDATORY before Phase 5 Build.** Run storm T2 to validate the draft before committing to code.
+
+### Invocation
+
+Interactive mode:
+```bash
+python3 ~/.claude/skills/888/storm/storm-orchestrator.py T2 {slug} --interactive
+```
+
+Headless mode (auto):
+```bash
+HEADLESS_MODE=1 python3 ~/.claude/skills/888/storm/storm-orchestrator.py T2 {slug}
+```
+
+### What it runs
+
+5 mandatory methods from embedded/elicitation-methods.csv:
+- #34 Pre-mortem Analysis — «через 3 месяца провал — почему?»
+- #35 Failure Mode Analysis — что может сломаться в каждом компоненте?
+- #11 Tree of Thoughts — какие 3 альтернативы рассмотрены?
+- #17 Red Team vs Blue Team — adversarial stress-test
+- #4 User Persona Focus Group — кому это нужно?
+
+### Output
+
+`spec/agent_{slug}_storm.md` — without this artifact Phase 5 blocked by code-gate.
+
+### Block condition
+
+Phase 5 build commands invoke Edit/Write. `code-gate.sh` will exit 2 if `spec/agent_{slug}_storm.md` missing.
+```
+
+### Принцип расширения mapping
+
+Новый workflow → добавить строку в §17 + edit соответствующий SKILL.md/build-process.md. Закрытая схема: 8 mapping строк сейчас, новые добавляются явно (правило M3 — closed-set).
+
+### Авто-mode summary
+
+В `--headless` mode:
+1. **Hooks работают** как обычно (включая code-gate как safety net)
+2. **A-path (intent-detector)** может не сработать без user-keywords
+3. **C-path (phase-embedded)** — главный механизм; workflow сам вызывает storm на нужных фазах
+4. **Если skipped C-path** — code-gate / merge-guard / patch-counter всё равно перехватят
+
+Таким образом auto-mode имеет **усиленный** enforcement: меньше reactive (нет user keywords), больше proactive (phase-embedded) + все хуки активны.
