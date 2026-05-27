@@ -57,6 +57,34 @@ wtiso_invoke_merger() {
     )
 }
 
+# wtiso_make_shard_raw <workspace> <batch-id> <shard-filename> <full-body>
+# Like wtiso_make_shard but writes <full-body> verbatim (caller supplies the
+# entire shard contents — q-id comment, placeholder anchor, body, anything).
+# Useful for tests needing fenced blocks, frontmatter delimiters, raw bytes.
+wtiso_make_shard_raw() {
+    local ws="$1" bid="$2" name="$3" body="$4"
+    local sd="$ws/audit/shards/$bid"
+    mkdir -p "$sd"
+    printf '%s' "$body" > "$sd/$name"
+}
+
+# wtiso_invoke_merger_raw_bid <workspace> <raw-batch-id>
+# Invoke merger with an arbitrary (possibly malformed) batch-id literal.
+# Used by RED-SH-10 shell-injection scenarios. Caller is responsible for
+# the workspace state. Returns merger exit code.
+wtiso_invoke_merger_raw_bid() {
+    local ws="$1" bid="$2"
+    local merger="${MERGER:-scripts/888-shard-merger.sh}"
+    if [[ "$merger" != /* ]]; then
+        merger="$(cd "$(dirname "$merger")" && pwd)/$(basename "$merger")"
+    fi
+    (
+        cd "$ws"
+        BATCH_MOCK_MODE=1 BMAD_SHARD_L1_MOCK="${BMAD_SHARD_L1_MOCK:-PASS}" \
+            bash "$merger" --batch-id "$bid" --target methodology-888.md
+    )
+}
+
 # wtiso_assert_audit_event <workspace> <batch-id> <event-name>
 # Returns 0 if event present in merger audit jsonl, 1 otherwise.
 wtiso_assert_audit_event() {

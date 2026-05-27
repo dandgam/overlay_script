@@ -235,6 +235,27 @@ _l3_check() {
     return 0
 }
 
+_shard_has_frontmatter_delim() {
+    # L3 shard-content check: returns 0 (true) if the shard contains a
+    # `^---$` line outside fenced code blocks — which would corrupt the
+    # methodology frontmatter if appended. Bug-fix for v2.1: the prior
+    # `_l3_check` ran only on `staging-pre-shard` (a copy of staging
+    # without the shard appended), so it never inspected the shard
+    # content itself and L3 never fired through normal flow.
+    local shard="$1"
+    local line in_fence=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[\ ]{0,3}(\`\`\`|~~~) ]]; then
+            in_fence=$((1 - in_fence))
+            continue
+        fi
+        if (( in_fence == 0 )) && [[ "$line" == "---" ]]; then
+            return 0
+        fi
+    done < "$shard"
+    return 1
+}
+
 _count_outside_fence() {
     # Reads lines on stdin; counts `^## [a-z]?\d+\.` headings + `^---$`
     # frontmatter delimiters that are NOT inside a fenced code block.
@@ -359,7 +380,10 @@ _main() {
     # P1 — mkdir + flock
     mkdir -p "$SHARD_DIR"
     exec {LOCK_FD}>"$LOCK"
-    if ! flock -x -w 30 "$LOCK_FD"; then
+    # MERGER_FLOCK_TIMEOUT_OVERRIDE is a test hook to compress the 30s default
+    # into a few seconds for RED-SH-11 (concurrent merger contention).
+    local flock_timeout="${MERGER_FLOCK_TIMEOUT_OVERRIDE:-30}"
+    if ! flock -x -w "$flock_timeout" "$LOCK_FD"; then
         _log "P1 flock timeout (merger contention)"
         exit 2
     fi
@@ -482,17 +506,24 @@ _main() {
             continue
         fi
 
-        # 11.4 — L3 (whole-batch abort on fail)
-        # Build temp candidate staging = current $STAGING + shard appended (post-rewrite)
+        # 11.4 — L3 (whole-batch abort on fail). Two checks:
+        #   (a) shard-content scan: shard must not contain `^---$` (frontmatter
+        #       delimiter) outside fenced blocks — that would corrupt the
+        #       merged methodology frontmatter.
+        #   (b) staging byte invariant: first N bytes of staging must equal
+        #       first N bytes of original target (append-only).
         local placeholder
-        # Derive placeholder UUID from batch-id last 8 hex.
         placeholder="## 4PLACEHOLDER-${BATCH_ID##*-}."
+
+        if _shard_has_frontmatter_delim "$shard"; then
+            _REJECTED_SHARDS+=("$shard")
+            _audit shard_l3_violation "\"$shard\""
+            _log "L3 violation (append_only_violation) — whole-batch abort: $shard"
+            exit 14
+        fi
 
         local candidate="${STAGING}.candidate.$$"
         cp "$STAGING" "$candidate"
-        # Append shard body (rewrite happens after L3, but L3 only checks
-        # invariant on the staging-pre-this-shard, not the appended content).
-
         if ! _l3_check "$candidate" "$TARGET"; then
             rm -f "$candidate"
             _REJECTED_SHARDS+=("$shard")
