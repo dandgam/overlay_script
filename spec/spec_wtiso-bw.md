@@ -505,3 +505,43 @@ Baseline path: `evals/baselines/wtiso-bw-baseline-2026-05-27.json` (operator run
 - ⚠ `wrap` subcommand does NOT exist в sandbox.py currently — implementer Phase 2.5 must add it. Existing `BwrapSandbox.wrap_command(worktree, network, env, readonly_paths, worker_home_overlay)` returns list[str]; CLI wrapper composes args + invokes + `os.execvp`.
 - ⚠ STRIDE row count в §7 («22 + 3-6 architect adds → 25-28») = estimate. Authoritative count comes from `threat-model_wtiso-bw.md` parallel deliverable. If divergence >20%, escalate ДО Phase 2.5.
 - ⚠ Effort estimate revised к ~6-8h (от analyst F18 callout «972 LOC port + 10 tests + canary infra under-scoped at ~4h»). Implementer should split into ≥2 sessions if needed.
+
+---
+
+## §14 Session Plan (Phase 2.5 implementer — auto-loop-spec-long)
+
+Bootstrap target: 6 sessions, integration branch `integration/wtiso-bw`, fresh `claude -p` per session (Runtime=loop_wrapper, delay=300s). Auto merge=false — user reviews integration branch и merges manually на main.
+
+### Session breakdown
+
+| ID | Title | Surface | Spec section | Acceptance | Depends on | Destructive actions |
+|---|---|---|---|---|---|---|
+| S1 | `wrap` subcommand scaffold + version assertion | backend-python | §3.1 + §4 | argparse CLI added; `bwrap_version_floor` check; M0 baseline GREEN; AC2 (version floor) GREEN | — | [] |
+| S2 | Per-worker overlay preparation (eager copy + concurrent safety) | backend-python | §3.2 | `_prepare_overlays` master snapshot under flock; per-worker fast copy; M2 + M4 + AC3 GREEN | S1 | [] |
+| S3 | cgroup wrap + NoSandbox fallback policy | backend-python | §3.4 | `systemd-run --user --scope` integration; BMAD_REQUIRE_CGROUP + BMAD_ALLOW_NOSANDBOX flag handling; M1 + M5 GREEN | S2 | [] |
+| S4 | bash glue `_spawn_worker_isolated` + env clearenv | mixed | §3.3 + §5 | new helper в `~/.claude/skills/888/scripts/888-batch.sh`; env allowlist (10 vars from sandbox.py:43-51); M3 (env exfil) + AC4 + AC5 GREEN | S3 | [] |
+| S5 | Audit event schema (4 new types) + sev-5 RED tests (AC6-AC10) | backend-python | §6 + §8 | `sandbox_violation_blocked`, `sandbox_fallback_nosandbox`, `bwrap_version_floor_failed`, `cgroup_tasks_max_hit` events с schema_version="1"; AC6-AC10 GREEN | S4 | [] |
+| S6 | Open Q resolution + bmad-code-review + bmad-security-review + retro | mixed | §11 + §11.1 + §12 | 9 Open Q resolved explicitly; bmad-code-review 3 hunters PASS; bmad-security-review 4 hunters PASS; methodology §4xx retro entry | S5 | [] |
+
+**surface_rationale (S4):** bash `_spawn_worker_isolated` ~150 LOC + Python sandbox.py integration ~100 LOC + RED test wiring ~80 LOC — каждый ≥20% of session work.
+
+**surface_rationale (S6):** review skill invocations via Agent ~40% + Open Q decision documentation ~30% + retro markdown ~30%.
+
+### Multi-repo note
+
+Implementation spans 2 repos:
+- **bmad-orchestrator** (this repo, integration branch lives here): `src/bmad_orchestrator/runtime/sandbox.py` — primary impl (~80% of code)
+- **`~/.claude/skills/888/`** (external skill repo): `scripts/888-batch.sh` (S4 bash glue) + `scripts/tests/wtiso-bw/*.sh` (15 RED stubs — GREEN happens here)
+
+Auto-loop wrapper runs within bmad-orchestrator. Per-session work на `~/.claude/skills/888/` editing goes через `bash .claude/scripts/write-claude-file.sh` helper (harness-blocked otherwise). Commits в `~/.claude/skills/888/` repo делаются separately per session (separate git repo).
+
+### Exit criteria (initiative-complete)
+
+- All 6 sessions completed → integration branch `integration/wtiso-bw` ready
+- 15 RED tests GREEN (verified via `bash ~/.claude/skills/888/scripts/tests/wtiso-bw/_runner.sh` or equivalent)
+- bmad-code-review verdict PASS (3 hunters: Blind / Edge / Acceptance)
+- bmad-security-review verdict PASS (4 hunters: Injection / Auth Bypass / Crypto / RLS Leak)
+- methodology §4xx retro entry written
+- Final Report в tracker с commit hashes + manual-merge hint
+
+User receives PushNotification: «initiative wtiso-bw ready for manual merge. Review `integration/wtiso-bw` then `git merge --no-ff`.»
