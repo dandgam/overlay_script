@@ -495,7 +495,18 @@ class BwrapSandbox:
             "--unshare-uts",
             "--unshare-ipc",
             "--unshare-cgroup-try",
+            # S5 AC8/AC10 (#20 sev-3 + T11 sev-3): unshare user namespace so
+            # syscalls like mount -t fuse return EPERM and the worker runs in
+            # its own UID namespace. Flag silently skips when kernel disables
+            # unprivileged_userns_clone (boot-check in _cmd_wrap emits a
+            # `user_namespace_unshare_unavailable` audit warn in that case).
+            "--unshare-user-try",
         ]
+        # Opt-in UID remap (AC10). Default keeps host UID to avoid surprising
+        # existing tests / git commit identity. Set BMAD_SANDBOX_UID_REMAP=1
+        # to map inner uid/gid → 0 inside the user namespace.
+        if os.environ.get("BMAD_SANDBOX_UID_REMAP", "").strip() == "1":
+            wrapped += ["--uid", "0", "--gid", "0"]
 
         # Claude CLI state: the binary writes config to ~/.claude.json,
         # plugin manifest to ~/.claude/, and version state to
@@ -1398,6 +1409,142 @@ def _sweep_stale_overlays(
     return swept
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# S5 — sev-5/sev-4/sev-3 boot-time threat closures (spec §6.1, §11 #7, AC6-AC10)
+#
+# AC6 docker-group pivot (T7 sev-5): refuse to spawn if orchestrator UID is in
+# the ``docker`` group AND /var/run/docker.sock is reachable — the worker
+# would otherwise be one ``docker run --privileged`` away from host root.
+# AC7 unprivileged_userns_clone (C2 sev-5): if kernel allows unprivileged user
+# namespaces AND operator asked for ``overlayfs`` mode → audit + fall back to
+# ``copy`` unless explicitly opted in via BMAD_ALLOW_OVERLAYFS=1.
+# AC8/AC10 user-namespace (#20 sev-3 + T11 sev-3): handled by adding
+# ``--unshare-user-try`` to bwrap argv (BwrapSandbox.wrap_command).
+# AC9 die-with-parent (D4 sev-4): already wired via ``--die-with-parent`` in
+# wrap_command; this session adds the canary test.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DOCKER_SOCKET_DEFAULT = "/var/run/docker.sock"
+_USERNS_CLONE_DEFAULT = "/proc/sys/kernel/unprivileged_userns_clone"
+
+
+def _current_groups() -> list[str]:
+    """Return current process group names. Test override: BMAD_TEST_DOCKER_GROUPS
+    (comma-separated names) short-circuits the os.getgroups() lookup so canary
+    tests can simulate the dangerous configuration without modifying host
+    /etc/group.
+    """
+    override = os.environ.get("BMAD_TEST_DOCKER_GROUPS")
+    if override is not None:
+        return [g.strip() for g in override.split(",") if g.strip()]
+    try:
+        import grp as _grp
+        names: list[str] = []
+        for gid in os.getgroups():
+            try:
+                names.append(_grp.getgrgid(gid).gr_name)
+            except KeyError:
+                continue
+        return names
+    except Exception as exc:
+        log.warning("current_groups_lookup_failed error=%s", exc)
+        return []
+
+
+def _docker_socket_path() -> str:
+    return os.environ.get("BMAD_TEST_DOCKER_SOCKET_PATH", _DOCKER_SOCKET_DEFAULT)
+
+
+def _docker_socket_present() -> bool:
+    return Path(_docker_socket_path()).exists()
+
+
+def _assert_no_docker_group(allow_nosandbox: bool) -> int | None:
+    """Boot-time check: refuse to wrap a worker if dispatcher UID has docker
+    group access AND a docker socket is reachable. Returns exit code on refusal,
+    None to continue. Honours ``allow_nosandbox`` AND a dedicated
+    ``BMAD_ALLOW_DOCKER_GROUP=1`` opt-out (so dev hosts whose operator UID is
+    permanently in `docker` group can run the worker pool без global
+    BMAD_ALLOW_NOSANDBOX exposure — the docker risk is acknowledged but the
+    rest of the sandbox stays primary).
+    """
+    if "docker" not in _current_groups():
+        return None
+    if not _docker_socket_present():
+        return None
+    sock = _docker_socket_path()
+    _emit_sandbox_audit(
+        "sandbox_violation_blocked",
+        schema_version="1",
+        violation_type="docker_socket_pivot",
+        path_or_var=sock,
+        outcome="blocked",
+        detector="boot_assert_no_docker_group",
+    )
+    allow_docker = os.environ.get("BMAD_ALLOW_DOCKER_GROUP", "").strip() == "1"
+    if allow_docker or allow_nosandbox:
+        which = "BMAD_ALLOW_DOCKER_GROUP=1" if allow_docker else "BMAD_ALLOW_NOSANDBOX=1"
+        sys.stderr.write(
+            "[sandbox] primary safety теряется — orchestrator UID in `docker` "
+            f"group AND {sock} reachable; {which} lets it run but the worker "
+            "can pivot к host root via docker daemon.\n"
+        )
+        return None
+    sys.stderr.write(
+        f"orchestrator UID is in `docker` group AND {sock} exists — refusing "
+        "to spawn worker (host-root pivot risk via docker daemon). Drop the "
+        "user from `docker` group, OR set BMAD_ALLOW_DOCKER_GROUP=1 to "
+        "acknowledge the risk, OR set BMAD_ALLOW_NOSANDBOX=1 to fully opt out.\n"
+    )
+    return EXIT_SANDBOX_UNAVAILABLE
+
+
+def _userns_clone_enabled(path: str | None = None) -> bool | None:
+    """Read kernel's unprivileged_userns_clone flag. Returns True/False, or
+    None when path is missing / unreadable (kernel doesn't expose the knob).
+    """
+    p = path or os.environ.get("BMAD_TEST_USERNS_CLONE_PATH") or _USERNS_CLONE_DEFAULT
+    try:
+        raw = Path(p).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return raw == "1"
+
+
+def _check_userns_safety(overlay_mode: str) -> str:
+    """Resolve overlay_mode against the unprivileged userns_clone kernel knob.
+
+    When userns_clone is enabled (=1) AND overlay_mode=overlayfs AND
+    BMAD_ALLOW_OVERLAYFS!=1 → audit `overlayfs_unsafe_fallback` and return
+    ``copy`` (graceful fall-back). Otherwise return ``overlay_mode`` unchanged.
+    Rationale: unpriv user_ns + overlayfs xattr setuid is a known host-root
+    escalation class (CVE-2021-3493).
+    """
+    if overlay_mode != "overlayfs":
+        return overlay_mode
+    allow = os.environ.get("BMAD_ALLOW_OVERLAYFS", "").strip() == "1"
+    if allow:
+        return overlay_mode
+    enabled = _userns_clone_enabled()
+    if enabled is True:
+        _emit_sandbox_audit(
+            "overlayfs_unsafe_fallback",
+            schema_version="1",
+            requested_mode="overlayfs",
+            fallback_mode="copy",
+            userns_clone_enabled=True,
+            allow_overlayfs=False,
+            outcome="forced_copy_mode",
+        )
+        sys.stderr.write(
+            "[sandbox] --overlay-mode=overlayfs requested AND kernel allows "
+            "unprivileged user namespaces (CVE-2021-3493 class risk) — "
+            "falling back к copy mode. Set BMAD_ALLOW_OVERLAYFS=1 to override.\n"
+        )
+        return "copy"
+    return overlay_mode
+
+
 def _cmd_wrap(args: object) -> int:
     """``wrap`` subcommand handler.
 
@@ -1405,6 +1552,7 @@ def _cmd_wrap(args: object) -> int:
     S2 — per-worker overlay wiring (``--overlay-mode copy``).
     S3 — cgroup composition (``systemd-run --user --scope``) + NoSandbox
          fallback policy (§3.4.2 firm commit + §5.1 precedence matrix).
+    S5 — docker-group / userns_clone boot-time threat closures (AC6/AC7).
     """
     import argparse as _argparse  # local import keeps top-of-file imports lean
     assert isinstance(args, _argparse.Namespace)
@@ -1449,6 +1597,14 @@ def _cmd_wrap(args: object) -> int:
             "no-sandbox mode.\n"
         )
         return EXIT_SANDBOX_UNAVAILABLE
+
+    # S5 AC6: refuse if dispatcher UID is in `docker` group + socket reachable.
+    # Runs BEFORE bwrap_path check so the dangerous combination cannot proceed
+    # even on hosts missing bwrap (otherwise sandbox_hard_fail_no_bwrap masks
+    # the deeper docker-pivot risk and operator might force-bypass via ALLOW).
+    docker_rc = _assert_no_docker_group(cli_allow)
+    if docker_rc is not None:
+        return docker_rc
 
     bwrap_path = shutil.which("bwrap")
     if bwrap_path is None:
@@ -1533,6 +1689,11 @@ def _cmd_wrap(args: object) -> int:
             f"--overlay-mode={overlay_mode!r} invalid (copy|bind|overlayfs)\n"
         )
         return 2
+    # S5 AC7: if overlayfs requested AND kernel allows unprivileged user
+    # namespaces, fall back к copy mode (CVE-2021-3493 class risk). Resolves
+    # BEFORE the bind/overlayfs guard so the safe path also works without
+    # BMAD_ALLOW_OVERLAYFS opt-in.
+    overlay_mode = _check_userns_safety(overlay_mode)
     if overlay_mode in ("bind", "overlayfs"):
         sys.stderr.write(
             f"--overlay-mode={overlay_mode} not wired yet (S2 wires copy only; "
@@ -1795,9 +1956,14 @@ __all__ = [
     "Sandbox",
     # S3 cgroup + NoSandbox policy helpers (spec §3.4 + §5.1)
     "_allow_nosandbox",
+    "_assert_no_docker_group",
     "_cgroup_disabled_by_env",
+    # S5 boot-time threat closures (spec §6.1 + §11 #7 + AC6/AC7)
+    "_check_userns_safety",
     # S2 overlay helpers (spec §3.2)
     "_cleanup_overlays",
+    "_current_groups",
+    "_docker_socket_present",
     "_prepare_overlay_for_worker",
     "_prepare_overlays_master",
     "_read_pids_max_count",
@@ -1806,6 +1972,7 @@ __all__ = [
     "_sandbox_backend_none_requested",
     "_scope_cgroup_path",
     "_sweep_stale_overlays",
+    "_userns_clone_enabled",
     "compile_deny_lists",
     "detect_sandbox",
     "match_bash_deny",
