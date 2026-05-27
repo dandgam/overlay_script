@@ -19,24 +19,17 @@
 
 ## Current
 
-- **id:** S2
-- **title:** Per-worker overlay preparation (eager copy + concurrent safety)
+- **id:** S3
+- **title:** cgroup wrap + NoSandbox fallback policy
 - **surface:** backend-python
-- **spec_section:** §3.2
-- **acceptance:** _prepare_overlays master snapshot under flock; per-worker fast copy; M2 + M4 + AC3 GREEN
-- **depends_on:** S1
+- **spec_section:** §3.4
+- **acceptance:** systemd-run --user --scope integration; BMAD_REQUIRE_CGROUP + BMAD_ALLOW_NOSANDBOX handling; M1 + M5 GREEN
+- **depends_on:** S2
 - **destructive_actions:** []
 - **retry_count:** 0
 
 ## Pending
 
-- **id:** S3
-  - **title:** cgroup wrap + NoSandbox fallback policy
-  - **surface:** backend-python
-  - **spec_section:** §3.4
-  - **acceptance:** systemd-run --user --scope integration; BMAD_REQUIRE_CGROUP + BMAD_ALLOW_NOSANDBOX handling; M1 + M5 GREEN
-  - **depends_on:** S2
-  - **destructive_actions:** []
 - **id:** S4
   - **title:** bash glue _spawn_worker_isolated + env clearenv
   - **surface:** mixed
@@ -69,11 +62,18 @@
   - **acceptance_met:** argparse CLI added (subcommand `wrap` with §4.1 signature); `_assert_bwrap_version_floor` + `_read_bwrap_version_floor` + `_parse_bwrap_version` + `_allow_nosandbox` helpers landed; hard-fail exit 78 path + audit event `bwrap_version_floor_failed`; M0 baseline GREEN (`evals/baselines/wtiso-bw-baseline-2026-05-27.json` matching §8.1 schema); AC2 GREEN (mock bwrap 0.5.0 stub → exit 78 + audit verified).
   - **deferred_items:** systemd-run cgroup composition (S3 scope); overlay snapshot prep (S2 scope); env clearenv allowlist (S4 scope); 4 audit event types schema_version="1" beyond bwrap_version_floor_failed (S5 scope); CLI invocation through `_spawn_worker_isolated` bash glue (S4 scope).
   - **notes:** Version floor honours `BMAD_BWRAP_MIN_VERSION` env CAN-ONLY-RAISE (edge-case-hunter HIGH F9 — mirror `_MIN_NPROC` precedent). `--allow-nosandbox=1` / `BMAD_ALLOW_NOSANDBOX=1` / `BMAD_SANDBOX=none` all trigger force-sequential warn + execvp without isolation. Version-pass path delegates to `BwrapSandbox.wrap_command` so S1 leaves the spawn pipeline functional even pre-S4.
+- **id:** S2
+  - **title:** Per-worker overlay preparation (eager copy + concurrent safety)
+  - **completed_at:** 2026-05-27
+  - **acceptance_met:** `_prepare_overlays_master` создаёт ONE master snapshot под flock на `<source_home>/.batch-snapshot.lock` (idempotent через `.snapshot.sha256` cache, emits `master_snapshot_taken` audit с tree hash для AC5). `_prepare_overlay_for_worker` делает fast `/bin/cp -R` от master в `/tmp/888-bat-<bid>/overlays/<q-id>/`. `--overlay-mode`/`--overlay-source` wired в `_cmd_wrap` (только `copy` mode this session; bind/overlayfs raise per spec §10). M2 GREEN (sibling worktree unreachable via `--tmpfs /tmp` + `--bind {wt_abs}` scope × 3 iter). M4 GREEN (orchestrator state blackouted via `--tmpfs` over `_orchestrator_state` × 3 iter). AC3 GREEN (synthetic source_home → master snapshot → per-worker overlay → worker write `$HOME/.claude/canary` → host untouched + overlay contains × 3 iter).
+  - **deferred_items:** cgroup wrap composition (S3 scope); bash `_spawn_worker_isolated` integration (S4); audit event schema-version migrations for remaining 3 event types ` sandbox_violation_blocked / sandbox_fallback_nosandbox / cgroup_tasks_max_hit` (S5); bind / overlayfs modes (deferred per spec §10 defer table); boot-time wiring of `_sweep_stale_overlays` в dispatcher (S4 hook into 888-batch.sh).
+  - **notes:** Helpers idempotent: re-invocation на existing batch_dir не re-copies (hash file + dir existence checks). `_compute_overlay_tree_sha256` walks files sorted by relpath, hashes (relpath, content) pairs — symlinks skipped. flock fallback graceful: if lockfile touch fails (read-only home), proceed без lock с warning. `__all__` exports include the 4 underscore-prefixed helpers (callable from worker_spawn / 888-batch.sh integration code in S4). 60 existing sandbox tests pass (no regression).
 
 ## Journal
 
 - [2026-05-27] Bootstrap via /auto-loop-spec-long, delay=300s, runtime=loop_wrapper, auto_merge=false. backup/wtiso-bw-pre-2026-05-27 + integration/wtiso-bw created. Spec §14 Session Plan appended (6 sessions). Sourced from architect handoff §4fx + spec_wtiso-bw.md 507 LOC + threat-model_wtiso-bw.md 236 LOC + 15 RED stubs в ~/.claude/skills/888/scripts/tests/wtiso-bw/.
 - [2026-05-27] S1 done. sandbox.py +260 LOC: argparse CLI + version floor (≥0.6.0 default, env override CAN-ONLY-RAISE) + EXIT_SANDBOX_UNAVAILABLE=78 + audit emit. Tests: M0 baseline runner writes evals/baselines/wtiso-bw-baseline-2026-05-27.json; AC2 mock-bwrap-0.5.0 → exit 78 + audit verified. 60 existing sandbox tests pass (no regression). ruff clean. runtime=loop_wrapper → wrapper handles next iteration; no ScheduleWakeup.
+- [2026-05-27] S2 done. sandbox.py +292 LOC: 5 overlay helpers (`_prepare_overlays_master` under flock + `_prepare_overlay_for_worker` fast cp -R + `_cleanup_overlays` + `_sweep_stale_overlays` + `_compute_overlay_tree_sha256`); `--overlay-mode`/`--overlay-source` wired into `_cmd_wrap` (copy-only this session); 4 `__all__` exports added. Tests in `~/.claude/skills/888/scripts/tests/wtiso-bw/` committed at 115c95e: M2 cross-worker FS GREEN, M4 orch state GREEN, AC3 HOME overlay containment GREEN (all × 3 flake3-runs iter). AC2 regression GREEN. 60 existing sandbox tests pass. ruff clean. commit cc1fac6. runtime=loop_wrapper → wrapper handles next iteration; no ScheduleWakeup.
 
 ## Blockers / Pauses
 
