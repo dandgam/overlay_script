@@ -1059,6 +1059,258 @@ def _emit_sandbox_audit(event_type: str, **payload: object) -> None:
         log.warning("sandbox_audit_emit_failed event=%s error=%s", event_type, exc)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# S2 — per-worker overlay preparation (spec §3.2)
+#
+# Two-stage scheme: ONE master snapshot per batch (under flock на
+# ``~/.claude/.batch-snapshot.lock`` so concurrent batches don't tear the host
+# state mid-copy), then per-worker fast ``cp -R`` от master (local-FS, не
+# touching host home again). Master snapshot hash recorded for AC5
+# byte-identical reproducibility. Stale ``/tmp/888-bat-*`` sweep prevents
+# disk-fill on dispatcher crashes (edge-case-hunter HIGH F8 fix).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OVERLAY_CLAUDE_SUBPATHS: tuple[tuple[str, ...], ...] = (
+    (".claude",),
+    (".claude.json",),
+)
+_OVERLAY_SNAPSHOT_HASH_FILE = ".snapshot.sha256"
+_OVERLAY_LOCK_BASENAME = ".batch-snapshot.lock"
+_OVERLAY_STALE_MAX_AGE_SECONDS = 86_400  # 24h (spec §3.2 «older-than-24h»)
+
+
+def _overlay_master_root(batch_dir: Path) -> Path:
+    return batch_dir / "master-snapshot"
+
+
+def _overlay_worker_root(batch_dir: Path, q_id: str) -> Path:
+    return batch_dir / "overlays" / q_id
+
+
+def _compute_overlay_tree_sha256(root: Path) -> str:
+    """Deterministic SHA256 over (relpath, content) pairs sorted by relpath.
+
+    Skips symlinks (avoids cycles) and ``.snapshot.sha256`` marker itself.
+    Used for AC5 reproducibility: identical host snapshot → identical hash.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    entries: list[tuple[str, Path]] = []
+    for entry in root.rglob("*"):
+        if not entry.is_file() or entry.is_symlink():
+            continue
+        try:
+            rel = entry.relative_to(root)
+        except ValueError:
+            continue
+        if rel.name == _OVERLAY_SNAPSHOT_HASH_FILE:
+            continue
+        entries.append((str(rel), entry))
+    entries.sort(key=lambda x: x[0])
+    for relpath, entry in entries:
+        h.update(relpath.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            with open(entry, "rb") as fh:
+                while True:
+                    chunk = fh.read(65536)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+        except OSError as exc:
+            log.warning("overlay_hash_skip_unreadable rel=%s error=%s", relpath, exc)
+            continue
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _prepare_overlays_master(
+    batch_dir: Path,
+    *,
+    source_home: Path | None = None,
+) -> tuple[Path, str]:
+    """Create master snapshot of ~/.claude + ~/.claude.json under flock.
+
+    Idempotent: if ``master-snapshot/.snapshot.sha256`` exists, returns cached
+    path + hash без повторного copy (spec §3.2 «ОДНОКРАТНО BEFORE worker
+    fan-out»). Emits ``master_snapshot_taken`` audit event с hash on first
+    create.
+
+    Concurrent-safety (edge-case-hunter HIGH F6): flock на
+    ``<source_home>/.batch-snapshot.lock`` serialises N parallel batch starts —
+    host SQLite-WAL мid-save не теряет integrity. Per-worker copies later use
+    THIS master, не host ~/.claude, so worker fan-out has zero host I/O.
+    """
+    import fcntl as _fcntl
+    import subprocess as _subprocess
+
+    host = source_home if source_home is not None else Path(os.path.expanduser("~"))
+    master_root = _overlay_master_root(batch_dir)
+    hash_file = master_root / _OVERLAY_SNAPSHOT_HASH_FILE
+
+    if hash_file.exists() and (master_root / ".claude").exists():
+        return master_root, hash_file.read_text(encoding="utf-8").strip()
+
+    master_root.mkdir(parents=True, exist_ok=True)
+    lock_path = host / _OVERLAY_LOCK_BASENAME
+    try:
+        lock_path.touch(exist_ok=True)
+    except OSError as exc:
+        log.warning(
+            "overlay_lock_touch_failed path=%s error=%s — proceeding без flock",
+            lock_path, exc,
+        )
+        lock_fh = None
+    else:
+        lock_fh = open(lock_path, "rb")
+
+    try:
+        if lock_fh is not None:
+            _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_EX)
+        for parts in _OVERLAY_CLAUDE_SUBPATHS:
+            src = host.joinpath(*parts)
+            dst = master_root.joinpath(*parts)
+            if dst.exists():
+                continue
+            if not src.exists():
+                continue
+            if src.is_dir():
+                _subprocess.run(  # noqa: S603 — fixed argv, trusted paths
+                    ["/bin/cp", "-R", "--preserve=mode,timestamps", str(src), str(dst)],
+                    check=True,
+                )
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _subprocess.run(  # noqa: S603
+                    ["/bin/cp", "--preserve=mode,timestamps", str(src), str(dst)],
+                    check=True,
+                )
+    finally:
+        if lock_fh is not None:
+            try:
+                _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_UN)
+            finally:
+                lock_fh.close()
+
+    tree_hash = _compute_overlay_tree_sha256(master_root)
+    hash_file.write_text(tree_hash + "\n", encoding="utf-8")
+
+    _emit_sandbox_audit(
+        "master_snapshot_taken",
+        schema_version="1",
+        batch_dir=str(batch_dir),
+        master_root=str(master_root),
+        snapshot_sha256=tree_hash,
+        source_home=str(host),
+    )
+    return master_root, tree_hash
+
+
+def _prepare_overlay_for_worker(
+    batch_dir: Path,
+    q_id: str,
+    *,
+    master_root: Path | None = None,
+) -> Path:
+    """Per-worker fast ``cp -R`` от master snapshot. Returns worker overlay root.
+
+    Idempotent: existing worker overlay не re-copied. Caller passes returned
+    path к ``BwrapSandbox.wrap_command(worker_home_overlay=...)`` (or к the
+    CLI flag ``--overlay-source``). Local-FS copy only — host ~/.claude not
+    re-read here.
+    """
+    import subprocess as _subprocess
+
+    if master_root is None:
+        master_root = _overlay_master_root(batch_dir)
+    if not master_root.exists():
+        raise FileNotFoundError(
+            f"master snapshot missing at {master_root}; call "
+            "_prepare_overlays_master() first"
+        )
+    worker_root = _overlay_worker_root(batch_dir, q_id)
+    worker_root.mkdir(parents=True, exist_ok=True)
+    for parts in _OVERLAY_CLAUDE_SUBPATHS:
+        src = master_root.joinpath(*parts)
+        dst = worker_root.joinpath(*parts)
+        if dst.exists() or not src.exists():
+            continue
+        if src.is_dir():
+            _subprocess.run(  # noqa: S603
+                ["/bin/cp", "-R", "--preserve=mode,timestamps", str(src), str(dst)],
+                check=True,
+            )
+        else:
+            _subprocess.run(  # noqa: S603
+                ["/bin/cp", "--preserve=mode,timestamps", str(src), str(dst)],
+                check=True,
+            )
+    return worker_root
+
+
+def _cleanup_overlays(batch_dir: Path) -> None:
+    """Remove batch overlay tree post-batch. Warn-and-continue on failure
+    (operator can ``rm -rf /tmp/888-bat-*`` manually per spec §3.2).
+    """
+    if not batch_dir.exists():
+        return
+    import shutil as _shutil
+    try:
+        _shutil.rmtree(batch_dir)
+        _emit_sandbox_audit(
+            "overlays_cleaned",
+            schema_version="1",
+            batch_dir=str(batch_dir),
+        )
+    except OSError as exc:
+        log.warning(
+            "overlay_cleanup_failed batch_dir=%s error=%s — operator must sweep",
+            batch_dir, exc,
+        )
+
+
+def _sweep_stale_overlays(
+    tmp_root: Path | None = None,
+    *,
+    max_age_seconds: int = _OVERLAY_STALE_MAX_AGE_SECONDS,
+) -> int:
+    """Boot-time scan для ``/tmp/888-bat-*`` older than ``max_age_seconds``.
+
+    Returns count of swept dirs. Emits ``stale_overlay_swept`` per dir
+    (edge-case-hunter HIGH F8 — prevent disk-fill on dispatcher crash).
+    """
+    import shutil as _shutil
+    import time as _time
+
+    root = tmp_root if tmp_root is not None else Path("/tmp")  # noqa: S108 — system tmp scan
+    if not root.is_dir():
+        return 0
+    now = _time.time()
+    swept = 0
+    for entry in root.glob("888-bat-*"):
+        if not entry.is_dir():
+            continue
+        try:
+            age = now - entry.stat().st_mtime
+        except OSError:
+            continue
+        if age < max_age_seconds:
+            continue
+        try:
+            _shutil.rmtree(entry)
+        except OSError as exc:
+            log.warning("stale_sweep_failed entry=%s error=%s", entry, exc)
+            continue
+        swept += 1
+        _emit_sandbox_audit(
+            "stale_overlay_swept",
+            schema_version="1",
+            batch_dir=str(entry),
+            age_seconds=int(age),
+        )
+    return swept
+
+
 def _cmd_wrap(args: object) -> int:
     """``wrap`` subcommand handler — S1 scope: version assertion only.
 
@@ -1130,8 +1382,7 @@ def _cmd_wrap(args: object) -> int:
         )
         return EXIT_SANDBOX_UNAVAILABLE
 
-    # S2-S4 will add overlay/cgroup/clearenv composition here. For S1 we
-    # delegate to BwrapSandbox so worker spawn already gets bind+blackouts.
+    # S2 lands overlay wiring; S3-S4 will layer cgroup/clearenv composition.
     sandbox = BwrapSandbox(bwrap_path=bwrap_path)
     extra_env: dict[str, str] = {}
     for pair in args.env or []:
@@ -1141,12 +1392,46 @@ def _cmd_wrap(args: object) -> int:
         key, _, value = pair.partition("=")
         extra_env[key] = value
     readonly = [Path(p) for p in (args.readonly_path or [])]
+
+    # S2 overlay wiring (spec §3.2 + §4.2). Only --overlay-mode=copy is wired
+    # this session; bind / overlayfs raise per spec defer table (§10).
+    overlay_mode = (
+        os.environ.get("BMAD_OVERLAY_MODE", "").strip().lower()
+        or args.overlay_mode
+    )
+    if overlay_mode not in ("copy", "bind", "overlayfs"):
+        sys.stderr.write(
+            f"--overlay-mode={overlay_mode!r} invalid (copy|bind|overlayfs)\n"
+        )
+        return 2
+    if overlay_mode in ("bind", "overlayfs"):
+        sys.stderr.write(
+            f"--overlay-mode={overlay_mode} not wired yet (S2 wires copy only; "
+            "bind / overlayfs deferred per spec §3.2 + §10).\n"
+        )
+        return 2
+
+    overlay_source: Path | None = None
+    if args.overlay_source:
+        overlay_source = Path(args.overlay_source)
+        if not overlay_source.is_absolute():
+            sys.stderr.write(
+                f"--overlay-source must be absolute: {args.overlay_source!r}\n"
+            )
+            return 2
+        if not overlay_source.exists():
+            sys.stderr.write(
+                f"--overlay-source does not exist: {overlay_source}\n"
+            )
+            return 2
+
     wrapped = sandbox.wrap_command(
         list(args.command),
         worktree=Path(args.worktree),
         readonly_paths=readonly or None,
         network=args.network,
         env=extra_env or None,
+        worker_home_overlay=overlay_source,
     )
     os.execvp(wrapped[0], wrapped)  # noqa: S606 — intentional shell-less exec
     return 0  # unreachable
@@ -1243,6 +1528,11 @@ __all__ = [
     "NetworkPolicy",
     "NoSandbox",
     "Sandbox",
+    # S2 overlay helpers (spec §3.2)
+    "_cleanup_overlays",
+    "_prepare_overlay_for_worker",
+    "_prepare_overlays_master",
+    "_sweep_stale_overlays",
     "compile_deny_lists",
     "detect_sandbox",
     "match_bash_deny",
