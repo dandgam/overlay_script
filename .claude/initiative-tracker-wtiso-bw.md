@@ -19,24 +19,17 @@
 
 ## Current
 
-- **id:** S1
-- **title:** `wrap` subcommand scaffold + version assertion
+- **id:** S2
+- **title:** Per-worker overlay preparation (eager copy + concurrent safety)
 - **surface:** backend-python
-- **spec_section:** §3.1 + §4
-- **acceptance:** argparse CLI added; bwrap_version_floor check; M0 baseline GREEN; AC2 (version floor) GREEN
-- **depends_on:** —
+- **spec_section:** §3.2
+- **acceptance:** _prepare_overlays master snapshot under flock; per-worker fast copy; M2 + M4 + AC3 GREEN
+- **depends_on:** S1
 - **destructive_actions:** []
 - **retry_count:** 0
 
 ## Pending
 
-- **id:** S2
-  - **title:** Per-worker overlay preparation (eager copy + concurrent safety)
-  - **surface:** backend-python
-  - **spec_section:** §3.2
-  - **acceptance:** _prepare_overlays master snapshot under flock; per-worker fast copy; M2 + M4 + AC3 GREEN
-  - **depends_on:** S1
-  - **destructive_actions:** []
 - **id:** S3
   - **title:** cgroup wrap + NoSandbox fallback policy
   - **surface:** backend-python
@@ -70,11 +63,17 @@
 
 ## Completed
 
-(empty)
+- **id:** S1
+  - **title:** `wrap` subcommand scaffold + version assertion
+  - **completed_at:** 2026-05-27
+  - **acceptance_met:** argparse CLI added (subcommand `wrap` with §4.1 signature); `_assert_bwrap_version_floor` + `_read_bwrap_version_floor` + `_parse_bwrap_version` + `_allow_nosandbox` helpers landed; hard-fail exit 78 path + audit event `bwrap_version_floor_failed`; M0 baseline GREEN (`evals/baselines/wtiso-bw-baseline-2026-05-27.json` matching §8.1 schema); AC2 GREEN (mock bwrap 0.5.0 stub → exit 78 + audit verified).
+  - **deferred_items:** systemd-run cgroup composition (S3 scope); overlay snapshot prep (S2 scope); env clearenv allowlist (S4 scope); 4 audit event types schema_version="1" beyond bwrap_version_floor_failed (S5 scope); CLI invocation through `_spawn_worker_isolated` bash glue (S4 scope).
+  - **notes:** Version floor honours `BMAD_BWRAP_MIN_VERSION` env CAN-ONLY-RAISE (edge-case-hunter HIGH F9 — mirror `_MIN_NPROC` precedent). `--allow-nosandbox=1` / `BMAD_ALLOW_NOSANDBOX=1` / `BMAD_SANDBOX=none` all trigger force-sequential warn + execvp without isolation. Version-pass path delegates to `BwrapSandbox.wrap_command` so S1 leaves the spawn pipeline functional even pre-S4.
 
 ## Journal
 
 - [2026-05-27] Bootstrap via /auto-loop-spec-long, delay=300s, runtime=loop_wrapper, auto_merge=false. backup/wtiso-bw-pre-2026-05-27 + integration/wtiso-bw created. Spec §14 Session Plan appended (6 sessions). Sourced from architect handoff §4fx + spec_wtiso-bw.md 507 LOC + threat-model_wtiso-bw.md 236 LOC + 15 RED stubs в ~/.claude/skills/888/scripts/tests/wtiso-bw/.
+- [2026-05-27] S1 done. sandbox.py +260 LOC: argparse CLI + version floor (≥0.6.0 default, env override CAN-ONLY-RAISE) + EXIT_SANDBOX_UNAVAILABLE=78 + audit emit. Tests: M0 baseline runner writes evals/baselines/wtiso-bw-baseline-2026-05-27.json; AC2 mock-bwrap-0.5.0 → exit 78 + audit verified. 60 existing sandbox tests pass (no regression). ruff clean. runtime=loop_wrapper → wrapper handles next iteration; no ScheduleWakeup.
 
 ## Blockers / Pauses
 

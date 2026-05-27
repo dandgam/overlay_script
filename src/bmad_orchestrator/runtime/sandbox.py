@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol, runtime_checkable
@@ -954,11 +955,288 @@ def match_bash_deny(command: str, deny_list: BashDenyList) -> str | None:
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Q-260527-WTISO-BW · S1 — `wrap` subcommand (option C CLI entry).
+#
+# Spec: spec/spec_wtiso-bw.md §3.1 + §4. This S1 lands argparse scaffold +
+# bwrap version assertion (≥0.6.0 floor, see spec §3.1 rationale on
+# `--bind-try` / `--ro-bind-try` introduction). S2-S4 add overlay prep,
+# cgroup wrap, env clearenv composition. The actual bind/blackout/clearenv
+# pipeline is delegated to ``BwrapSandbox.wrap_command`` (already battle-
+# tested); CLI only composes args and execvp's into the wrapped invocation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+EXIT_SANDBOX_UNAVAILABLE = 78  # sysexits.h EX_CONFIG (spec §4.3)
+
+_BWRAP_VERSION_FLOOR_DEFAULT: tuple[int, int, int] = (0, 6, 0)
+_BWRAP_VERSION_RE = re.compile(r"bubblewrap\s+(\d+)\.(\d+)\.(\d+)")
+
+
+def _parse_bwrap_version(stdout: str) -> tuple[int, int, int] | None:
+    """Parse ``bubblewrap X.Y.Z`` from ``bwrap --version`` output.
+
+    Tolerates extra trailing tokens (some distros append build metadata).
+    Returns ``None`` when no match — caller treats unparseable as below-floor.
+    """
+    if not stdout:
+        return None
+    match = _BWRAP_VERSION_RE.search(stdout)
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def _read_bwrap_version_floor() -> tuple[int, int, int]:
+    """Resolve floor from ``BMAD_BWRAP_MIN_VERSION`` env, clamped to default.
+
+    Edge-case-hunter HIGH F9: env value CAN ONLY RAISE the floor, never
+    lower it. Mirror precedent: ``_MIN_NPROC`` floor logic. Operator typo
+    or copy-paste of stale fixture value cannot regress the CVE-rationale
+    minimum (0.6.0 for ``--bind-try`` / ``--ro-bind-try``).
+    """
+    raw = os.environ.get("BMAD_BWRAP_MIN_VERSION", "").strip()
+    if not raw:
+        return _BWRAP_VERSION_FLOOR_DEFAULT
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)$", raw)
+    if not match:
+        log.warning(
+            "bwrap_min_version_invalid_format env=BMAD_BWRAP_MIN_VERSION "
+            "value=%r — using default %s",
+            raw, ".".join(str(x) for x in _BWRAP_VERSION_FLOOR_DEFAULT),
+        )
+        return _BWRAP_VERSION_FLOOR_DEFAULT
+    env_floor = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return max(env_floor, _BWRAP_VERSION_FLOOR_DEFAULT)
+
+
+def _assert_bwrap_version_floor(bwrap_path: str) -> tuple[bool, str | None]:
+    """Execute ``bwrap --version`` and verify ≥ floor.
+
+    Returns ``(ok, observed_version_str_or_None)``. ``ok=False`` on any of:
+    process error, parse failure, or below-floor version.
+    """
+    import subprocess
+    try:
+        proc = subprocess.run(  # noqa: S603 — bwrap_path is shutil.which-resolved
+            [bwrap_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.error("bwrap_version_check_failed path=%s error=%s", bwrap_path, exc)
+        return False, None
+    # bwrap writes to stdout on modern versions; older builds (<0.5) used
+    # stderr. Try both.
+    parsed = _parse_bwrap_version(proc.stdout) or _parse_bwrap_version(proc.stderr)
+    if parsed is None:
+        return False, None
+    floor = _read_bwrap_version_floor()
+    observed_str = ".".join(str(x) for x in parsed)
+    return parsed >= floor, observed_str
+
+
+def _allow_nosandbox(cli_flag: int | None) -> bool:
+    """Operator opt-in resolves any of: CLI ``--allow-nosandbox=1`` /
+    ``BMAD_ALLOW_NOSANDBOX=1`` / ``BMAD_SANDBOX=none``.
+    """
+    if cli_flag == 1:
+        return True
+    if os.environ.get("BMAD_ALLOW_NOSANDBOX", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    if os.environ.get("BMAD_SANDBOX", "").strip().lower() == "none":
+        return True
+    return False
+
+
+def _emit_sandbox_audit(event_type: str, **payload: object) -> None:
+    """Best-effort audit emit; failures must not crash CLI."""
+    try:
+        from bmad_orchestrator.agent.safety.audit import record_audit
+        record_audit(event_type, **payload)
+    except Exception as exc:
+        log.warning("sandbox_audit_emit_failed event=%s error=%s", event_type, exc)
+
+
+def _cmd_wrap(args: object) -> int:
+    """``wrap`` subcommand handler — S1 scope: version assertion only.
+
+    Composition pipeline (full systemd-run → bwrap → exec) lands in S2-S4.
+    Until then, version-pass path delegates to ``BwrapSandbox.wrap_command``
+    so existing bind/blackout/clearenv guarantees stay live.
+    """
+    import argparse as _argparse  # local import keeps top-of-file imports lean
+    assert isinstance(args, _argparse.Namespace)
+
+    bwrap_path = shutil.which("bwrap")
+    if bwrap_path is None:
+        _emit_sandbox_audit(
+            "sandbox_hard_fail_no_bwrap",
+            schema_version="1",
+            outcome="hard_fail_exit_78",
+            allow_nosandbox=_allow_nosandbox(args.allow_nosandbox),
+        )
+        if _allow_nosandbox(args.allow_nosandbox):
+            sys.stderr.write(
+                "[sandbox] primary safety теряется — bwrap missing AND "
+                "BMAD_ALLOW_NOSANDBOX=1; running worker without isolation.\n"
+            )
+            _emit_sandbox_audit(
+                "sandbox_fallback_nosandbox",
+                schema_version="1",
+                trigger="bwrap_missing",
+                force_sequential=True,
+                warn_channel="stderr+audit",
+            )
+            os.execvp(args.command[0], args.command)  # noqa: S606 — intentional shell-less exec
+            return 0  # unreachable
+        sys.stderr.write(
+            "bwrap not found on PATH — install bubblewrap (apt install "
+            "bubblewrap) or set BMAD_ALLOW_NOSANDBOX=1 to force-sequential.\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    ok, observed = _assert_bwrap_version_floor(bwrap_path)
+    if not ok:
+        floor = _read_bwrap_version_floor()
+        floor_str = ".".join(str(x) for x in floor)
+        _emit_sandbox_audit(
+            "bwrap_version_floor_failed",
+            schema_version="1",
+            observed_version=observed,
+            required_floor=floor_str,
+            bwrap_path=bwrap_path,
+            outcome="hard_fail_exit_78",
+        )
+        if _allow_nosandbox(args.allow_nosandbox):
+            sys.stderr.write(
+                f"[sandbox] primary safety теряется — bwrap "
+                f"{observed or '<unparseable>'} < floor {floor_str} AND "
+                "BMAD_ALLOW_NOSANDBOX=1; running worker without isolation.\n"
+            )
+            _emit_sandbox_audit(
+                "sandbox_fallback_nosandbox",
+                schema_version="1",
+                trigger="version_floor_failed",
+                force_sequential=True,
+                warn_channel="stderr+audit",
+            )
+            os.execvp(args.command[0], args.command)  # noqa: S606 — intentional shell-less exec
+            return 0  # unreachable
+        sys.stderr.write(
+            f"bwrap version {observed or '<unparseable>'} below floor "
+            f"{floor_str} — upgrade bubblewrap or set BMAD_ALLOW_NOSANDBOX=1.\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    # S2-S4 will add overlay/cgroup/clearenv composition here. For S1 we
+    # delegate to BwrapSandbox so worker spawn already gets bind+blackouts.
+    sandbox = BwrapSandbox(bwrap_path=bwrap_path)
+    extra_env: dict[str, str] = {}
+    for pair in args.env or []:
+        if "=" not in pair:
+            sys.stderr.write(f"--env expects KEY=VALUE, got {pair!r}\n")
+            return 2
+        key, _, value = pair.partition("=")
+        extra_env[key] = value
+    readonly = [Path(p) for p in (args.readonly_path or [])]
+    wrapped = sandbox.wrap_command(
+        list(args.command),
+        worktree=Path(args.worktree),
+        readonly_paths=readonly or None,
+        network=args.network,
+        env=extra_env or None,
+    )
+    os.execvp(wrapped[0], wrapped)  # noqa: S606 — intentional shell-less exec
+    return 0  # unreachable
+
+
+def _build_wrap_parser():
+    """Build the top-level argparse parser. Returns ArgumentParser."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="python -m bmad_orchestrator.runtime.sandbox",
+        description=(
+            "OS-level sandbox CLI for worker spawn (Q-260527-WTISO-BW). "
+            "Composes bwrap+prlimit+cgroup+overlay around `claude -p` workers."
+        ),
+    )
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+
+    wrap = sub.add_parser(
+        "wrap",
+        help="Wrap a worker command with bwrap+prlimit+cgroup isolation.",
+    )
+    wrap.add_argument("--worktree", required=True, help="Writable mount root.")
+    wrap.add_argument(
+        "--network",
+        choices=("none", "github_only", "full"),
+        default="none",
+        help="Network policy (default: none).",
+    )
+    wrap.add_argument(
+        "--allow-nosandbox",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="Operator opt-in for hard-fail bypass (force-sequential).",
+    )
+    wrap.add_argument(
+        "--overlay-mode",
+        choices=("copy", "bind", "overlayfs"),
+        default="copy",
+        help="Overlay strategy for ~/.claude per-worker (S2 scope).",
+    )
+    wrap.add_argument(
+        "--overlay-source",
+        default=None,
+        help="Path to overlay snapshot prepared in Step 2 (S2 scope).",
+    )
+    wrap.add_argument(
+        "--readonly-path",
+        action="append",
+        default=[],
+        help="Extra read-only bind mounts (repeatable).",
+    )
+    wrap.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        help="Pass extra env vars KEY=VALUE (repeatable).",
+    )
+    wrap.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Worker command after `--` (e.g. claude -p ARGS).",
+    )
+    wrap.set_defaults(handler=_cmd_wrap)
+    return parser
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """Entry point for ``python -m bmad_orchestrator.runtime.sandbox``."""
+    parser = _build_wrap_parser()
+    args = parser.parse_args(argv)
+    # argparse REMAINDER keeps the leading `--` separator if present; strip
+    # so callers can pass `-- /bin/echo hi` without seeing `--` in argv[0].
+    if args.command and args.command[0] == "--":
+        args.command = args.command[1:]
+    if not args.command:
+        parser.error("worker command required after `--`")
+    return args.handler(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))
+
+
 __all__ = [
     "DEFAULT_CGROUP_CPU_QUOTA",
     "DEFAULT_CGROUP_LIMITS",
     "DEFAULT_CGROUP_MEMORY_MAX",
     "DEFAULT_CGROUP_TASKS_MAX",
+    "EXIT_SANDBOX_UNAVAILABLE",
     "BashDenyList",
     "BwrapSandbox",
     "FsDenyList",
