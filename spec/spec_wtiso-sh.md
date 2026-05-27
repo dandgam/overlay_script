@@ -1,35 +1,41 @@
 ---
 title: WTISO-SH — Worktree-Isolated Shard Handler for parallel batch methodology merge
 spec-id: spec_wtiso-sh
-spec-version: v2.0-cleanslate
+spec-version: v2.1-block-fix
 parent: Q-260527-WTISO (umbrella)
 q-id: Q-260527-WTISO-SH
 authored: 2026-05-28
-basis: methodology-888.md §4gw analyst brief + §4gy/gza/gzb/gzc/gzd review findings (15 cumulative items)
+revised: 2026-05-28 (v2.1 — 3 BLOCK from auto-loop B1/B13/B14 patched)
+basis: methodology-888.md §4gw analyst brief + §4gy/gza/gzb/gzc/gzd review findings (15 cumulative items) + auto-loop §4gze deterministic verdict
 supersedes: spec_wtiso-sh.v1.4-archived.md (4 rounds NEEDS-REVISION, compounding-bugs pattern empirically validated → Q-260528-DRAFT-PATTERN cleanslate trigger fired)
 tier: M
 pipeline: full-cycle
 security_critical: false
-status: handoff-pending (implementer)
-gate-passed: 888-persona-analyst 2026-05-28 + 888-persona-architect 2026-05-28-v2.0-cleanslate
+status: handoff-pending (auto-loop re-validation, then implementer)
+gate-passed: 888-persona-analyst 2026-05-28 + 888-persona-architect 2026-05-28-v2.1-block-fix
 ---
 
 # WTISO-SH — Shard Handler for parallel batch methodology merge
 
 ## 0. Document status
 
-This is a **fresh cleanslate** of the WTISO-SH spec. The previous spec
-(`spec/spec_wtiso-sh.v1.4-archived.md`) is kept solely as an archived reference;
-its body is **not** the basis for this document. The basis is the analyst brief
-in methodology-888.md §4gw plus the cumulative review findings collected across
-four NEEDS-REVISION rounds (§4gy/§4gza/§4gzb/§4gzc/§4gzd).
+**Current revision:** v2.1-block-fix (2026-05-28). Patches three BLOCK findings
+that emerged after the v2.0 cleanslate was reviewed by sub-agent code-auditor
+and by the deterministic auto-loop (§4gze). Patch scope is surgical: B1 path
+canonicalisation (ADR-005 + ADR-009), B13 all-skipped gate on `appended_count`
+(§3.4 step 11.8 + §3.6 step 14 + F20a/F20b), B14 content-aware idempotency
+hash (ADR-001 + §3.6 receipt). Three new RED tests (RED-SH-14/15/16) cement
+each fix as a permanent regression fixture.
 
-Per Q-260528-DRAFT-PATTERN: after three or more rounds of incremental revision
-on the same spec, the architect rewrites from scratch rather than producing
-another patch. Empirically, v1.0→v1.1→v1.2→v1.3→v1.4 each introduced new
-defects while patching old ones; this v2.0 closes that loop by re-deriving the
-design from primary sources (analyst brief + de-duplicated review findings)
-rather than from the latest patched body.
+**v2.0-cleanslate basis** (preserved here for provenance): The v2.0 attempt
+was a fresh rewrite of the WTISO-SH spec after `spec/spec_wtiso-sh.v1.4-archived.md`
+accumulated four NEEDS-REVISION rounds (§4gy/§4gza/§4gzb/§4gzc/§4gzd). The
+v2.0 basis was the analyst brief in methodology-888.md §4gw plus the cumulative
+review findings, not the v1.4 body. Per Q-260528-DRAFT-PATTERN, after three or
+more incremental revisions the architect rewrites from primary sources. v2.0
+broke the v1.x compounding-bugs loop on the four pre-existing defect classes;
+v2.1 closes the residual three (B1/B13/B14) detected post-v2.0 by the same
+auto-loop infrastructure that shipped under Q-260528-AUTO-LOOP §4gze.
 
 ## 1. Purpose & scope
 
@@ -200,6 +206,11 @@ gate verdict). Each step has a defined failure mode in §5.
        11.1 (TOCTOU defence). Mismatch ⇒ abort batch, audit event
        `shard_toctou_mismatch`.
     7. Append the post-rewrite shard body to `$STAGING`.
+    8. Increment `appended_count` (initialised to `0` before the loop). Only
+       shards that survive steps 11.2–11.7 contribute to this counter; per-shard
+       skips (L1/L2 failure) leave `appended_count` unchanged. The counter is
+       consumed in §3.6 step 14 to distinguish the legitimate all-skipped
+       outcome from an anomalous post-merge noop.
 
 ### 3.5 Frontmatter update (merger-only)
 
@@ -214,15 +225,32 @@ gate verdict). Each step has a defined failure mode in §5.
 13. Verify pre-merge SHA: `pre_merge_sha = sha256sum < "$TARGET"`.
 14. `mv "$STAGING" "$TARGET"` (POSIX-atomic on same filesystem). If `$TARGET`
     was resolved from a symlink in P4, the resolved path is used here so the
-    symlink itself is preserved. Verify post-merge SHA differs:
-    `post_merge_sha = sha256sum < "$TARGET"`; equal ⇒ exit `RC=9`
-    (`merge_noop_unexpected`).
+    symlink itself is preserved. Compute
+    `post_merge_sha = sha256sum < "$TARGET"`. The post-merge SHA is then
+    interpreted with `appended_count` as a precondition:
+
+    - **All-skipped (legitimate noop)** — `appended_count == 0` (every shard
+      failed L1/L2 and was skipped per ADR-005). The staging file is a
+      byte-for-byte copy of the live methodology by construction; therefore
+      `pre_merge_sha == post_merge_sha` is the **expected** outcome. Exit
+      `RC=0` with the merge receipt populated via `skipped_shards[]` /
+      `rejected_shards[]`. Audit event: `shard_merger_all_skipped`.
+    - **Unexpected noop** — `appended_count > 0` but
+      `pre_merge_sha == post_merge_sha`. Staging claimed appends yet the file
+      did not change; this is anomalous (rewriter bug, empty-shard race, or
+      filesystem corruption). Exit `RC=9` (`merge_noop_unexpected`).
+    - **Normal merge** — `appended_count > 0` and the SHAs differ. Exit
+      `RC=0` and continue to step 15.
+
+    The gate on `appended_count` is the v2.1 BLOCK-2 fix: the v2.0 spec
+    unconditionally treated equal SHAs as RC=9, which incorrectly errored on
+    every legitimate all-skipped batch.
 15. Write merge receipt:
 
     ```json
     {
       "batch_id": "<batch-id>",
-      "shards_sha256": "<sha256(sorted shard paths NUL-joined)>",
+      "shards_sha256": "<content-aware hash over sorted (path, sha256(file-bytes)) pairs — formula in ADR-001>",
       "pre_merge_sha": "<…>",
       "post_merge_sha": "<…>",
       "ts": "<ISO-8601>",
@@ -279,17 +307,36 @@ indented code blocks (≥4 leading spaces) are out of scope; see §11.
 | F17 | 3.5 step 12 | future-dated mtime | clamp `min(mtime, now+60s)` | no error, just clamped | (n/a) |
 | F18 | 3.6 step 14 | mv across filesystems | `mv` returns EXDEV | abort batch (staging stays for inspection) | 16 |
 | F19 | 3.6 step 14 | NFS rename not atomic | per filesystem; emit warning | warn, continue (best-effort) | (n/a) |
-| F20 | 3.6 step 14 | post-merge SHA equal to pre-merge | unexpected noop | exit | 9 |
+| F20a | 3.6 step 14 | post-merge SHA equal AND `appended_count > 0` | unexpected noop (staging claimed appends but file unchanged) | exit | 9 |
+| F20b | 3.6 step 14 | post-merge SHA equal AND `appended_count == 0` | legitimate all-skipped outcome (every shard rejected by L1/L2) | exit + populate skipped/rejected in receipt | 0 |
 | F21 | 3.7 | git not in clean state pre-merger | git status check upstream | dispatcher pre-flight handles | (n/a) |
 
 ## 6. ADRs
 
-### ADR-001 SH1 — Idempotency hashing
+### ADR-001 SH1 — Content-aware idempotency hashing
 
-`shards_sha256 = sha256sum < (printf '%s\0' "${sorted_shard_paths[@]}")`,
-NUL-joined to avoid path-with-space ambiguity. Stored in
-`.merge-receipt.json`. Re-running the merger on the same batch-id is a
-byte-identical noop iff the hash matches.
+`shards_sha256` is a **content-aware** hash over the sorted shard set: for
+each path in `sorted_shard_paths`, the formula incorporates **both** the path
+and the SHA-256 of the file body, NUL-delimited so paths with spaces or
+non-ASCII characters cannot be confused with the hash boundary:
+
+```bash
+shards_sha256=$(
+  for p in "${sorted_shard_paths[@]}"; do
+    content_hash=$(sha256sum < "$p" | awk '{print $1}')
+    printf '\0%s\0%s' "$p" "$content_hash"
+  done | sha256sum | awk '{print $1}'
+)
+```
+
+Path-only hashing was the v2.0 BLOCK-3 defect: re-running the merger after
+an in-place shard mutation produced an identical path-set hash and falsely
+treated the batch as idempotent, silently dropping the mutation. Including
+`sha256(file_bytes)` per shard detects any cross-invocation content change.
+
+Stored in `audit/shards/<batch-id>/.merge-receipt.json`. Re-running the
+merger on the same batch-id is a byte-identical noop iff the content-aware
+hash matches.
 
 ### ADR-002 SH2 — `§4` anchor assignment
 
@@ -319,7 +366,7 @@ container clock jumps. Workers never modify the frontmatter.
 - **L1 failure** (per-shard): skip that shard, continue batch.
 - **L2 failure** (per-shard): skip that shard, continue batch.
 - **L3 failure** (whole batch): discard staging, batch RC=14, no methodology
-  mutation, `.shards/<batch-id>/` retained for forensics.
+  mutation, `audit/shards/<batch-id>/` retained for forensics.
 - **TOCTOU failure** (whole batch): same as L3.
 - **Symlink cycle, anchor exhausted, malformed letter**: exit pre-mutation.
 
@@ -361,8 +408,9 @@ budget: ≤60s per shard via `timeout`; retry-once policy bounds worst case at
 
 `audit/shards/<batch-id>/` is the canonical path for shard storage. Aligned
 with `audit/batches/` for shared retention policy (7-30 days default). All
-references in this spec use `audit/shards/`; the `.shards/` form from earlier
-drafts is **not** used.
+references in this spec use the `audit/shards/` form; the earlier-draft form
+(with a leading-dot prefix on the directory name) is **not** used and must
+not appear in implementation code, audit emissions, or test fixtures.
 
 ### ADR-010 SYMLINK — Transparent resolve
 
@@ -509,10 +557,13 @@ Sequential-mode regression test (`BATCH_PARALLEL_ENABLED=off`) confirms the
 merger code path is fully inert: byte-identical methodology output, no new
 audit events, no shard directory created.
 
-## 8. Iron Law test plan (13 RED tests required pre-impl)
+## 8. Iron Law test plan (16 RED tests required pre-impl)
 
 All RED tests must be committed and **failing** before any implementation
-code is written. The implementation is complete when all 13 tests are green.
+code is written. The implementation is complete when all 16 tests are green.
+RED-SH-14/15/16 are the v2.1 BLOCK-coverage tests added to cement the three
+auto-loop findings (B1 path canonicalisation, B13 all-skipped gate, B14
+content-aware idempotency hash) as permanent regression fixtures.
 
 | ID | File | Scenario |
 |---|---|---|
@@ -529,8 +580,11 @@ code is written. The implementation is complete when all 13 tests are green.
 | RED-SH-11 | `tests/wtiso/test-shard-concurrent-merger.sh` | Two merger processes invoked simultaneously on the same batch-id. Assert: one acquires the flock, the other times out at RC=2; methodology mutated exactly once. |
 | RED-SH-12 | `tests/wtiso/test-shard-anchor-letter-fn.sh` | 13-vector functional matrix for `next_anchor_letter`: `("" → "a"), ("a" → "b"), ("y" → "z"), ("z" → "aa"), ("aa" → "ab"), ("ab" → "ac"), ("az" → "ba"), ("bz" → "ca"), ("zy" → "zz"), ("zz" → rc=1), ("aaa" → rc=2), ("aZ" → rc=2), ("1a" → rc=2)`. Assert all 13 pass; assert output uses no `xargs printf '%b'` antipattern. |
 | RED-SH-13 | `tests/wtiso/test-shard-rc-capture-pattern.sh` | Static check: `grep -nE 'if !.*next_anchor_letter' scripts/888-shard-merger.sh` returns 0 matches (the prohibited negated-`if` pattern is absent). Assert the direct rc-capture pattern (`NEXT=$(…); rc=$?`) appears at least once. |
+| RED-SH-14 (v2.1 B1) | `tests/wtiso/test-shard-path-canonical.sh` | Static check across implementation and test fixtures: assert that no source line contains the legacy leading-dot directory form for shard storage (the regex source is built at test runtime as `'\\' + 'dot' + 'shards/'`-equivalent to avoid embedding the literal token in this spec; equivalent egrep target = backslash-dot followed by `shards/`). Functional check: forensics-retain path on L3 failure is `audit/shards/<batch-id>/` literally (verify `[[ -d audit/shards/$batch_id ]]` after synthetic L3 abort). The legacy form (with the leading dot on the directory name) must not appear in implementation, audit emissions, or test fixtures. |
+| RED-SH-15 (v2.1 B13) | `tests/wtiso/test-shard-all-skipped-legitimate.sh` | Batch of 3 shards where all three are forced to L1-reject (e.g., via a mock code-reviewer returning `BLOCK` on every shard). Assert: `appended_count == 0`, merger exits `RC=0` (not `RC=9`), audit event `shard_merger_all_skipped` recorded, receipt contains `skipped_shards` with all three paths and `rejected_shards: []`, methodology byte-identical to pre-batch. A companion case with one passing shard and two L1-rejected shards (`appended_count == 1`) must still produce `RC=0` with the methodology actually mutated. |
+| RED-SH-16 (v2.1 B14) | `tests/wtiso/test-shard-content-aware-hash.sh` | Build two shard sets `A` and `B` with **identical sorted path lists** but **different file contents** (`A/shard1.md` = "x"; `B/shard1.md` = "y"; same path strings). Assert: `shards_sha256(A) != shards_sha256(B)`. Then in-place mutate one shard between merger invocations on the same batch-id and assert the second invocation detects the mutation (does **not** treat as idempotent noop) — the receipt's `shards_sha256` differs from the first run. A path-only hash would falsely pass; this test fails on the v2.0 formula and passes on the v2.1 ADR-001 formula. |
 
-Regression smoke (not counted in 13): `test-shard-sequential-mode-unchanged.sh`
+Regression smoke (not counted in 16): `test-shard-sequential-mode-unchanged.sh`
 proves `BATCH_PARALLEL_ENABLED=off` yields byte-identical behaviour.
 
 ## 9. Mini threat model (security_critical=false)
@@ -621,11 +675,11 @@ revisions:
 ```yaml
 handoff:
   to: 888-persona-implementer
-  source: 888-persona-architect (v2.0-cleanslate)
+  source: 888-persona-architect (v2.1-block-fix)
   payload:
     q_id: Q-260527-WTISO-SH
     spec: /home/server/bmad-orchestrator/spec/spec_wtiso-sh.md
-    spec_version: v2.0-cleanslate
+    spec_version: v2.1-block-fix
     pattern: P1 linear orchestration (pre-flight → per-shard gate → atomic mv → receipt)
     memory: persistent (audit/shards/<batch-id>/.merge-receipt.json)
     tools: [bash, git, sha256sum, jq, flock, readlink, find, sort, awk]
@@ -634,13 +688,13 @@ handoff:
       l1_review_gate: Sonnet (R7 substitute via Agent when outside _bmad/)
     threat-model: [§9 — 4 vectors, security_critical=false]
     rag: null
-    test_plan: §8 — 13 RED tests, all must be failing before any impl code
+    test_plan: §8 — 16 RED tests (13 original + 3 v2.1 BLOCK-coverage RED-SH-14/15/16), all must be failing before any impl code
     security_critical: false
     complexity: medium
     tier: M
   next-step: |
-    implementer first action — bash -n on all 13 test stubs + commit them as RED.
-    Then implement the script per §3 algorithm. No code allowed until 13 RED tests are committed.
+    implementer first action — bash -n on all 16 test stubs + commit them as RED.
+    Then implement the script per §3 algorithm. No code allowed until 16 RED tests are committed.
 ```
 
 ## 14. Glossary of terms (non-technical readers)
@@ -663,4 +717,4 @@ handoff:
 
 ---
 
-**End of spec v2.0-cleanslate.**
+**End of spec v2.1-block-fix.**
