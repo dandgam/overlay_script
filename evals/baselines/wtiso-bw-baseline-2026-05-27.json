@@ -1,0 +1,45 @@
+{
+  "schema_version": "1",
+  "baseline_run_id": "81793d00-f3a9-415d-9fcb-c7e194a75ae9",
+  "host_kernel": "6.17.0-29-generic",
+  "bwrap_present": true,
+  "bwrap_version": "0.9.0",
+  "seed": 42,
+  "metrics": {
+    "M1": {
+      "name": "fork_bomb_peak_pid",
+      "value": 0,
+      "unit": "host PIDs",
+      "sample_size": 3,
+      "method": "skipped pre-BW; running :(){ :|:& };: on baseline host saturates kernel PID cap (~250K). Placeholder = 0; post-BW expectation = peak < baseline + 16384."
+    },
+    "M2": {
+      "name": "cross_worker_fs_read_exits",
+      "value": [0, 0, 0],
+      "unit": "exit codes",
+      "sample_size": 3,
+      "method": "cat ../other-worktree × 3 (reads succeed pre-BW). Post-BW expectation = ENOENT/EACCES × 3."
+    },
+    "M3": {
+      "name": "env_secret_matches",
+      "value": [0, 0, 0],
+      "unit": "match count",
+      "sample_size": 3,
+      "method": "env | grep canary × 3 (canary tokens only exported in M3 isolated run scope; baseline does NOT export them, hence 0 matches). Post-BW expectation = 0 matches via --clearenv."
+    },
+    "M4": {
+      "name": "home_env_read_exits",
+      "value": [0, 0, 0],
+      "unit": "exit codes",
+      "sample_size": 3,
+      "method": "cat ~/.bmad-orchestrator/state.db × 3 (reads succeed pre-BW). Post-BW expectation = ENOENT/EACCES × 3."
+    },
+    "M5": {
+      "name": "nosandbox_audit_events",
+      "value": 0,
+      "unit": "event count",
+      "sample_size": 1,
+      "method": "BMAD_SANDBOX=none baseline emits 0 sandbox_fallback events (no audit emission point pre-BW). Post-BW expectation = ≥1 per worker under opt-in."
+    }
+  }
+}

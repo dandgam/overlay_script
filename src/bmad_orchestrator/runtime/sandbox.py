@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol, runtime_checkable
@@ -494,7 +495,18 @@ class BwrapSandbox:
             "--unshare-uts",
             "--unshare-ipc",
             "--unshare-cgroup-try",
+            # S5 AC8/AC10 (#20 sev-3 + T11 sev-3): unshare user namespace so
+            # syscalls like mount -t fuse return EPERM and the worker runs in
+            # its own UID namespace. Flag silently skips when kernel disables
+            # unprivileged_userns_clone (boot-check in _cmd_wrap emits a
+            # `user_namespace_unshare_unavailable` audit warn in that case).
+            "--unshare-user-try",
         ]
+        # Opt-in UID remap (AC10). Default keeps host UID to avoid surprising
+        # existing tests / git commit identity. Set BMAD_SANDBOX_UID_REMAP=1
+        # to map inner uid/gid → 0 inside the user namespace.
+        if os.environ.get("BMAD_SANDBOX_UID_REMAP", "").strip() == "1":
+            wrapped += ["--uid", "0", "--gid", "0"]
 
         # Claude CLI state: the binary writes config to ~/.claude.json,
         # plugin manifest to ~/.claude/, and version state to
@@ -954,17 +966,1013 @@ def match_bash_deny(command: str, deny_list: BashDenyList) -> str | None:
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Q-260527-WTISO-BW · S1 — `wrap` subcommand (option C CLI entry).
+#
+# Spec: spec/spec_wtiso-bw.md §3.1 + §4. This S1 lands argparse scaffold +
+# bwrap version assertion (≥0.6.0 floor, see spec §3.1 rationale on
+# `--bind-try` / `--ro-bind-try` introduction). S2-S4 add overlay prep,
+# cgroup wrap, env clearenv composition. The actual bind/blackout/clearenv
+# pipeline is delegated to ``BwrapSandbox.wrap_command`` (already battle-
+# tested); CLI only composes args and execvp's into the wrapped invocation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+EXIT_SANDBOX_UNAVAILABLE = 78  # sysexits.h EX_CONFIG (spec §4.3)
+
+_BWRAP_VERSION_FLOOR_DEFAULT: tuple[int, int, int] = (0, 6, 0)
+_BWRAP_VERSION_RE = re.compile(r"bubblewrap\s+(\d+)\.(\d+)\.(\d+)")
+
+
+def _parse_bwrap_version(stdout: str) -> tuple[int, int, int] | None:
+    """Parse ``bubblewrap X.Y.Z`` from ``bwrap --version`` output.
+
+    Tolerates extra trailing tokens (some distros append build metadata).
+    Returns ``None`` when no match — caller treats unparseable as below-floor.
+    """
+    if not stdout:
+        return None
+    match = _BWRAP_VERSION_RE.search(stdout)
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def _read_bwrap_version_floor() -> tuple[int, int, int]:
+    """Resolve floor from ``BMAD_BWRAP_MIN_VERSION`` env, clamped to default.
+
+    Edge-case-hunter HIGH F9: env value CAN ONLY RAISE the floor, never
+    lower it. Mirror precedent: ``_MIN_NPROC`` floor logic. Operator typo
+    or copy-paste of stale fixture value cannot regress the CVE-rationale
+    minimum (0.6.0 for ``--bind-try`` / ``--ro-bind-try``).
+    """
+    raw = os.environ.get("BMAD_BWRAP_MIN_VERSION", "").strip()
+    if not raw:
+        return _BWRAP_VERSION_FLOOR_DEFAULT
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)$", raw)
+    if not match:
+        log.warning(
+            "bwrap_min_version_invalid_format env=BMAD_BWRAP_MIN_VERSION "
+            "value=%r — using default %s",
+            raw, ".".join(str(x) for x in _BWRAP_VERSION_FLOOR_DEFAULT),
+        )
+        return _BWRAP_VERSION_FLOOR_DEFAULT
+    env_floor = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return max(env_floor, _BWRAP_VERSION_FLOOR_DEFAULT)
+
+
+def _assert_bwrap_version_floor(bwrap_path: str) -> tuple[bool, str | None]:
+    """Execute ``bwrap --version`` and verify ≥ floor.
+
+    Returns ``(ok, observed_version_str_or_None)``. ``ok=False`` on any of:
+    process error, parse failure, or below-floor version.
+    """
+    import subprocess
+    try:
+        proc = subprocess.run(  # noqa: S603 — bwrap_path is shutil.which-resolved
+            [bwrap_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.error("bwrap_version_check_failed path=%s error=%s", bwrap_path, exc)
+        return False, None
+    # bwrap writes to stdout on modern versions; older builds (<0.5) used
+    # stderr. Try both.
+    parsed = _parse_bwrap_version(proc.stdout) or _parse_bwrap_version(proc.stderr)
+    if parsed is None:
+        return False, None
+    floor = _read_bwrap_version_floor()
+    observed_str = ".".join(str(x) for x in parsed)
+    return parsed >= floor, observed_str
+
+
+def _allow_nosandbox(cli_flag: int | None) -> bool:
+    """Operator opt-in resolves any of: CLI ``--allow-nosandbox=1`` /
+    ``BMAD_ALLOW_NOSANDBOX=1``.
+
+    ``BMAD_SANDBOX=none`` is NOT an opt-in (S3 spec fix per M5 outcome metric):
+    setting the backend to "none" without an explicit ALLOW flag must hard-fail
+    so silent operator misconfiguration cannot bypass primary safety. See
+    spec §3.4.2 v2 read + §8 M5 row. The wrap subcommand checks
+    ``BMAD_SANDBOX=none`` separately and emits ``sandbox_required_but_disabled``
+    if ALLOW is not set.
+    """
+    if cli_flag == 1:
+        return True
+    if os.environ.get("BMAD_ALLOW_NOSANDBOX", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    return False
+
+
+def _require_sandbox() -> bool:
+    """``BMAD_REQUIRE_SANDBOX=1`` (or true/yes) → strict-prod, hard-fail."""
+    return os.environ.get("BMAD_REQUIRE_SANDBOX", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _sandbox_backend_none_requested() -> bool:
+    """Operator explicitly chose backend=none via env (NOT itself an opt-in)."""
+    return os.environ.get("BMAD_SANDBOX", "").strip().lower() == "none"
+
+
+# S3 — env overrides for cgroup limits (spec §5 row `BMAD_SANDBOX_CGROUP_*`).
+# Allow tests + operators to dial TasksMax/MemoryMax/CPUQuota without code
+# patching. M1 fork-bomb canary needs a tight TasksMax to verify enforcement
+# without actually saturating the host PID table.
+_ENV_CGROUP_TASKS_MAX = "BMAD_SANDBOX_CGROUP_TASKS_MAX"
+_ENV_CGROUP_MEMORY_MAX = "BMAD_SANDBOX_CGROUP_MEMORY_MAX"
+_ENV_CGROUP_CPU_QUOTA = "BMAD_SANDBOX_CGROUP_CPU_QUOTA"
+_ENV_DISABLE_CGROUP = "BMAD_SANDBOX_CGROUP"  # set to "0" / "off" to disable
+
+
+def _resolved_cgroup_limits() -> dict[str, str]:
+    """Default cgroup limits with env-var overrides applied.
+
+    Env overrides are passed verbatim to systemd-run ``-p Key=Value`` so they
+    must use systemd property syntax (e.g. ``8G``, ``200%``, ``16384``).
+    """
+    limits = dict(DEFAULT_CGROUP_LIMITS)
+    tm = os.environ.get(_ENV_CGROUP_TASKS_MAX, "").strip()
+    if tm:
+        limits["TasksMax"] = tm
+    mm = os.environ.get(_ENV_CGROUP_MEMORY_MAX, "").strip()
+    if mm:
+        limits["MemoryMax"] = mm
+    cq = os.environ.get(_ENV_CGROUP_CPU_QUOTA, "").strip()
+    if cq:
+        limits["CPUQuota"] = cq
+    return limits
+
+
+def _cgroup_disabled_by_env() -> bool:
+    """``BMAD_SANDBOX_CGROUP=0|off|false|no`` disables cgroup composition."""
+    raw = os.environ.get(_ENV_DISABLE_CGROUP, "").strip().lower()
+    return raw in {"0", "off", "false", "no"}
+
+
+def _scope_cgroup_path(unit_name: str) -> Path:
+    """Best-effort path to the user-scope cgroup directory.
+
+    ``systemd-run --user --scope --unit=<unit>.scope`` creates the cgroup at
+    ``/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/<unit>.scope/``.
+    Caller treats a missing path as "cgroup already reaped" — not an error.
+    """
+    uid = os.getuid()
+    return Path(
+        f"/sys/fs/cgroup/user.slice/user-{uid}.slice/"
+        f"user@{uid}.service/app.slice/{unit_name}.scope"
+    )
+
+
+def _read_pids_max_count(scope_cg: Path) -> int:
+    """Read the ``pids.events`` ``max`` counter from a scope cgroup.
+
+    Returns 0 if the file is missing (cgroup already reaped) or unparseable.
+    Cgroup v2 ``pids.events`` format:
+
+        max <int>
+        max.imposed <int>   # kernel 5.14+, optional
+    """
+    try:
+        text = (scope_cg / "pids.events").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) == 2 and parts[0] == "max":
+            try:
+                return int(parts[1])
+            except ValueError:
+                return 0
+    return 0
+
+
+def _emit_sandbox_audit(event_type: str, **payload: object) -> None:
+    """Best-effort audit emit; failures must not crash CLI."""
+    try:
+        from bmad_orchestrator.agent.safety.audit import record_audit
+        record_audit(event_type, **payload)
+    except Exception as exc:
+        log.warning("sandbox_audit_emit_failed event=%s error=%s", event_type, exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S2 — per-worker overlay preparation (spec §3.2)
+#
+# Two-stage scheme: ONE master snapshot per batch (under flock на
+# ``~/.claude/.batch-snapshot.lock`` so concurrent batches don't tear the host
+# state mid-copy), then per-worker fast ``cp -R`` от master (local-FS, не
+# touching host home again). Master snapshot hash recorded for AC5
+# byte-identical reproducibility. Stale ``/tmp/888-bat-*`` sweep prevents
+# disk-fill on dispatcher crashes (edge-case-hunter HIGH F8 fix).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OVERLAY_CLAUDE_SUBPATHS: tuple[tuple[str, ...], ...] = (
+    (".claude",),
+    (".claude.json",),
+)
+_OVERLAY_SNAPSHOT_HASH_FILE = ".snapshot.sha256"
+_OVERLAY_LOCK_BASENAME = ".batch-snapshot.lock"
+_OVERLAY_STALE_MAX_AGE_SECONDS = 86_400  # 24h (spec §3.2 «older-than-24h»)
+
+
+def _overlay_master_root(batch_dir: Path) -> Path:
+    return batch_dir / "master-snapshot"
+
+
+def _overlay_worker_root(batch_dir: Path, q_id: str) -> Path:
+    return batch_dir / "overlays" / q_id
+
+
+def _compute_overlay_tree_sha256(root: Path) -> str:
+    """Deterministic SHA256 over (relpath, content) pairs sorted by relpath.
+
+    Skips symlinks (avoids cycles) and ``.snapshot.sha256`` marker itself.
+    Used for AC5 reproducibility: identical host snapshot → identical hash.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    entries: list[tuple[str, Path]] = []
+    for entry in root.rglob("*"):
+        if not entry.is_file() or entry.is_symlink():
+            continue
+        try:
+            rel = entry.relative_to(root)
+        except ValueError:
+            continue
+        if rel.name == _OVERLAY_SNAPSHOT_HASH_FILE:
+            continue
+        entries.append((str(rel), entry))
+    entries.sort(key=lambda x: x[0])
+    for relpath, entry in entries:
+        h.update(relpath.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            with open(entry, "rb") as fh:
+                while True:
+                    chunk = fh.read(65536)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+        except OSError as exc:
+            log.warning("overlay_hash_skip_unreadable rel=%s error=%s", relpath, exc)
+            continue
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _prepare_overlays_master(
+    batch_dir: Path,
+    *,
+    source_home: Path | None = None,
+) -> tuple[Path, str]:
+    """Create master snapshot of ~/.claude + ~/.claude.json under flock.
+
+    Idempotent: if ``master-snapshot/.snapshot.sha256`` exists, returns cached
+    path + hash без повторного copy (spec §3.2 «ОДНОКРАТНО BEFORE worker
+    fan-out»). Emits ``master_snapshot_taken`` audit event с hash on first
+    create.
+
+    Concurrent-safety (edge-case-hunter HIGH F6): flock на
+    ``<source_home>/.batch-snapshot.lock`` serialises N parallel batch starts —
+    host SQLite-WAL мid-save не теряет integrity. Per-worker copies later use
+    THIS master, не host ~/.claude, so worker fan-out has zero host I/O.
+    """
+    import fcntl as _fcntl
+    import subprocess as _subprocess
+
+    host = source_home if source_home is not None else Path(os.path.expanduser("~"))
+    master_root = _overlay_master_root(batch_dir)
+    hash_file = master_root / _OVERLAY_SNAPSHOT_HASH_FILE
+
+    if hash_file.exists() and (master_root / ".claude").exists():
+        return master_root, hash_file.read_text(encoding="utf-8").strip()
+
+    master_root.mkdir(parents=True, exist_ok=True)
+    lock_path = host / _OVERLAY_LOCK_BASENAME
+    try:
+        lock_path.touch(exist_ok=True)
+    except OSError as exc:
+        log.warning(
+            "overlay_lock_touch_failed path=%s error=%s — proceeding без flock",
+            lock_path, exc,
+        )
+        lock_fh = None
+    else:
+        lock_fh = open(lock_path, "rb")
+
+    try:
+        if lock_fh is not None:
+            _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_EX)
+        for parts in _OVERLAY_CLAUDE_SUBPATHS:
+            src = host.joinpath(*parts)
+            dst = master_root.joinpath(*parts)
+            if dst.exists():
+                continue
+            if not src.exists():
+                continue
+            if src.is_dir():
+                _subprocess.run(  # noqa: S603 — fixed argv, trusted paths
+                    ["/bin/cp", "-R", "--preserve=mode,timestamps", str(src), str(dst)],
+                    check=True,
+                )
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _subprocess.run(  # noqa: S603
+                    ["/bin/cp", "--preserve=mode,timestamps", str(src), str(dst)],
+                    check=True,
+                )
+    finally:
+        if lock_fh is not None:
+            try:
+                _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_UN)
+            finally:
+                lock_fh.close()
+
+    tree_hash = _compute_overlay_tree_sha256(master_root)
+    hash_file.write_text(tree_hash + "\n", encoding="utf-8")
+
+    _emit_sandbox_audit(
+        "master_snapshot_taken",
+        schema_version="1",
+        batch_dir=str(batch_dir),
+        master_root=str(master_root),
+        snapshot_sha256=tree_hash,
+        source_home=str(host),
+    )
+    return master_root, tree_hash
+
+
+def _prepare_overlay_for_worker(
+    batch_dir: Path,
+    q_id: str,
+    *,
+    master_root: Path | None = None,
+) -> Path:
+    """Per-worker fast ``cp -R`` от master snapshot. Returns worker overlay root.
+
+    Idempotent: existing worker overlay не re-copied. Caller passes returned
+    path к ``BwrapSandbox.wrap_command(worker_home_overlay=...)`` (or к the
+    CLI flag ``--overlay-source``). Local-FS copy only — host ~/.claude not
+    re-read here.
+    """
+    import subprocess as _subprocess
+
+    if master_root is None:
+        master_root = _overlay_master_root(batch_dir)
+    if not master_root.exists():
+        raise FileNotFoundError(
+            f"master snapshot missing at {master_root}; call "
+            "_prepare_overlays_master() first"
+        )
+    worker_root = _overlay_worker_root(batch_dir, q_id)
+    worker_root.mkdir(parents=True, exist_ok=True)
+    for parts in _OVERLAY_CLAUDE_SUBPATHS:
+        src = master_root.joinpath(*parts)
+        dst = worker_root.joinpath(*parts)
+        if dst.exists() or not src.exists():
+            continue
+        if src.is_dir():
+            _subprocess.run(  # noqa: S603
+                ["/bin/cp", "-R", "--preserve=mode,timestamps", str(src), str(dst)],
+                check=True,
+            )
+        else:
+            _subprocess.run(  # noqa: S603
+                ["/bin/cp", "--preserve=mode,timestamps", str(src), str(dst)],
+                check=True,
+            )
+    return worker_root
+
+
+def _cleanup_overlays(batch_dir: Path) -> None:
+    """Remove batch overlay tree post-batch. Warn-and-continue on failure
+    (operator can ``rm -rf /tmp/888-bat-*`` manually per spec §3.2).
+    """
+    if not batch_dir.exists():
+        return
+    import shutil as _shutil
+    try:
+        _shutil.rmtree(batch_dir)
+        _emit_sandbox_audit(
+            "overlays_cleaned",
+            schema_version="1",
+            batch_dir=str(batch_dir),
+        )
+    except OSError as exc:
+        log.warning(
+            "overlay_cleanup_failed batch_dir=%s error=%s — operator must sweep",
+            batch_dir, exc,
+        )
+
+
+def _sweep_stale_overlays(
+    tmp_root: Path | None = None,
+    *,
+    max_age_seconds: int = _OVERLAY_STALE_MAX_AGE_SECONDS,
+) -> int:
+    """Boot-time scan для ``/tmp/888-bat-*`` older than ``max_age_seconds``.
+
+    Returns count of swept dirs. Emits ``stale_overlay_swept`` per dir
+    (edge-case-hunter HIGH F8 — prevent disk-fill on dispatcher crash).
+    """
+    import shutil as _shutil
+    import time as _time
+
+    root = tmp_root if tmp_root is not None else Path("/tmp")  # noqa: S108 — system tmp scan
+    if not root.is_dir():
+        return 0
+    now = _time.time()
+    swept = 0
+    for entry in root.glob("888-bat-*"):
+        if not entry.is_dir():
+            continue
+        try:
+            age = now - entry.stat().st_mtime
+        except OSError:
+            continue
+        if age < max_age_seconds:
+            continue
+        try:
+            _shutil.rmtree(entry)
+        except OSError as exc:
+            log.warning("stale_sweep_failed entry=%s error=%s", entry, exc)
+            continue
+        swept += 1
+        _emit_sandbox_audit(
+            "stale_overlay_swept",
+            schema_version="1",
+            batch_dir=str(entry),
+            age_seconds=int(age),
+        )
+    return swept
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S5 — sev-5/sev-4/sev-3 boot-time threat closures (spec §6.1, §11 #7, AC6-AC10)
+#
+# AC6 docker-group pivot (T7 sev-5): refuse to spawn if orchestrator UID is in
+# the ``docker`` group AND /var/run/docker.sock is reachable — the worker
+# would otherwise be one ``docker run --privileged`` away from host root.
+# AC7 unprivileged_userns_clone (C2 sev-5): if kernel allows unprivileged user
+# namespaces AND operator asked for ``overlayfs`` mode → audit + fall back to
+# ``copy`` unless explicitly opted in via BMAD_ALLOW_OVERLAYFS=1.
+# AC8/AC10 user-namespace (#20 sev-3 + T11 sev-3): handled by adding
+# ``--unshare-user-try`` to bwrap argv (BwrapSandbox.wrap_command).
+# AC9 die-with-parent (D4 sev-4): already wired via ``--die-with-parent`` in
+# wrap_command; this session adds the canary test.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DOCKER_SOCKET_DEFAULT = "/var/run/docker.sock"
+_USERNS_CLONE_DEFAULT = "/proc/sys/kernel/unprivileged_userns_clone"
+
+
+def _current_groups() -> list[str]:
+    """Return current process group names. Test override: BMAD_TEST_DOCKER_GROUPS
+    (comma-separated names) short-circuits the os.getgroups() lookup so canary
+    tests can simulate the dangerous configuration without modifying host
+    /etc/group.
+    """
+    override = os.environ.get("BMAD_TEST_DOCKER_GROUPS")
+    if override is not None:
+        return [g.strip() for g in override.split(",") if g.strip()]
+    try:
+        import grp as _grp
+        names: list[str] = []
+        for gid in os.getgroups():
+            try:
+                names.append(_grp.getgrgid(gid).gr_name)
+            except KeyError:
+                continue
+        return names
+    except Exception as exc:
+        log.warning("current_groups_lookup_failed error=%s", exc)
+        return []
+
+
+def _docker_socket_path() -> str:
+    return os.environ.get("BMAD_TEST_DOCKER_SOCKET_PATH", _DOCKER_SOCKET_DEFAULT)
+
+
+def _docker_socket_present() -> bool:
+    return Path(_docker_socket_path()).exists()
+
+
+def _assert_no_docker_group(allow_nosandbox: bool) -> int | None:
+    """Boot-time check: refuse to wrap a worker if dispatcher UID has docker
+    group access AND a docker socket is reachable. Returns exit code on refusal,
+    None to continue. Honours ``allow_nosandbox`` AND a dedicated
+    ``BMAD_ALLOW_DOCKER_GROUP=1`` opt-out (so dev hosts whose operator UID is
+    permanently in `docker` group can run the worker pool без global
+    BMAD_ALLOW_NOSANDBOX exposure — the docker risk is acknowledged but the
+    rest of the sandbox stays primary).
+    """
+    if "docker" not in _current_groups():
+        return None
+    if not _docker_socket_present():
+        return None
+    sock = _docker_socket_path()
+    _emit_sandbox_audit(
+        "sandbox_violation_blocked",
+        schema_version="1",
+        violation_type="docker_socket_pivot",
+        path_or_var=sock,
+        outcome="blocked",
+        detector="boot_assert_no_docker_group",
+    )
+    allow_docker = os.environ.get("BMAD_ALLOW_DOCKER_GROUP", "").strip() == "1"
+    if allow_docker or allow_nosandbox:
+        which = "BMAD_ALLOW_DOCKER_GROUP=1" if allow_docker else "BMAD_ALLOW_NOSANDBOX=1"
+        sys.stderr.write(
+            "[sandbox] primary safety теряется — orchestrator UID in `docker` "
+            f"group AND {sock} reachable; {which} lets it run but the worker "
+            "can pivot к host root via docker daemon.\n"
+        )
+        return None
+    sys.stderr.write(
+        f"orchestrator UID is in `docker` group AND {sock} exists — refusing "
+        "to spawn worker (host-root pivot risk via docker daemon). Drop the "
+        "user from `docker` group, OR set BMAD_ALLOW_DOCKER_GROUP=1 to "
+        "acknowledge the risk, OR set BMAD_ALLOW_NOSANDBOX=1 to fully opt out.\n"
+    )
+    return EXIT_SANDBOX_UNAVAILABLE
+
+
+def _userns_clone_enabled(path: str | None = None) -> bool | None:
+    """Read kernel's unprivileged_userns_clone flag. Returns True/False, or
+    None when path is missing / unreadable (kernel doesn't expose the knob).
+    """
+    p = path or os.environ.get("BMAD_TEST_USERNS_CLONE_PATH") or _USERNS_CLONE_DEFAULT
+    try:
+        raw = Path(p).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return raw == "1"
+
+
+def _check_userns_safety(overlay_mode: str) -> str:
+    """Resolve overlay_mode against the unprivileged userns_clone kernel knob.
+
+    When userns_clone is enabled (=1) AND overlay_mode=overlayfs AND
+    BMAD_ALLOW_OVERLAYFS!=1 → audit `overlayfs_unsafe_fallback` and return
+    ``copy`` (graceful fall-back). Otherwise return ``overlay_mode`` unchanged.
+    Rationale: unpriv user_ns + overlayfs xattr setuid is a known host-root
+    escalation class (CVE-2021-3493).
+    """
+    if overlay_mode != "overlayfs":
+        return overlay_mode
+    allow = os.environ.get("BMAD_ALLOW_OVERLAYFS", "").strip() == "1"
+    if allow:
+        return overlay_mode
+    enabled = _userns_clone_enabled()
+    if enabled is True:
+        _emit_sandbox_audit(
+            "overlayfs_unsafe_fallback",
+            schema_version="1",
+            requested_mode="overlayfs",
+            fallback_mode="copy",
+            userns_clone_enabled=True,
+            allow_overlayfs=False,
+            outcome="forced_copy_mode",
+        )
+        sys.stderr.write(
+            "[sandbox] --overlay-mode=overlayfs requested AND kernel allows "
+            "unprivileged user namespaces (CVE-2021-3493 class risk) — "
+            "falling back к copy mode. Set BMAD_ALLOW_OVERLAYFS=1 to override.\n"
+        )
+        return "copy"
+    return overlay_mode
+
+
+def _cmd_wrap(args: object) -> int:
+    """``wrap`` subcommand handler.
+
+    S1 — bwrap version floor assertion.
+    S2 — per-worker overlay wiring (``--overlay-mode copy``).
+    S3 — cgroup composition (``systemd-run --user --scope``) + NoSandbox
+         fallback policy (§3.4.2 firm commit + §5.1 precedence matrix).
+    S5 — docker-group / userns_clone boot-time threat closures (AC6/AC7).
+    """
+    import argparse as _argparse  # local import keeps top-of-file imports lean
+    assert isinstance(args, _argparse.Namespace)
+
+    cli_allow = _allow_nosandbox(args.allow_nosandbox)
+    require_sb = _require_sandbox()
+
+    # §5.1 row "CONFLICT REQUIRE+ALLOW": REQUIRE wins, hard-fail. Operator
+    # panic-paste cases (both flags set) must NOT silently succeed без
+    # isolation — security_critical safe-default per spec §5.1 rationale.
+    if require_sb and cli_allow:
+        _emit_sandbox_audit(
+            "policy_conflict_resolved_to_require",
+            schema_version="1",
+            require_sandbox=True,
+            allow_nosandbox=True,
+            outcome="hard_fail_exit_78",
+        )
+        sys.stderr.write(
+            "BMAD_REQUIRE_SANDBOX=1 + BMAD_ALLOW_NOSANDBOX=1 are mutually "
+            "exclusive; REQUIRE wins (security_critical safe-default).\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    # BMAD_SANDBOX=none = explicit operator-chose-no-bwrap. Per spec §8 M5
+    # outcome metric this must NOT silently bypass isolation: alone it
+    # hard-fails (exit 78); paired with explicit ALLOW it force-sequentials.
+    # Diverges from spec §3.4.2 row 6 «alias» — M5 acceptance is
+    # authoritative (§13 verification debt; resolved S6 Open Q).
+    if _sandbox_backend_none_requested() and not cli_allow:
+        _emit_sandbox_audit(
+            "sandbox_required_but_disabled",
+            schema_version="1",
+            sandbox_backend="none",
+            allow_nosandbox=False,
+            outcome="hard_fail_exit_78",
+        )
+        sys.stderr.write(
+            "BMAD_SANDBOX=none set без BMAD_ALLOW_NOSANDBOX=1 — refusing to "
+            "run worker без isolation. Either install/restore bwrap, or set "
+            "BMAD_ALLOW_NOSANDBOX=1 to explicitly opt into force-sequential "
+            "no-sandbox mode.\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    # S5 AC6: refuse if dispatcher UID is in `docker` group + socket reachable.
+    # Runs BEFORE bwrap_path check so the dangerous combination cannot proceed
+    # even on hosts missing bwrap (otherwise sandbox_hard_fail_no_bwrap masks
+    # the deeper docker-pivot risk and operator might force-bypass via ALLOW).
+    docker_rc = _assert_no_docker_group(cli_allow)
+    if docker_rc is not None:
+        return docker_rc
+
+    bwrap_path = shutil.which("bwrap")
+    if bwrap_path is None:
+        _emit_sandbox_audit(
+            "sandbox_hard_fail_no_bwrap",
+            schema_version="1",
+            outcome="hard_fail_exit_78",
+            allow_nosandbox=cli_allow,
+        )
+        if cli_allow:
+            sys.stderr.write(
+                "[sandbox] primary safety теряется — bwrap missing AND "
+                "BMAD_ALLOW_NOSANDBOX=1; running worker without isolation.\n"
+            )
+            _emit_sandbox_audit(
+                "sandbox_fallback_nosandbox",
+                schema_version="1",
+                trigger="bwrap_missing",
+                force_sequential=True,
+                warn_channel="stderr+audit",
+            )
+            os.execvp(args.command[0], args.command)  # noqa: S606 — intentional shell-less exec
+            return 0  # unreachable
+        sys.stderr.write(
+            "bwrap not found on PATH — install bubblewrap (apt install "
+            "bubblewrap) or set BMAD_ALLOW_NOSANDBOX=1 to force-sequential.\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    ok, observed = _assert_bwrap_version_floor(bwrap_path)
+    if not ok:
+        floor = _read_bwrap_version_floor()
+        floor_str = ".".join(str(x) for x in floor)
+        _emit_sandbox_audit(
+            "bwrap_version_floor_failed",
+            schema_version="1",
+            observed_version=observed,
+            required_floor=floor_str,
+            bwrap_path=bwrap_path,
+            outcome="hard_fail_exit_78",
+        )
+        if cli_allow:
+            sys.stderr.write(
+                f"[sandbox] primary safety теряется — bwrap "
+                f"{observed or '<unparseable>'} < floor {floor_str} AND "
+                "BMAD_ALLOW_NOSANDBOX=1; running worker without isolation.\n"
+            )
+            _emit_sandbox_audit(
+                "sandbox_fallback_nosandbox",
+                schema_version="1",
+                trigger="version_floor_failed",
+                force_sequential=True,
+                warn_channel="stderr+audit",
+            )
+            os.execvp(args.command[0], args.command)  # noqa: S606 — intentional shell-less exec
+            return 0  # unreachable
+        sys.stderr.write(
+            f"bwrap version {observed or '<unparseable>'} below floor "
+            f"{floor_str} — upgrade bubblewrap or set BMAD_ALLOW_NOSANDBOX=1.\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    # S2 lands overlay wiring; S3-S4 will layer cgroup/clearenv composition.
+    sandbox = BwrapSandbox(bwrap_path=bwrap_path)
+    extra_env: dict[str, str] = {}
+    for pair in args.env or []:
+        if "=" not in pair:
+            sys.stderr.write(f"--env expects KEY=VALUE, got {pair!r}\n")
+            return 2
+        key, _, value = pair.partition("=")
+        extra_env[key] = value
+    readonly = [Path(p) for p in (args.readonly_path or [])]
+
+    # S2 overlay wiring (spec §3.2 + §4.2). Only --overlay-mode=copy is wired
+    # this session; bind / overlayfs raise per spec defer table (§10).
+    overlay_mode = (
+        os.environ.get("BMAD_OVERLAY_MODE", "").strip().lower()
+        or args.overlay_mode
+    )
+    if overlay_mode not in ("copy", "bind", "overlayfs"):
+        sys.stderr.write(
+            f"--overlay-mode={overlay_mode!r} invalid (copy|bind|overlayfs)\n"
+        )
+        return 2
+    # S5 AC7: if overlayfs requested AND kernel allows unprivileged user
+    # namespaces, fall back к copy mode (CVE-2021-3493 class risk). Resolves
+    # BEFORE the bind/overlayfs guard so the safe path also works without
+    # BMAD_ALLOW_OVERLAYFS opt-in.
+    overlay_mode = _check_userns_safety(overlay_mode)
+    if overlay_mode in ("bind", "overlayfs"):
+        sys.stderr.write(
+            f"--overlay-mode={overlay_mode} not wired yet (S2 wires copy only; "
+            "bind / overlayfs deferred per spec §3.2 + §10).\n"
+        )
+        return 2
+
+    overlay_source: Path | None = None
+    if args.overlay_source:
+        overlay_source = Path(args.overlay_source)
+        if not overlay_source.is_absolute():
+            sys.stderr.write(
+                f"--overlay-source must be absolute: {args.overlay_source!r}\n"
+            )
+            return 2
+        if not overlay_source.exists():
+            sys.stderr.write(
+                f"--overlay-source does not exist: {overlay_source}\n"
+            )
+            return 2
+
+    wt_path = Path(args.worktree)
+    wrapped = sandbox.wrap_command(
+        list(args.command),
+        worktree=wt_path,
+        readonly_paths=readonly or None,
+        network=args.network,
+        env=extra_env or None,
+        worker_home_overlay=overlay_source,
+    )
+
+    # S3 cgroup composition (spec §3.4 + §5.1). Default ON when systemd-run
+    # --user is available + caller did not opt out via env. ALLOW path never
+    # reaches here (we exec'd already above on missing/version-fail bwrap).
+    cgroup_explicitly_disabled = _cgroup_disabled_by_env() or bool(
+        getattr(args, "no_cgroup", False)
+    )
+    cgroup_required = _cgroup_required()
+    if cgroup_explicitly_disabled and cgroup_required:
+        # Operator footgun — cgroup explicitly required AND explicitly
+        # disabled. REQUIRE wins (mirrors REQUIRE+ALLOW conflict resolution).
+        _emit_sandbox_audit(
+            "policy_conflict_resolved_to_require",
+            schema_version="1",
+            require_cgroup=True,
+            cgroup_disabled_env=True,
+            outcome="hard_fail_exit_78",
+        )
+        sys.stderr.write(
+            "BMAD_REQUIRE_CGROUP=1 + BMAD_SANDBOX_CGROUP=0 are mutually "
+            "exclusive; REQUIRE wins.\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    scope_unit: str | None = None
+    cgroup_prefix: list[str] = []
+    if not cgroup_explicitly_disabled:
+        available, sd_path = _systemd_run_available()
+        if available:
+            assert sd_path is not None
+            scope_unit = _scope_unit_name(wt_path)
+            limits = _resolved_cgroup_limits()
+            cgroup_prefix = [
+                sd_path,
+                "--user",
+                "--scope",
+                "--quiet",
+                f"--unit={scope_unit}.scope",
+            ]
+            for key, value in limits.items():
+                cgroup_prefix += ["-p", f"{key}={value}"]
+            cgroup_prefix += ["--"]
+        else:
+            if cgroup_required:
+                _emit_sandbox_audit(
+                    "cgroup_required_but_unavailable",
+                    schema_version="1",
+                    outcome="hard_fail_exit_78",
+                    systemd_run_path=sd_path,
+                    xdg_runtime_dir=os.environ.get("XDG_RUNTIME_DIR", ""),
+                )
+                sys.stderr.write(
+                    "BMAD_REQUIRE_CGROUP=1 set but systemd-run --user is "
+                    "unavailable (need systemd user manager + "
+                    "$XDG_RUNTIME_DIR). Install systemd or unset env.\n"
+                )
+                return EXIT_SANDBOX_UNAVAILABLE
+            _emit_sandbox_audit(
+                "cgroup_unavailable_fallback_prlimit",
+                schema_version="1",
+                systemd_run_path=sd_path,
+                xdg_runtime_dir=os.environ.get("XDG_RUNTIME_DIR", ""),
+                outcome="proceeding_with_prlimit_only",
+            )
+
+    full = cgroup_prefix + wrapped if cgroup_prefix else wrapped
+
+    if not cgroup_prefix:
+        # No cgroup composition → keep historical execvp behavior for
+        # zero-overhead pass-through. Preserves S1/S2 test semantics on
+        # hosts без systemd-user.
+        os.execvp(full[0], full)  # noqa: S606 — intentional shell-less exec
+        return 0  # unreachable
+
+    # Cgroup path: subprocess.Popen so we can observe pids.events on exit
+    # and emit cgroup_tasks_max_hit audit when TasksMax engaged. We tee
+    # stdout/stderr through directly (inherit fds) so the worker behaves
+    # identically to execvp's pass-through. A background poller thread
+    # snapshots pids.events while the child is alive — systemd reaps the
+    # transient scope shortly after the inner process exits, so we cannot
+    # rely on reading the file after wait().
+    import subprocess
+    import threading
+
+    assert scope_unit is not None
+    scope_cg = _scope_cgroup_path(scope_unit)
+    max_seen = [0]  # box for thread-shared state
+
+    def _poll_pids_events() -> None:
+        # Poll until cgroup disappears or we see a max event. 50ms cadence
+        # balances responsiveness against syscall overhead.
+        import time as _t
+        while True:
+            if not scope_cg.exists():
+                return
+            current = _read_pids_max_count(scope_cg)
+            if current > max_seen[0]:
+                max_seen[0] = current
+            _t.sleep(0.05)
+
+    poller = threading.Thread(target=_poll_pids_events, daemon=True)
+    poller.start()
+    try:
+        proc = subprocess.Popen(full)  # noqa: S603 — argv list, shell=False
+        rc = proc.wait()
+    finally:
+        # Watcher thread is daemon; final pids.events read after wait()
+        # catches the case where the scope outlives the inner pid briefly.
+        try:
+            final = _read_pids_max_count(scope_cg)
+            if final > max_seen[0]:
+                max_seen[0] = final
+        except OSError:
+            # cgroup already reaped — pids.events disappeared. Observability
+            # gap is acceptable; the poller thread caught it if it hit.
+            pass
+
+    if max_seen[0] > 0:
+        _emit_sandbox_audit(
+            "cgroup_tasks_max_hit",
+            schema_version="1",
+            tasks_max=_resolved_cgroup_limits().get("TasksMax", DEFAULT_CGROUP_TASKS_MAX),
+            cgroup_scope=f"{scope_unit}.scope",
+            max_events_observed=max_seen[0],
+            worker_exit_code=rc,
+            outcome="worker_killed_or_fork_blocked",
+        )
+    return rc
+
+
+def _build_wrap_parser():
+    """Build the top-level argparse parser. Returns ArgumentParser."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="python -m bmad_orchestrator.runtime.sandbox",
+        description=(
+            "OS-level sandbox CLI for worker spawn (Q-260527-WTISO-BW). "
+            "Composes bwrap+prlimit+cgroup+overlay around `claude -p` workers."
+        ),
+    )
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+
+    wrap = sub.add_parser(
+        "wrap",
+        help="Wrap a worker command with bwrap+prlimit+cgroup isolation.",
+    )
+    wrap.add_argument("--worktree", required=True, help="Writable mount root.")
+    wrap.add_argument(
+        "--network",
+        choices=("none", "github_only", "full"),
+        default="none",
+        help="Network policy (default: none).",
+    )
+    wrap.add_argument(
+        "--allow-nosandbox",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="Operator opt-in for hard-fail bypass (force-sequential).",
+    )
+    wrap.add_argument(
+        "--overlay-mode",
+        choices=("copy", "bind", "overlayfs"),
+        default="copy",
+        help="Overlay strategy for ~/.claude per-worker (S2 scope).",
+    )
+    wrap.add_argument(
+        "--overlay-source",
+        default=None,
+        help="Path to overlay snapshot prepared in Step 2 (S2 scope).",
+    )
+    wrap.add_argument(
+        "--readonly-path",
+        action="append",
+        default=[],
+        help="Extra read-only bind mounts (repeatable).",
+    )
+    wrap.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        help="Pass extra env vars KEY=VALUE (repeatable).",
+    )
+    wrap.add_argument(
+        "--no-cgroup",
+        action="store_true",
+        help=(
+            "Disable cgroup composition (skip systemd-run --user --scope). "
+            "Equivalent to env BMAD_SANDBOX_CGROUP=0. Refused if "
+            "BMAD_REQUIRE_CGROUP=1 (precedence matrix §5.1)."
+        ),
+    )
+    wrap.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Worker command after `--` (e.g. claude -p ARGS).",
+    )
+    wrap.set_defaults(handler=_cmd_wrap)
+    return parser
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """Entry point for ``python -m bmad_orchestrator.runtime.sandbox``."""
+    parser = _build_wrap_parser()
+    args = parser.parse_args(argv)
+    # argparse REMAINDER keeps the leading `--` separator if present; strip
+    # so callers can pass `-- /bin/echo hi` without seeing `--` in argv[0].
+    if args.command and args.command[0] == "--":
+        args.command = args.command[1:]
+    if not args.command:
+        parser.error("worker command required after `--`")
+    return args.handler(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))
+
+
 __all__ = [
     "DEFAULT_CGROUP_CPU_QUOTA",
     "DEFAULT_CGROUP_LIMITS",
     "DEFAULT_CGROUP_MEMORY_MAX",
     "DEFAULT_CGROUP_TASKS_MAX",
+    "EXIT_SANDBOX_UNAVAILABLE",
     "BashDenyList",
     "BwrapSandbox",
     "FsDenyList",
     "NetworkPolicy",
     "NoSandbox",
     "Sandbox",
+    # S3 cgroup + NoSandbox policy helpers (spec §3.4 + §5.1)
+    "_allow_nosandbox",
+    "_assert_no_docker_group",
+    "_cgroup_disabled_by_env",
+    # S5 boot-time threat closures (spec §6.1 + §11 #7 + AC6/AC7)
+    "_check_userns_safety",
+    # S2 overlay helpers (spec §3.2)
+    "_cleanup_overlays",
+    "_current_groups",
+    "_docker_socket_present",
+    "_prepare_overlay_for_worker",
+    "_prepare_overlays_master",
+    "_read_pids_max_count",
+    "_require_sandbox",
+    "_resolved_cgroup_limits",
+    "_sandbox_backend_none_requested",
+    "_scope_cgroup_path",
+    "_sweep_stale_overlays",
+    "_userns_clone_enabled",
     "compile_deny_lists",
     "detect_sandbox",
     "match_bash_deny",
