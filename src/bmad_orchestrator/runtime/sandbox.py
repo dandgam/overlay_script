@@ -1039,15 +1039,102 @@ def _assert_bwrap_version_floor(bwrap_path: str) -> tuple[bool, str | None]:
 
 def _allow_nosandbox(cli_flag: int | None) -> bool:
     """Operator opt-in resolves any of: CLI ``--allow-nosandbox=1`` /
-    ``BMAD_ALLOW_NOSANDBOX=1`` / ``BMAD_SANDBOX=none``.
+    ``BMAD_ALLOW_NOSANDBOX=1``.
+
+    ``BMAD_SANDBOX=none`` is NOT an opt-in (S3 spec fix per M5 outcome metric):
+    setting the backend to "none" without an explicit ALLOW flag must hard-fail
+    so silent operator misconfiguration cannot bypass primary safety. See
+    spec §3.4.2 v2 read + §8 M5 row. The wrap subcommand checks
+    ``BMAD_SANDBOX=none`` separately and emits ``sandbox_required_but_disabled``
+    if ALLOW is not set.
     """
     if cli_flag == 1:
         return True
     if os.environ.get("BMAD_ALLOW_NOSANDBOX", "").strip().lower() in {"1", "true", "yes"}:
         return True
-    if os.environ.get("BMAD_SANDBOX", "").strip().lower() == "none":
-        return True
     return False
+
+
+def _require_sandbox() -> bool:
+    """``BMAD_REQUIRE_SANDBOX=1`` (or true/yes) → strict-prod, hard-fail."""
+    return os.environ.get("BMAD_REQUIRE_SANDBOX", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _sandbox_backend_none_requested() -> bool:
+    """Operator explicitly chose backend=none via env (NOT itself an opt-in)."""
+    return os.environ.get("BMAD_SANDBOX", "").strip().lower() == "none"
+
+
+# S3 — env overrides for cgroup limits (spec §5 row `BMAD_SANDBOX_CGROUP_*`).
+# Allow tests + operators to dial TasksMax/MemoryMax/CPUQuota without code
+# patching. M1 fork-bomb canary needs a tight TasksMax to verify enforcement
+# without actually saturating the host PID table.
+_ENV_CGROUP_TASKS_MAX = "BMAD_SANDBOX_CGROUP_TASKS_MAX"
+_ENV_CGROUP_MEMORY_MAX = "BMAD_SANDBOX_CGROUP_MEMORY_MAX"
+_ENV_CGROUP_CPU_QUOTA = "BMAD_SANDBOX_CGROUP_CPU_QUOTA"
+_ENV_DISABLE_CGROUP = "BMAD_SANDBOX_CGROUP"  # set to "0" / "off" to disable
+
+
+def _resolved_cgroup_limits() -> dict[str, str]:
+    """Default cgroup limits with env-var overrides applied.
+
+    Env overrides are passed verbatim to systemd-run ``-p Key=Value`` so they
+    must use systemd property syntax (e.g. ``8G``, ``200%``, ``16384``).
+    """
+    limits = dict(DEFAULT_CGROUP_LIMITS)
+    tm = os.environ.get(_ENV_CGROUP_TASKS_MAX, "").strip()
+    if tm:
+        limits["TasksMax"] = tm
+    mm = os.environ.get(_ENV_CGROUP_MEMORY_MAX, "").strip()
+    if mm:
+        limits["MemoryMax"] = mm
+    cq = os.environ.get(_ENV_CGROUP_CPU_QUOTA, "").strip()
+    if cq:
+        limits["CPUQuota"] = cq
+    return limits
+
+
+def _cgroup_disabled_by_env() -> bool:
+    """``BMAD_SANDBOX_CGROUP=0|off|false|no`` disables cgroup composition."""
+    raw = os.environ.get(_ENV_DISABLE_CGROUP, "").strip().lower()
+    return raw in {"0", "off", "false", "no"}
+
+
+def _scope_cgroup_path(unit_name: str) -> Path:
+    """Best-effort path to the user-scope cgroup directory.
+
+    ``systemd-run --user --scope --unit=<unit>.scope`` creates the cgroup at
+    ``/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/app.slice/<unit>.scope/``.
+    Caller treats a missing path as "cgroup already reaped" — not an error.
+    """
+    uid = os.getuid()
+    return Path(
+        f"/sys/fs/cgroup/user.slice/user-{uid}.slice/"
+        f"user@{uid}.service/app.slice/{unit_name}.scope"
+    )
+
+
+def _read_pids_max_count(scope_cg: Path) -> int:
+    """Read the ``pids.events`` ``max`` counter from a scope cgroup.
+
+    Returns 0 if the file is missing (cgroup already reaped) or unparseable.
+    Cgroup v2 ``pids.events`` format:
+
+        max <int>
+        max.imposed <int>   # kernel 5.14+, optional
+    """
+    try:
+        text = (scope_cg / "pids.events").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) == 2 and parts[0] == "max":
+            try:
+                return int(parts[1])
+            except ValueError:
+                return 0
+    return 0
 
 
 def _emit_sandbox_audit(event_type: str, **payload: object) -> None:
@@ -1312,14 +1399,56 @@ def _sweep_stale_overlays(
 
 
 def _cmd_wrap(args: object) -> int:
-    """``wrap`` subcommand handler — S1 scope: version assertion only.
+    """``wrap`` subcommand handler.
 
-    Composition pipeline (full systemd-run → bwrap → exec) lands in S2-S4.
-    Until then, version-pass path delegates to ``BwrapSandbox.wrap_command``
-    so existing bind/blackout/clearenv guarantees stay live.
+    S1 — bwrap version floor assertion.
+    S2 — per-worker overlay wiring (``--overlay-mode copy``).
+    S3 — cgroup composition (``systemd-run --user --scope``) + NoSandbox
+         fallback policy (§3.4.2 firm commit + §5.1 precedence matrix).
     """
     import argparse as _argparse  # local import keeps top-of-file imports lean
     assert isinstance(args, _argparse.Namespace)
+
+    cli_allow = _allow_nosandbox(args.allow_nosandbox)
+    require_sb = _require_sandbox()
+
+    # §5.1 row "CONFLICT REQUIRE+ALLOW": REQUIRE wins, hard-fail. Operator
+    # panic-paste cases (both flags set) must NOT silently succeed без
+    # isolation — security_critical safe-default per spec §5.1 rationale.
+    if require_sb and cli_allow:
+        _emit_sandbox_audit(
+            "policy_conflict_resolved_to_require",
+            schema_version="1",
+            require_sandbox=True,
+            allow_nosandbox=True,
+            outcome="hard_fail_exit_78",
+        )
+        sys.stderr.write(
+            "BMAD_REQUIRE_SANDBOX=1 + BMAD_ALLOW_NOSANDBOX=1 are mutually "
+            "exclusive; REQUIRE wins (security_critical safe-default).\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    # BMAD_SANDBOX=none = explicit operator-chose-no-bwrap. Per spec §8 M5
+    # outcome metric this must NOT silently bypass isolation: alone it
+    # hard-fails (exit 78); paired with explicit ALLOW it force-sequentials.
+    # Diverges from spec §3.4.2 row 6 «alias» — M5 acceptance is
+    # authoritative (§13 verification debt; resolved S6 Open Q).
+    if _sandbox_backend_none_requested() and not cli_allow:
+        _emit_sandbox_audit(
+            "sandbox_required_but_disabled",
+            schema_version="1",
+            sandbox_backend="none",
+            allow_nosandbox=False,
+            outcome="hard_fail_exit_78",
+        )
+        sys.stderr.write(
+            "BMAD_SANDBOX=none set без BMAD_ALLOW_NOSANDBOX=1 — refusing to "
+            "run worker без isolation. Either install/restore bwrap, or set "
+            "BMAD_ALLOW_NOSANDBOX=1 to explicitly opt into force-sequential "
+            "no-sandbox mode.\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
 
     bwrap_path = shutil.which("bwrap")
     if bwrap_path is None:
@@ -1327,9 +1456,9 @@ def _cmd_wrap(args: object) -> int:
             "sandbox_hard_fail_no_bwrap",
             schema_version="1",
             outcome="hard_fail_exit_78",
-            allow_nosandbox=_allow_nosandbox(args.allow_nosandbox),
+            allow_nosandbox=cli_allow,
         )
-        if _allow_nosandbox(args.allow_nosandbox):
+        if cli_allow:
             sys.stderr.write(
                 "[sandbox] primary safety теряется — bwrap missing AND "
                 "BMAD_ALLOW_NOSANDBOX=1; running worker without isolation.\n"
@@ -1361,7 +1490,7 @@ def _cmd_wrap(args: object) -> int:
             bwrap_path=bwrap_path,
             outcome="hard_fail_exit_78",
         )
-        if _allow_nosandbox(args.allow_nosandbox):
+        if cli_allow:
             sys.stderr.write(
                 f"[sandbox] primary safety теряется — bwrap "
                 f"{observed or '<unparseable>'} < floor {floor_str} AND "
@@ -1425,16 +1554,143 @@ def _cmd_wrap(args: object) -> int:
             )
             return 2
 
+    wt_path = Path(args.worktree)
     wrapped = sandbox.wrap_command(
         list(args.command),
-        worktree=Path(args.worktree),
+        worktree=wt_path,
         readonly_paths=readonly or None,
         network=args.network,
         env=extra_env or None,
         worker_home_overlay=overlay_source,
     )
-    os.execvp(wrapped[0], wrapped)  # noqa: S606 — intentional shell-less exec
-    return 0  # unreachable
+
+    # S3 cgroup composition (spec §3.4 + §5.1). Default ON when systemd-run
+    # --user is available + caller did not opt out via env. ALLOW path never
+    # reaches here (we exec'd already above on missing/version-fail bwrap).
+    cgroup_explicitly_disabled = _cgroup_disabled_by_env() or bool(
+        getattr(args, "no_cgroup", False)
+    )
+    cgroup_required = _cgroup_required()
+    if cgroup_explicitly_disabled and cgroup_required:
+        # Operator footgun — cgroup explicitly required AND explicitly
+        # disabled. REQUIRE wins (mirrors REQUIRE+ALLOW conflict resolution).
+        _emit_sandbox_audit(
+            "policy_conflict_resolved_to_require",
+            schema_version="1",
+            require_cgroup=True,
+            cgroup_disabled_env=True,
+            outcome="hard_fail_exit_78",
+        )
+        sys.stderr.write(
+            "BMAD_REQUIRE_CGROUP=1 + BMAD_SANDBOX_CGROUP=0 are mutually "
+            "exclusive; REQUIRE wins.\n"
+        )
+        return EXIT_SANDBOX_UNAVAILABLE
+
+    scope_unit: str | None = None
+    cgroup_prefix: list[str] = []
+    if not cgroup_explicitly_disabled:
+        available, sd_path = _systemd_run_available()
+        if available:
+            assert sd_path is not None
+            scope_unit = _scope_unit_name(wt_path)
+            limits = _resolved_cgroup_limits()
+            cgroup_prefix = [
+                sd_path,
+                "--user",
+                "--scope",
+                "--quiet",
+                f"--unit={scope_unit}.scope",
+            ]
+            for key, value in limits.items():
+                cgroup_prefix += ["-p", f"{key}={value}"]
+            cgroup_prefix += ["--"]
+        else:
+            if cgroup_required:
+                _emit_sandbox_audit(
+                    "cgroup_required_but_unavailable",
+                    schema_version="1",
+                    outcome="hard_fail_exit_78",
+                    systemd_run_path=sd_path,
+                    xdg_runtime_dir=os.environ.get("XDG_RUNTIME_DIR", ""),
+                )
+                sys.stderr.write(
+                    "BMAD_REQUIRE_CGROUP=1 set but systemd-run --user is "
+                    "unavailable (need systemd user manager + "
+                    "$XDG_RUNTIME_DIR). Install systemd or unset env.\n"
+                )
+                return EXIT_SANDBOX_UNAVAILABLE
+            _emit_sandbox_audit(
+                "cgroup_unavailable_fallback_prlimit",
+                schema_version="1",
+                systemd_run_path=sd_path,
+                xdg_runtime_dir=os.environ.get("XDG_RUNTIME_DIR", ""),
+                outcome="proceeding_with_prlimit_only",
+            )
+
+    full = cgroup_prefix + wrapped if cgroup_prefix else wrapped
+
+    if not cgroup_prefix:
+        # No cgroup composition → keep historical execvp behavior for
+        # zero-overhead pass-through. Preserves S1/S2 test semantics on
+        # hosts без systemd-user.
+        os.execvp(full[0], full)  # noqa: S606 — intentional shell-less exec
+        return 0  # unreachable
+
+    # Cgroup path: subprocess.Popen so we can observe pids.events on exit
+    # and emit cgroup_tasks_max_hit audit when TasksMax engaged. We tee
+    # stdout/stderr through directly (inherit fds) so the worker behaves
+    # identically to execvp's pass-through. A background poller thread
+    # snapshots pids.events while the child is alive — systemd reaps the
+    # transient scope shortly after the inner process exits, so we cannot
+    # rely on reading the file after wait().
+    import subprocess
+    import threading
+
+    assert scope_unit is not None
+    scope_cg = _scope_cgroup_path(scope_unit)
+    max_seen = [0]  # box for thread-shared state
+
+    def _poll_pids_events() -> None:
+        # Poll until cgroup disappears or we see a max event. 50ms cadence
+        # balances responsiveness against syscall overhead.
+        import time as _t
+        while True:
+            if not scope_cg.exists():
+                return
+            current = _read_pids_max_count(scope_cg)
+            if current > max_seen[0]:
+                max_seen[0] = current
+            _t.sleep(0.05)
+
+    poller = threading.Thread(target=_poll_pids_events, daemon=True)
+    poller.start()
+    try:
+        proc = subprocess.Popen(full)  # noqa: S603 — argv list, shell=False
+        rc = proc.wait()
+    finally:
+        # Watcher thread is daemon; final pids.events read after wait()
+        # catches the case where the scope outlives the inner pid briefly.
+        try:
+            final = _read_pids_max_count(scope_cg)
+            if final > max_seen[0]:
+                max_seen[0] = final
+        except OSError:
+            # cgroup already reaped — pids.events disappeared. Observability
+            # gap is acceptable; the poller thread caught it if it hit.
+            pass
+
+    if max_seen[0] > 0:
+        _emit_sandbox_audit(
+            "cgroup_tasks_max_hit",
+            schema_version="1",
+            tasks_max=_resolved_cgroup_limits().get("TasksMax", DEFAULT_CGROUP_TASKS_MAX),
+            cgroup_scope=f"{scope_unit}.scope",
+            max_events_observed=max_seen[0],
+            worker_exit_code=rc,
+            outcome="worker_killed_or_fork_blocked",
+        )
+    return rc
 
 
 def _build_wrap_parser():
@@ -1491,6 +1747,15 @@ def _build_wrap_parser():
         help="Pass extra env vars KEY=VALUE (repeatable).",
     )
     wrap.add_argument(
+        "--no-cgroup",
+        action="store_true",
+        help=(
+            "Disable cgroup composition (skip systemd-run --user --scope). "
+            "Equivalent to env BMAD_SANDBOX_CGROUP=0. Refused if "
+            "BMAD_REQUIRE_CGROUP=1 (precedence matrix §5.1)."
+        ),
+    )
+    wrap.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Worker command after `--` (e.g. claude -p ARGS).",
@@ -1528,10 +1793,18 @@ __all__ = [
     "NetworkPolicy",
     "NoSandbox",
     "Sandbox",
+    # S3 cgroup + NoSandbox policy helpers (spec §3.4 + §5.1)
+    "_allow_nosandbox",
+    "_cgroup_disabled_by_env",
     # S2 overlay helpers (spec §3.2)
     "_cleanup_overlays",
     "_prepare_overlay_for_worker",
     "_prepare_overlays_master",
+    "_read_pids_max_count",
+    "_require_sandbox",
+    "_resolved_cgroup_limits",
+    "_sandbox_backend_none_requested",
+    "_scope_cgroup_path",
     "_sweep_stale_overlays",
     "compile_deny_lists",
     "detect_sandbox",
