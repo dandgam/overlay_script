@@ -82,3 +82,10 @@
 ## Final Report
 
 (empty)
+
+## Post-Merge Handoff к /888 Phase 3
+
+> Заполняется S6 при write Final Report. Содержит готовую команду для user после manual merge.
+
+(заполнится S6)
+

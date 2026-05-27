@@ -545,3 +545,34 @@ Auto-loop wrapper runs within bmad-orchestrator. Per-session work на `~/.claud
 - Final Report в tracker с commit hashes + manual-merge hint
 
 User receives PushNotification: «initiative wtiso-bw ready for manual merge. Review `integration/wtiso-bw` then `git merge --no-ff`.»
+
+### S6 — additional acceptance: Post-Merge Handoff section
+
+При написании Final Report S6 ОБЯЗАН заполнить секцию `## Post-Merge Handoff к /888 Phase 3` в tracker'е следующим шаблоном:
+
+```markdown
+## Post-Merge Handoff к /888 Phase 3
+
+**Готово к merge:** integration/wtiso-bw (commits Sxxxxxx..Syyyyyy)
+
+**Команда для user (после review):**
+\`\`\`bash
+git checkout main && git merge --no-ff integration/wtiso-bw -m "merge wtiso-bw S1..S6"
+\`\`\`
+
+**После успешного merge — скажите Claude:** «merged» (или «merge done» / «продолжай wtiso-bw»)
+
+**Что Claude сделает дальше:**
+1. Обновит methodology-888.md §4xx с current-persona: implementer → handoff-pending (qa)
+2. Вызовет /888 → диспетчер увидит phase:2.5 done + handoff-pending(qa)
+3. Auto-handoff (§2 step 7-bis) → invoke 888-persona-qa для Phase 3 Test
+4. qa запустит bmad-security-review (4 hunters: Injection/Auth/Crypto/RLS Leak) — обязательно для security_critical
+5. Edge cases + happy paths + OWASP ASI coverage
+6. После qa PASS — handoff к ops (Phase 4 deploy ramp)
+
+**Если что-то пошло не так:**
+- Rollback merge: `git reset --hard backup/wtiso-bw-pre-2026-05-27`
+- Skip автоматику и Phase 3 запустить руками: «/888 Q-260527-WTISO-BW phase 3»
+```
+
+Цель: user видит **один** clear callout, делает merge, говорит одно слово — pipeline продолжается до improver. Без этого user должен помнить весь workflow + правильно вызывать 888.
