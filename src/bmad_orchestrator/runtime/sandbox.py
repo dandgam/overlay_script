@@ -1066,11 +1066,6 @@ def _allow_nosandbox(cli_flag: int | None) -> bool:
     return False
 
 
-def _require_sandbox() -> bool:
-    """``BMAD_REQUIRE_SANDBOX=1`` (or true/yes) → strict-prod, hard-fail."""
-    return os.environ.get("BMAD_REQUIRE_SANDBOX", "").strip().lower() in {"1", "true", "yes"}
-
-
 def _sandbox_backend_none_requested() -> bool:
     """Operator explicitly chose backend=none via env (NOT itself an opt-in)."""
     return os.environ.get("BMAD_SANDBOX", "").strip().lower() == "none"
@@ -1666,6 +1661,20 @@ def _cmd_wrap(args: object) -> int:
             f"{floor_str} — upgrade bubblewrap or set BMAD_ALLOW_NOSANDBOX=1.\n"
         )
         return EXIT_SANDBOX_UNAVAILABLE
+
+    # FX1 (Q-260527-WTISO-BW-FX1): boot-check unprivileged_userns_clone so the
+    # silent `--unshare-user-try` skip (BwrapSandbox.wrap_command:498-503) is
+    # surfaced in audit trail. Worker still proceeds — user-ns isolation is
+    # defense-in-depth atop primary PID/IPC/mount namespaces.
+    userns_state = _userns_clone_enabled()
+    if userns_state is not True:
+        _emit_sandbox_audit(
+            "user_namespace_unshare_unavailable",
+            schema_version="1",
+            userns_clone_enabled=userns_state,  # False, or None when knob missing
+            detector="boot_check_userns_clone",
+            outcome="worker_proceeds_without_userns_isolation",
+        )
 
     # S2 lands overlay wiring; S3-S4 will layer cgroup/clearenv composition.
     sandbox = BwrapSandbox(bwrap_path=bwrap_path)
