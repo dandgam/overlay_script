@@ -548,6 +548,30 @@ class BwrapSandbox:
             if host_path.exists():
                 wrapped += ["--bind", str(host_path), str(host_path)]
 
+        # ── S2 + S1-reinforce (888 Q-260528-BATCH-PIPELINE §O fix#2): SECOND
+        # blackout pass, applied AFTER the ``~/.claude`` overlay binds above.
+        # ORDERING IS LOAD-BEARING: the generic ``_SANDBOX_BLACKOUT_PATHS`` loop
+        # runs BEFORE the overlay ``--bind ~/.claude``, which re-exposes every
+        # cache subpath and would silently shadow a blackout placed there. Bwrap
+        # applies mounts in order, so re-applying these here — last — makes them
+        # win. Same trust class as ``main-merge-token.json``: the 888 phase-chain
+        # verdict-dir / state and the enforce-flag ``.env`` are supervisor-owned
+        # control artifacts a batch worker must not be able to forge or flip.
+        _skill_888 = home / ".claude" / "skills" / "888"
+        # ``cache/phase-chain`` (verdict-dir + phase-state + events) → tmpfs: worker
+        # writes land in a private tmpfs discarded at exit; the host copy is the only
+        # truth. Kills both the S1 forge (worker-authored verdict) AND the bwrap
+        # stall (overlay-private write the host can't see). With Option A the
+        # supervisor owns the gate, so the worker never needs to READ verdict-dir.
+        wrapped += ["--tmpfs", str(_skill_888 / "cache" / "phase-chain")]
+        # ``config/.env`` → read-only bind of the host file: worker can still READ
+        # the flag (hooks grep it) but cannot write
+        # ``BMAD_888_PHASE_CHAIN_ENFORCE=off`` to self-disable enforcement (S2).
+        # Skip when absent (nothing to protect).
+        _skill_888_env = _skill_888 / "config" / ".env"
+        if _skill_888_env.is_file():
+            wrapped += ["--ro-bind", str(_skill_888_env), str(_skill_888_env)]
+
         if network == "none":
             wrapped += ["--unshare-net"]
         # network="full" or "github_only" → share host netns (nftables
