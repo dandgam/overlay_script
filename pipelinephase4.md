@@ -150,6 +150,38 @@ format: deterministic-state-machine
 | ⑦ | агент завершается; код ≠0 после 2 попыток → halt (graceful: пишет `halt-reason.txt`) | бюджет G/H/P | `:439-441` |
 | ⑧ | **форм-гейт**: файл истории появился? нет → `HALT:missing-story-file`; да → **S5** | — (base) | `:444-446` |
 
+#### S4 внутри: скилл `bmad-create-story` (что делает Opus ПОСЛЕ загрузки скилла)
+
+Файлы скилла: `odyssey/.claude/skills/bmad-create-story/` — `SKILL.md` (429 строк) + `template.md` (каркас файла истории) + `checklist.md` (самопроверка) + `discover-inputs.md` (протокол загрузки артефактов) + `customize.toml` (база установок).
+
+**Фаза А — Активация («установки», SKILL.md:26-66), 6 шагов:**
+
+| # | Шаг | Что конкретно в Odyssey |
+|---|---|---|
+| 1 | `resolve_customization.py` склеивает 3 слоя TOML: база скилла → проект `_bmad/custom/bmad-create-story.toml` → личный `.user.toml` | user-слоя нет; правила слияния: скаляры — побеждает ближний слой, списки — складываются |
+| 2 | activation_steps_prepend | пусто |
+| 3 | persistent_facts («вечные факты» на всю сессию) | база: `file:**/project-context.md`; проект добавляет 8 фактов = **политика Gauntlet-3-сеньоров** на Шаге 5 |
+| 4 | конфиг `_bmad/bmm/config.yaml` | язык, пути planning/implementation_artifacts, имя юзера |
+| 5 | greet | в headless вхолостую |
+| 6 | activation_steps_append | пусто |
+
+⚠️ **Конфликт двух приказов (живой пример «промпт-гейт мягкий»):** проектный TOML (2026-05-14, писался для интерактива) велит на Шаге 5 показать таблицу находок Gauntlet и ждать accept/reject по каждой («DECISION STAYS WITH USER»); промпт раннера (Patch O) поверх: «NEVER ask human, ACCEPT ALL». Арбитра-реле нет — разруливает сам Opus (слушает более позднюю/конкретную директиву раннера). Два текстовых приказа могут спорить — исход решает LLM, не bash.
+
+**Фаза Б — Workflow (SKILL.md:89-429), 6 шагов:**
+
+| # | Шаг | Суть | Строки |
+|---|---|---|---|
+| ① | Чья история | id уже в промпте раннера → парс `5-1` → GOTO ②. Ветки «спросить юзера» / «найти первый backlog в sprint-status» — мёртвые в конвейере (выбор сделал dependency_analyzer на S1) | `:91-246` |
+| ② | Артефакты | `discover-inputs.md` → epics (эпик целиком + AC истории) + PRD/arch/UX кусочно (SELECTIVE_LOAD) + **прошлая история эпика** (dev notes, грабли) + последние 5 коммитов git | `:248-284` |
+| ③ | Архитектура → guardrails | стек/структура/API/DB/security/testing-правила; **CRITICAL: прочитать каждый меняемый файл** (что есть → что меняем → что не сломать) — «главная причина провалов имплементации» | `:286-317` |
+| ④ | Web-research | свежие версии библиотек, breaking changes, security-патчи | `:319-339` |
+| ⑤ | Написать файл | по `template.md` секция за секцией: header → requirements → developer context → 5 блоков guardrails → прошлый опыт → git → web → status; тут же Gauntlet 3 сеньоров (ACCEPT ALL в автономе) → находки вшить в ACs; `Status="ready-for-dev"` | `:341-392` |
+| ⑥ | Финал | самопроверка по `checklist.md` → save → `sprint-status.yaml`: backlog → ready-for-dev → on_complete (пусто) → exit | `:394-427` |
+
+**Суть скилла одной строкой:** не «скопируй из epics.md», а **сборка полного досье для Sonnet** — S5 стартует с пустой памятью и узнает о проекте ровно столько, сколько S4 положил в файл.
+
+Побочная находка: в Шаге 1 блок авто-поиска backlog-истории продублирован дважды (`SKILL.md:130-189` ≈ `:190-245`) — copy-paste артефакт, в конвейере недостижим (GOTO на `:95`).
+
 ### S5 — dev-story (producer · `claude -p`, **Sonnet**) — пишет КОД по спеке
 **Кто.** Раннер зовёт `claude --model sonnet -p` выполнить `bmad-dev-story` (`:449-455`). **Смена модели Opus→Sonnet:** на S4 нужна «творческая голова» (придумать спеку), на S5 — исполнитель по готовому чертежу; имплементация по спеке дешевле (cost-routing `[models].dev_story = sonnet`). Танец моделей: Opus думает (S4) → Sonnet делает (S5) → Opus проверяет (S6).
 **Вход — по ссылке (как S4).** Sonnet НЕ видит сессию S4; он читает файл `_bmad/stories/<id>.md` (что S4 написал) своим Read. Контекст между стадиями — через диск.
