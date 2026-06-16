@@ -614,6 +614,7 @@ class CaptureResult:
     overlays: list[str]
     forks: list[CapturedFork]
     canary_errors: list[str]
+    skill_files: list[str] = field(default_factory=list)
 
 
 def make_patch(base: bytes, fork: bytes, name: str) -> str:
@@ -683,8 +684,10 @@ def plan_capture(
     overlays = discover_overlays(canon_root)  # {name: path}
     forks = [e for e in fork_census(canon_root, upstream_skill_steps) if e.is_fork]
 
+    skill_rels = own_skill_rel_paths(canon_root)
     cap_rels = [str(p.relative_to(canon_root)) for p in overlays.values()]
     cap_rels += [e.rel for e in forks]
+    cap_rels += skill_rels
     dirty: set[str] = set()
     if cap_rels:
         rc, out = run_git(["status", "--porcelain", "--", *cap_rels], canon_root)
@@ -709,18 +712,22 @@ def plan_capture(
         else:
             items.append(CaptureItem(CAT_FORK, name, e.rel, "capture"))
 
-    # Category 3 — own skill bmad-auto-dev: drift is bidirectional with global
-    # (verified), so a naive copy would lose global-canon additions. Defer until
-    # the MF-9 per-file reconcile is done. LOUD, never silent.
-    items.append(
-        CaptureItem(
-            CAT_SKILL,
-            "bmad-auto-dev",
-            "",
-            "defer",
-            "bidirectional drift — MF-9 per-file reconcile required first",
+    # Category 3 — own skill bmad-auto-dev: odyssey is THE canonical copy (owner
+    # decision; the global one belongs to 888/Virgil and is out of scope). Capture
+    # its canon files (own_skill_rel_paths already drops per-project / per-install /
+    # __pycache__). skip-dirty if any canon file is uncommitted (unless allow_dirty).
+    if not skill_rels:
+        items.append(CaptureItem(CAT_SKILL, "bmad-auto-dev", "", "defer", "skill absent in canon"))
+    elif any(r in dirty for r in skill_rels) and not allow_dirty:
+        items.append(
+            CaptureItem(CAT_SKILL, "bmad-auto-dev", str(OWN_SKILL_DIR), "skip-dirty",
+                        "uncommitted skill files in canon")
         )
-    )
+    else:
+        items.append(
+            CaptureItem(CAT_SKILL, "bmad-auto-dev", str(OWN_SKILL_DIR), "capture",
+                        f"{len(skill_rels)} canon file(s)")
+        )
     return items
 
 
@@ -738,6 +745,7 @@ def apply_capture(
     forks_dir.mkdir(parents=True, exist_ok=True)
     captured_overlays: list[str] = []
     captured_forks: list[CapturedFork] = []
+    captured_skill: list[str] = []
     errors: list[str] = []
 
     for it in items:
@@ -799,7 +807,26 @@ def apply_capture(
                     round(density, 3), note,
                 )
             )
-    return CaptureResult(captured_overlays, captured_forks, errors)
+        elif it.category == CAT_SKILL:
+            skill_dst_root = vault / "skills" / it.artifact
+            for rel in own_skill_rel_paths(canon_root):
+                src = canon_root / rel
+                sub = Path(rel).relative_to(OWN_SKILL_DIR)
+                dst = skill_dst_root / sub
+                atomic_copy(src, dst)
+                if md5(dst) != md5(src):
+                    errors.append(f"skill verify FAIL {sub}")
+                    continue
+                if dst.suffix == ".py":  # canary: each script must parse
+                    try:
+                        compile(dst.read_text(encoding="utf-8"), str(sub), "exec")
+                    except (SyntaxError, ValueError) as exc:
+                        errors.append(f"skill py-canary FAIL {sub}: {exc}")
+                        continue
+                captured_skill.append(str(sub))
+            if "SKILL.md" not in captured_skill:  # canary: the skill entrypoint must be present
+                errors.append(f"skill canary FAIL {it.artifact}: SKILL.md missing from capture")
+    return CaptureResult(captured_overlays, captured_forks, errors, captured_skill)
 
 
 def _yaml_str(v: str) -> str:
@@ -813,6 +840,7 @@ def write_manifest(
     canon_head: str,
     stamp: str,
     overlay_md5s: dict[str, str],
+    skill_files: list[str] | None = None,
 ) -> None:
     """Serialise the capture manifest (hand-rolled YAML; stdlib has no writer)."""
     out: list[str] = [
@@ -843,7 +871,12 @@ def write_manifest(
                 out.append(f"    note: {_yaml_str(f.note)}")
     else:
         out.append("forks: []")
-    out.append("skills: []  # deferred — bmad-auto-dev MF-9 reconcile pending (Этап 2a)")
+    if skill_files:
+        out.append("skills:")
+        out.append('  - skill: "bmad-auto-dev"')
+        out.append(f"    file_count: {len(skill_files)}")
+    else:
+        out.append("skills: []")
     (vault / "manifest.yaml").write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
@@ -995,6 +1028,26 @@ def plan_install(
                 items.append(
                     InstallItem(CAT_OVERLAY, name, rel, "conflict", "present and differs — refusing to clobber")
                 )
+
+        # Own skill bmad-auto-dev: install the vault canon tree (bootstrap a project).
+        skill_root = vault / "skills" / "bmad-auto-dev"
+        if skill_root.is_dir():
+            for src in sorted(skill_root.rglob("*")):
+                if not src.is_file() or "__pycache__" in src.parts or src.suffix == ".pyc":
+                    continue
+                sub = src.relative_to(skill_root)
+                rel = str(OWN_SKILL_DIR / sub)
+                dst = target_root / rel
+                content = src.read_bytes()
+                if not dst.exists():
+                    items.append(InstallItem(CAT_SKILL, str(sub), rel, "install", "create", content))
+                elif md5_bytes(content) == md5(dst):
+                    items.append(InstallItem(CAT_SKILL, str(sub), rel, "skip-present", "identical"))
+                else:
+                    items.append(
+                        InstallItem(CAT_SKILL, str(sub), rel, "conflict",
+                                    "present and differs — refusing to clobber")
+                    )
 
     for fk in manifest["forks"]:
         name = fk["artifact"]
@@ -1225,7 +1278,8 @@ def cmd_capture(args: argparse.Namespace) -> int:
 
     n_ov = sum(1 for i in cap if i.category == CAT_OVERLAY)
     n_fk = sum(1 for i in cap if i.category == CAT_FORK)
-    print(f"capture plan: {n_ov} overlay(s) + {n_fk} fork(s) -> {vault}")
+    n_sk = sum(1 for i in cap if i.category == CAT_SKILL)
+    print(f"capture plan: {n_ov} overlay(s) + {n_fk} fork(s) + {n_sk} skill(s) -> {vault}")
     for i in cap:
         print(f"  capture  [{i.category}] {i.artifact}")
     for i in skipped:
@@ -1259,10 +1313,15 @@ def cmd_capture(args: argparse.Namespace) -> int:
                 print("capture HALTED — canary failed; vault NOT committed.", file=sys.stderr)
                 return EXIT_CONFLICT
             overlay_md5s = {n: md5(vault / "overlays" / n) for n in result.overlays}
-            write_manifest(vault, result.overlays, result.forks, canon_head, stamp, overlay_md5s)
+            write_manifest(
+                vault, result.overlays, result.forks, canon_head, stamp,
+                overlay_md5s, result.skill_files,
+            )
             for f in result.forks:
                 extra = f"  ({f.note})" if f.note else ""
                 print(f"  fork {f.artifact}: storage={f.storage} density={f.density}{extra}")
+            if result.skill_files:
+                print(f"  skill bmad-auto-dev: {len(result.skill_files)} canon file(s)")
             if args.no_commit:
                 print(
                     f"captured {len(result.overlays)} overlay(s) + "
@@ -1280,7 +1339,8 @@ def cmd_capture(args: argparse.Namespace) -> int:
                 return EXIT_OK
             msg = (
                 f"feat(vault): capture {len(result.overlays)} overlays + "
-                f"{len(result.forks)} forks из odyssey@{canon_head}"
+                f"{len(result.forks)} forks + {len(result.skill_files)} skill-files "
+                f"из odyssey@{canon_head}"
             )
             crc, _ = run_git(["commit", "-q", "-m", msg], vault)
             if crc != 0:
@@ -1288,8 +1348,8 @@ def cmd_capture(args: argparse.Namespace) -> int:
                 return EXIT_ERROR
             _, head = run_git(["rev-parse", "--short", "HEAD"], vault)
             print(
-                f"captured {len(result.overlays)} overlay(s) + "
-                f"{len(result.forks)} fork(s); vault commit {head}"
+                f"captured {len(result.overlays)} overlay(s) + {len(result.forks)} fork(s) + "
+                f"{len(result.skill_files)} skill-file(s); vault commit {head}"
             )
     except RuntimeError as exc:
         print(f"ABORT: {exc}", file=sys.stderr)

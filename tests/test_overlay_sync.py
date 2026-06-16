@@ -349,13 +349,77 @@ def test_apply_capture_canary_halts_on_bad_toml(tmp_path: Path) -> None:
     assert "bad.toml" not in res.overlays
 
 
-def test_plan_capture_defers_auto_dev_skill(tmp_path: Path) -> None:
+def test_plan_capture_defers_when_skill_absent(tmp_path: Path) -> None:
     canon = tmp_path / "odyssey"
-    _write(canon / "_bmad" / "custom" / "bmad-x.toml", 'k = "v"\n')
+    _write(canon / "_bmad" / "custom" / "bmad-x.toml", 'k = "v"\n')  # no skill dir
     items = osync.plan_capture(canon, tmp_path / "upstream", allow_dirty=False)
     skill = [i for i in items if i.category == osync.CAT_SKILL]
     assert len(skill) == 1
-    assert skill[0].status == "defer"
+    assert skill[0].status == "defer"  # absent -> defer, not capture
+
+
+def _canon_skill(canon: Path) -> None:
+    s = canon / osync.OWN_SKILL_DIR
+    _write(s / "SKILL.md", "skill body\n")
+    _write(s / "scripts" / "tool.py", "x = 1\n")  # valid python
+    _write(s / "templates" / "t.md", "tpl\n")
+    _write(s / "customize.toml", "[epics]\n")  # excluded from canon
+    _write(s / "learnings.md", "history\n")  # excluded from canon
+
+
+def test_capture_skill_into_vault(tmp_path: Path) -> None:
+    canon = tmp_path / "odyssey"
+    _canon_skill(canon)
+    vault = tmp_path / "vault"
+    steps = tmp_path / "upstream" / "bmad-brainstorming" / "steps"
+    items = osync.plan_capture(canon, steps, allow_dirty=False)
+    skill_items = [i for i in items if i.category == osync.CAT_SKILL]
+    assert skill_items and skill_items[0].status == "capture"
+
+    res = osync.apply_capture(items, canon, steps, vault)
+    assert res.canary_errors == []
+    files = set(res.skill_files)
+    assert {"SKILL.md", "scripts/tool.py", "templates/t.md"} <= files
+    assert "customize.toml" not in files and "learnings.md" not in files
+    assert (vault / "skills" / "bmad-auto-dev" / "SKILL.md").read_text(encoding="utf-8") == "skill body\n"
+    assert not (vault / "skills" / "bmad-auto-dev" / "customize.toml").exists()
+    # manifest records the skill block (flat, load_manifest-safe)
+    osync.write_manifest(vault, [], [], "h", "s", {}, res.skill_files)
+    man = (vault / "manifest.yaml").read_text(encoding="utf-8")
+    assert 'skill: "bmad-auto-dev"' in man and "file_count: 3" in man
+
+
+def test_capture_skill_py_canary_halts(tmp_path: Path) -> None:
+    canon = tmp_path / "odyssey"
+    _write(canon / osync.OWN_SKILL_DIR / "SKILL.md", "ok\n")
+    _write(canon / osync.OWN_SKILL_DIR / "scripts" / "broken.py", "def (:\n")  # syntax error
+    items = osync.plan_capture(canon, tmp_path / "steps", allow_dirty=False)
+    res = osync.apply_capture(items, canon, tmp_path / "steps", tmp_path / "vault")
+    assert any("py-canary FAIL" in e for e in res.canary_errors)  # HALT signal
+
+
+def test_init_installs_skill_from_vault(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    sk = vault / "skills" / "bmad-auto-dev"
+    _write(sk / "SKILL.md", "skill body\n")
+    _write(sk / "scripts" / "tool.py", "x = 1\n")
+    osync.write_manifest(vault, [], [], "h", "s", {}, ["SKILL.md", "scripts/tool.py"])
+
+    target = tmp_path / "proj"
+    target.mkdir(parents=True, exist_ok=True)
+    _git_repo(target)
+    _write(target / "README", "x\n")
+    osync.run_git(["add", "-A"], target)
+    osync.run_git(["commit", "-qm", "init"], target)
+
+    rc = osync.main(["--vault", str(vault), "init-project", "--target", str(target), "--apply"])
+    assert rc == osync.EXIT_OK
+    assert (target / osync.OWN_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8") == "skill body\n"
+    assert (target / osync.OWN_SKILL_DIR / "scripts" / "tool.py").read_text(encoding="utf-8") == "x = 1\n"
+    osync.run_git(["add", "-A"], target)
+    osync.run_git(["commit", "-qm", "installed"], target)
+    rc2 = osync.main(["--vault", str(vault), "init-project", "--target", str(target), "--apply"])
+    assert rc2 == osync.EXIT_OK  # idempotent, all skip-present
 
 
 # --- consume (Этап 2b: vault -> target) ------------------------------------
