@@ -78,6 +78,13 @@ WATCHED_CSVS = [
     Path(".claude/skills/bmad-advanced-elicitation/methods.csv"),
 ]
 
+# Own skill: odyssey's bmad-auto-dev is THE canonical copy (the global one belongs
+# to 888/Virgil and is out of scope). Its canon files are byte-identical across all
+# projects; per-project config (customize.toml = epic tags) and per-install history
+# (learnings.md) are EXCLUDED — watching them would register as false drift.
+OWN_SKILL_DIR = Path(".claude/skills/bmad-auto-dev")
+OWN_SKILL_EXCLUDE_NAMES = {"customize.toml", "learnings.md"}
+
 EXIT_OK = 0
 EXIT_WARN = 1
 EXIT_ERROR = 2
@@ -308,11 +315,32 @@ def fork_census(
     return out
 
 
+def own_skill_rel_paths(canonical_root: Path) -> list[str]:
+    """Canon files of our own bmad-auto-dev skill (odyssey is canonical), as rel
+    paths under the project root. Excludes per-project config / per-install history
+    and __pycache__ / *.pyc, which would otherwise register as false cross-project
+    drift. Empty if the skill is absent in the canonical project."""
+    base = canonical_root / OWN_SKILL_DIR
+    if not base.is_dir():
+        return []
+    out: list[str] = []
+    for p in sorted(base.rglob("*")):
+        if not p.is_file():
+            continue
+        if "__pycache__" in p.parts or p.suffix == ".pyc":
+            continue
+        if p.name in OWN_SKILL_EXCLUDE_NAMES:
+            continue
+        out.append(str(p.relative_to(canonical_root)))
+    return out
+
+
 def watched_rel_paths(canonical_root: Path, upstream_skill_steps: Path) -> list[str]:
-    """All non-overlay watched files: computed forks + the data CSVs."""
+    """All non-overlay watched files: computed forks + data CSVs + own-skill canon."""
     forks = [e.rel for e in fork_census(canonical_root, upstream_skill_steps) if e.is_fork]
     csvs = [str(c) for c in WATCHED_CSVS]
-    return forks + csvs
+    skill = own_skill_rel_paths(canonical_root)
+    return forks + csvs + skill
 
 
 @dataclass

@@ -122,6 +122,57 @@ def test_census_vendor_bump_not_fork(tree: Path, monkeypatch: pytest.MonkeyPatch
     assert e.head_relation == "vendor-bump"
 
 
+# --- own skill canon (bmad-auto-dev, odyssey = reference) -------------------
+
+
+def _skill_tree(root: Path) -> None:
+    """odyssey holds the canonical bmad-auto-dev skill; legal has none."""
+    s = root / "odyssey" / osync.OWN_SKILL_DIR
+    _write(s / "SKILL.md", "skill body\n")
+    _write(s / "scripts" / "runner.sh", "#!/bin/sh\n")
+    _write(s / "templates" / "t.md", "tpl\n")
+    _write(s / "customize.toml", "[epics]\n")  # per-project -> excluded
+    _write(s / "learnings.md", "history\n")  # per-install -> excluded
+    _write(s / "scripts" / "__pycache__" / "x.pyc", "bytecode\n")  # excluded
+
+
+def test_own_skill_rel_paths_excludes_per_project(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _skill_tree(root)
+    rels = osync.own_skill_rel_paths(root / "odyssey")
+    names = {Path(r).name for r in rels}
+    assert {"SKILL.md", "runner.sh", "t.md"} <= names
+    assert "customize.toml" not in names  # per-project epic tags
+    assert "learnings.md" not in names  # per-install history
+    assert not any("__pycache__" in r or r.endswith(".pyc") for r in rels)
+    assert osync.own_skill_rel_paths(root / "legal") == []  # absent -> empty
+
+
+def test_skill_drift_diff_and_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "root"
+    _skill_tree(root)  # odyssey only
+    monkeypatch.setattr(osync, "git_show_head", lambda repo, rel: None)
+    up = tmp_path / "upstream" / "bmad-brainstorming" / "steps"
+    up.mkdir(parents=True)
+    m = osync.build_manifest(root, "odyssey", ["odyssey", "legal"], up, [])
+    # DIFF: check reports each canon file missing in legal
+    findings = [f for f in osync.run_invariants(m, root, []) if f.inv != "INV-PERSIST"]
+    missing = {
+        f.artifact for f in findings
+        if f.project == "legal" and f.inv == "INV-OVERLAY-PRESENT"
+    }
+    assert str(osync.OWN_SKILL_DIR / "SKILL.md") in missing
+    # excluded files never surface as drift
+    assert not any(
+        n in f.artifact for f in findings for n in ("customize.toml", "learnings.md")
+    )
+    # COPY: propagate plans CREATE for each canon file into legal
+    plan = osync.build_plan(m, root, [])
+    creates = {it.artifact for it in plan if it.action == "CREATE" and it.project == "legal"}
+    assert str(osync.OWN_SKILL_DIR / "SKILL.md") in creates
+    assert str(osync.OWN_SKILL_DIR / "scripts" / "runner.sh") in creates
+
+
 # --- invariants + plan -----------------------------------------------------
 
 
