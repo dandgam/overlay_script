@@ -197,3 +197,111 @@ def test_apply_then_rollback(tmp_path: Path) -> None:
         assert dst.read_text(encoding="utf-8") == "NEW\n"
         osync.rollback_plan(rb, root)
         assert dst.read_text(encoding="utf-8") == "OLD\n"
+
+
+# --- capture (Этап 2a) -----------------------------------------------------
+
+
+def _git_repo(d: Path) -> None:
+    osync.run_git(["init", "-q"], d)
+    osync.run_git(["config", "user.email", "t@t"], d)
+    osync.run_git(["config", "user.name", "t"], d)
+
+
+def test_run_git_preserves_porcelain_leading_space(tmp_path: Path) -> None:
+    """Regression: run_git must NOT lstrip — the leading status column of the
+    first `git status --porcelain` line is significant. Old `.strip()` shifted
+    the first path (e.g. `_bmad/...` -> `bmad/...`) and broke dirty detection."""
+    _git_repo(tmp_path)
+    (tmp_path / "zzz.txt").write_text("a\n", encoding="utf-8")
+    osync.run_git(["add", "zzz.txt"], tmp_path)
+    osync.run_git(["commit", "-qm", "init"], tmp_path)
+    (tmp_path / "zzz.txt").write_text("b\n", encoding="utf-8")  # worktree modify
+    rc, out = osync.run_git(["status", "--porcelain", "--", "zzz.txt"], tmp_path)
+    assert rc == 0
+    line = out.splitlines()[0]
+    assert line[:2] == " M"
+    assert line[3:] == "zzz.txt"  # not "zz.txt"
+
+
+def test_make_patch_roundtrips_and_detects_tamper() -> None:
+    base, fork = b"a\nb\nc\n", b"a\nB\nc\n"
+    patch = osync.make_patch(base, fork, "f.md")
+    assert osync.verify_patch(base, patch, fork, "f.md") is True
+    assert osync.verify_patch(base, patch, b"a\nWRONG\nc\n", "f.md") is False
+
+
+def test_patch_density_sparse_vs_dense() -> None:
+    base = b"".join(b"l%d\n" % i for i in range(10))
+    sparse = base.replace(b"l5\n", b"X5\n")
+    dense = b"".join(b"X%d\n" % i for i in range(10))
+    assert osync.patch_density(base, sparse, "f.md") < osync.DENSITY_SNAPSHOT_THRESHOLD
+    assert osync.patch_density(base, dense, "f.md") >= osync.DENSITY_SNAPSHOT_THRESHOLD
+
+
+def test_apply_capture_overlay_copy_and_fork_patch(tmp_path: Path) -> None:
+    canon = tmp_path / "odyssey"
+    _write(canon / "_bmad" / "custom" / "bmad-x.toml", 'key = "v"\n')
+    up = tmp_path / "upstream" / "bmad-brainstorming" / "steps"
+    base = "".join(f"line{i}\n" for i in range(10))
+    _write(up / "step-02b-ai-recommended.md", base)
+    fork = base.replace("line5\n", "CHANGED\n")  # sparse -> patch
+    frel = str(
+        _write(canon / osync.FORK_SKILL_STEPS / "step-02b-ai-recommended.md", fork)
+        .relative_to(canon)
+    )
+    vault = tmp_path / "vault"
+    items = [
+        osync.CaptureItem(osync.CAT_OVERLAY, "bmad-x.toml", "_bmad/custom/bmad-x.toml", "capture"),
+        osync.CaptureItem(osync.CAT_FORK, "step-02b-ai-recommended.md", frel, "capture"),
+    ]
+    res = osync.apply_capture(items, canon, up, vault)
+    assert res.canary_errors == []
+    assert "bmad-x.toml" in res.overlays
+    assert (vault / "overlays" / "bmad-x.toml").read_text(encoding="utf-8") == 'key = "v"\n'
+    f = res.forks[0]
+    assert f.storage == "patch"
+    assert (vault / "forks" / "step-02b-ai-recommended.md.patch").exists()
+    assert (vault / "forks" / "step-02b-ai-recommended.md.upstream").read_text(
+        encoding="utf-8"
+    ) == base
+
+
+def test_apply_capture_fork_dense_is_snapshot(tmp_path: Path) -> None:
+    canon = tmp_path / "odyssey"
+    up = tmp_path / "upstream" / "bmad-brainstorming" / "steps"
+    base = "".join(f"u{i}\n" for i in range(10))
+    _write(up / "step-02a-user-selected.md", base)
+    fork = "".join(f"X{i}\n" for i in range(10))  # every line changed -> snapshot
+    frel = str(
+        _write(canon / osync.FORK_SKILL_STEPS / "step-02a-user-selected.md", fork)
+        .relative_to(canon)
+    )
+    res = osync.apply_capture(
+        [osync.CaptureItem(osync.CAT_FORK, "step-02a-user-selected.md", frel, "capture")],
+        canon, up, tmp_path / "vault",
+    )
+    assert res.forks[0].storage == "snapshot"
+    assert (tmp_path / "vault" / "forks" / "step-02a-user-selected.md.snapshot").read_text(
+        encoding="utf-8"
+    ) == fork
+
+
+def test_apply_capture_canary_halts_on_bad_toml(tmp_path: Path) -> None:
+    canon = tmp_path / "odyssey"
+    _write(canon / "_bmad" / "custom" / "bad.toml", "this is = = not toml\n")
+    res = osync.apply_capture(
+        [osync.CaptureItem(osync.CAT_OVERLAY, "bad.toml", "_bmad/custom/bad.toml", "capture")],
+        canon, tmp_path / "upstream", tmp_path / "vault",
+    )
+    assert res.canary_errors  # HALT signal
+    assert "bad.toml" not in res.overlays
+
+
+def test_plan_capture_defers_auto_dev_skill(tmp_path: Path) -> None:
+    canon = tmp_path / "odyssey"
+    _write(canon / "_bmad" / "custom" / "bmad-x.toml", 'k = "v"\n')
+    items = osync.plan_capture(canon, tmp_path / "upstream", allow_dirty=False)
+    skill = [i for i in items if i.category == osync.CAT_SKILL]
+    assert len(skill) == 1
+    assert skill[0].status == "defer"

@@ -26,6 +26,7 @@ Design rules enforced here (from the hardened plan):
 from __future__ import annotations
 
 import argparse
+import difflib
 import fcntl
 import hashlib
 import json
@@ -34,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -54,6 +56,13 @@ DEFAULT_UPSTREAM = Path(
 OVERLAY_DIR = Path("_bmad/custom")
 # config.toml = base config, config.user.toml = gitignored per-user; never sync.
 OVERLAY_EXCLUDE = {"config.toml", "config.user.toml"}
+
+# Vault (single source of truth) — Этап 2a capture target.
+DEFAULT_VAULT = Path("/home/server/.claude/bmad-overlays")
+BMAD_VERSION = "6.8.0"  # pinned upstream the fork base-blobs are taken from
+# Fork stored as a full snapshot when changed-line density >= this; else as a patch.
+# Dense rewrites (e.g. step-02a) -> snapshot; sparse tweaks (02b/c/d) -> patch.
+DENSITY_SNAPSHOT_THRESHOLD = 0.5
 
 # Vendored skill whose step files carry our forks (census target).
 FORK_SKILL = "bmad-brainstorming"
@@ -91,14 +100,20 @@ def md5_bytes(data: bytes) -> str:
 
 
 def run_git(args: list[str], cwd: Path) -> tuple[int, str]:
-    """Run a read-only git command; return (returncode, stdout-stripped)."""
+    """Run a git command; return (returncode, stdout).
+
+    Strips only the trailing newline. NEVER lstrip: `git status --porcelain`
+    encodes file status in the leading two columns (` M path`), so a leading
+    space is significant — stripping it shifts the first line and corrupts the
+    parsed path.
+    """
     proc = subprocess.run(  # noqa: S603 - fixed git binary, args list
         ["git", "-C", str(cwd), *args],  # noqa: S607
         capture_output=True,
         text=True,
         check=False,
     )
-    return proc.returncode, proc.stdout.strip()
+    return proc.returncode, proc.stdout.rstrip("\n")
 
 
 def git_show_head(repo: Path, rel: str) -> bytes | None:
@@ -534,6 +549,273 @@ def rollback_plan(rollback: list[RollbackEntry], root: Path) -> None:
 
 
 # ----------------------------------------------------------------------------
+# Capture (Этап 2a: canonical project -> vault)
+# ----------------------------------------------------------------------------
+
+CAT_OVERLAY = "overlay"
+CAT_FORK = "fork"
+CAT_SKILL = "skill"
+
+
+@dataclass
+class CaptureItem:
+    category: str  # overlay | fork | skill
+    artifact: str  # basename
+    rel: str  # path relative to canonical root ("" for deferred skill)
+    status: str  # capture | skip-dirty | defer
+    detail: str = ""
+
+
+@dataclass
+class CapturedFork:
+    artifact: str
+    rel: str
+    base_md5: str | None
+    fork_md5: str
+    storage: str  # snapshot | patch
+    density: float
+    note: str = ""
+
+
+@dataclass
+class CaptureResult:
+    overlays: list[str]
+    forks: list[CapturedFork]
+    canary_errors: list[str]
+
+
+def make_patch(base: bytes, fork: bytes, name: str) -> str:
+    """Unified diff base->fork, git-apply friendly (a/<name> b/<name>, default -p1)."""
+    base_lines = base.decode("utf-8").splitlines(keepends=True)
+    fork_lines = fork.decode("utf-8").splitlines(keepends=True)
+    return "".join(
+        difflib.unified_diff(
+            base_lines, fork_lines, fromfile=f"a/{name}", tofile=f"b/{name}"
+        )
+    )
+
+
+def patch_density(base: bytes, fork: bytes, name: str) -> float:
+    """Fraction of fork lines touched by the diff (changed lines / fork lines)."""
+    patch = make_patch(base, fork, name)
+    changed = sum(
+        1
+        for ln in patch.splitlines()
+        if (ln.startswith("+") and not ln.startswith("+++"))
+        or (ln.startswith("-") and not ln.startswith("---"))
+    )
+    fork_lines = max(len(fork.decode("utf-8").splitlines()), 1)
+    return changed / fork_lines
+
+
+def verify_patch(base: bytes, patch_text: str, expected: bytes, name: str) -> bool:
+    """Round-trip canary: apply patch to base in a throwaway git repo, compare to
+    expected fork bytes. Any failure => caller falls back to a full snapshot."""
+    if not patch_text:
+        return base == expected
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        run_git(["init", "-q"], d)
+        (d / name).write_bytes(base)
+        (d / "p.patch").write_text(patch_text, encoding="utf-8")
+        if run_git(["apply", "--check", "p.patch"], d)[0] != 0:
+            return False
+        if run_git(["apply", "p.patch"], d)[0] != 0:
+            return False
+        return (d / name).read_bytes() == expected
+
+
+@contextmanager
+def vault_lock(vault: Path) -> Iterator[None]:
+    """flock the vault so parallel captures can't race its commit."""
+    vault.mkdir(parents=True, exist_ok=True)
+    fh = (vault / ".overlay_sync.lock").open("w", encoding="utf-8")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        fh.close()
+        raise RuntimeError(f"vault busy (locked): {vault}") from exc
+    try:
+        yield
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
+
+
+def plan_capture(
+    canon_root: Path, upstream_skill_steps: Path, allow_dirty: bool
+) -> list[CaptureItem]:
+    """Decide per-artifact: capture / skip-dirty / defer. NEVER captures dirty
+    working-tree state unless allow_dirty (then it is loudly listed)."""
+    items: list[CaptureItem] = []
+    overlays = discover_overlays(canon_root)  # {name: path}
+    forks = [e for e in fork_census(canon_root, upstream_skill_steps) if e.is_fork]
+
+    cap_rels = [str(p.relative_to(canon_root)) for p in overlays.values()]
+    cap_rels += [e.rel for e in forks]
+    dirty: set[str] = set()
+    if cap_rels:
+        rc, out = run_git(["status", "--porcelain", "--", *cap_rels], canon_root)
+        if rc == 0:
+            dirty = {ln[3:] for ln in out.splitlines() if ln.strip()}
+
+    for name, p in overlays.items():
+        rel = str(p.relative_to(canon_root))
+        if rel in dirty and not allow_dirty:
+            items.append(
+                CaptureItem(CAT_OVERLAY, name, rel, "skip-dirty", "uncommitted in canon")
+            )
+        else:
+            items.append(CaptureItem(CAT_OVERLAY, name, rel, "capture"))
+
+    for e in forks:
+        name = Path(e.rel).name
+        if e.rel in dirty and not allow_dirty:
+            items.append(
+                CaptureItem(CAT_FORK, name, e.rel, "skip-dirty", "uncommitted in canon")
+            )
+        else:
+            items.append(CaptureItem(CAT_FORK, name, e.rel, "capture"))
+
+    # Category 3 — own skill bmad-auto-dev: drift is bidirectional with global
+    # (verified), so a naive copy would lose global-canon additions. Defer until
+    # the MF-9 per-file reconcile is done. LOUD, never silent.
+    items.append(
+        CaptureItem(
+            CAT_SKILL,
+            "bmad-auto-dev",
+            "",
+            "defer",
+            "bidirectional drift — MF-9 per-file reconcile required first",
+        )
+    )
+    return items
+
+
+def apply_capture(
+    items: list[CaptureItem],
+    canon_root: Path,
+    upstream_skill_steps: Path,
+    vault: Path,
+) -> CaptureResult:
+    """Write captured artifacts into the vault and run per-category canaries.
+    A canary failure is recorded (caller HALTs and does NOT commit)."""
+    overlays_dir = vault / "overlays"
+    forks_dir = vault / "forks"
+    overlays_dir.mkdir(parents=True, exist_ok=True)
+    forks_dir.mkdir(parents=True, exist_ok=True)
+    captured_overlays: list[str] = []
+    captured_forks: list[CapturedFork] = []
+    errors: list[str] = []
+
+    for it in items:
+        if it.status != "capture":
+            continue
+        if it.category == CAT_OVERLAY:
+            src = canon_root / it.rel
+            dst = overlays_dir / it.artifact
+            atomic_copy(src, dst)
+            try:  # canary: must parse as TOML
+                with dst.open("rb") as fh:
+                    tomllib.load(fh)
+            except (tomllib.TOMLDecodeError, OSError) as exc:
+                errors.append(f"overlay canary FAIL {it.artifact}: {exc}")
+                continue
+            if md5(dst) != md5(src):
+                errors.append(f"overlay verify FAIL {it.artifact}")
+                continue
+            captured_overlays.append(it.artifact)
+        elif it.category == CAT_FORK:
+            fork_bytes = (canon_root / it.rel).read_bytes()
+            fork_md5_val = md5_bytes(fork_bytes)
+            base_path = upstream_skill_steps / it.artifact
+            base_bytes = base_path.read_bytes() if base_path.exists() else b""
+            base_md5_val = md5_bytes(base_bytes) if base_bytes else None
+            # Always pin the upstream base blob (Этап 2b replays patches onto it).
+            (forks_dir / f"{it.artifact}.upstream").write_bytes(base_bytes)
+
+            note = ""
+            density = (
+                patch_density(base_bytes, fork_bytes, it.artifact) if base_bytes else 1.0
+            )
+            if not base_bytes:
+                note = "no-upstream-base"
+            storage = "snapshot" if density >= DENSITY_SNAPSHOT_THRESHOLD else "patch"
+
+            if storage == "patch":
+                patch_text = make_patch(base_bytes, fork_bytes, it.artifact)
+                if verify_patch(base_bytes, patch_text, fork_bytes, it.artifact):
+                    (forks_dir / f"{it.artifact}.patch").write_text(
+                        patch_text, encoding="utf-8"
+                    )
+                    (forks_dir / f"{it.artifact}.snapshot").unlink(missing_ok=True)
+                else:  # patch did not round-trip -> safe fallback to snapshot
+                    storage = "snapshot"
+                    note = (note + "; " if note else "") + "patch-roundtrip-failed->snapshot"
+
+            if storage == "snapshot":
+                snap = forks_dir / f"{it.artifact}.snapshot"
+                snap.write_bytes(fork_bytes)
+                (forks_dir / f"{it.artifact}.patch").unlink(missing_ok=True)
+                if md5(snap) != fork_md5_val:
+                    errors.append(f"fork snapshot verify FAIL {it.artifact}")
+                    continue
+
+            captured_forks.append(
+                CapturedFork(
+                    it.artifact, it.rel, base_md5_val, fork_md5_val, storage,
+                    round(density, 3), note,
+                )
+            )
+    return CaptureResult(captured_overlays, captured_forks, errors)
+
+
+def _yaml_str(v: str) -> str:
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def write_manifest(
+    vault: Path,
+    overlays: list[str],
+    forks: list[CapturedFork],
+    canon_head: str,
+    stamp: str,
+    overlay_md5s: dict[str, str],
+) -> None:
+    """Serialise the capture manifest (hand-rolled YAML; stdlib has no writer)."""
+    out: list[str] = [
+        "# manifest.yaml — generated by `overlay_sync capture` (Этап 2a). Do not hand-edit.",
+        f"bmad_version: {_yaml_str(BMAD_VERSION)}",
+        "captured_from: odyssey",
+        f"captured_at: {_yaml_str(stamp)}",
+        f"canon_head: {_yaml_str(canon_head)}",
+    ]
+    if overlays:
+        out.append("overlays:")
+        for name in sorted(overlays):
+            out.append(f"  - artifact: {_yaml_str(name)}")
+            out.append(f"    md5: {_yaml_str(overlay_md5s[name])}")
+    else:
+        out.append("overlays: []")
+    if forks:
+        out.append("forks:")
+        for f in sorted(forks, key=lambda x: x.artifact):
+            out.append(f"  - artifact: {_yaml_str(f.artifact)}")
+            out.append(f"    rel: {_yaml_str(f.rel)}")
+            out.append(f"    base_version: {_yaml_str(BMAD_VERSION)}")
+            out.append(f"    base_md5: {_yaml_str(f.base_md5 or '')}")
+            out.append(f"    fork_md5: {_yaml_str(f.fork_md5)}")
+            out.append(f"    storage: {_yaml_str(f.storage)}")
+            out.append(f"    density: {f.density}")
+            if f.note:
+                out.append(f"    note: {_yaml_str(f.note)}")
+    else:
+        out.append("forks: []")
+    out.append("skills: []  # deferred — bmad-auto-dev MF-9 reconcile pending (Этап 2a)")
+    (vault / "manifest.yaml").write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+# ----------------------------------------------------------------------------
 # Commands
 # ----------------------------------------------------------------------------
 
@@ -649,6 +931,88 @@ def cmd_revalidate(args: argparse.Namespace) -> int:
     return EXIT_REVALIDATE if any(f.severity == "error" for f in propagatable) else EXIT_OK
 
 
+def cmd_capture(args: argparse.Namespace) -> int:
+    canon_root = args.root / args.canonical
+    vault: Path = args.vault
+    items = plan_capture(canon_root, args.upstream_steps, args.allow_dirty)
+    cap = [i for i in items if i.status == "capture"]
+    skipped = [i for i in items if i.status == "skip-dirty"]
+    deferred = [i for i in items if i.status == "defer"]
+
+    n_ov = sum(1 for i in cap if i.category == CAT_OVERLAY)
+    n_fk = sum(1 for i in cap if i.category == CAT_FORK)
+    print(f"capture plan: {n_ov} overlay(s) + {n_fk} fork(s) -> {vault}")
+    for i in cap:
+        print(f"  capture  [{i.category}] {i.artifact}")
+    for i in skipped:
+        print(f"  SKIP     [{i.category}] {i.artifact} — {i.detail} (commit it, or --allow-dirty)")
+    for i in deferred:
+        print(f"  defer    [{i.category}] {i.artifact} — {i.detail}")
+
+    if not args.apply:
+        print("\n(dry-run — pass --apply to write vault + run canaries; nothing changed)")
+        return EXIT_OK
+    if not cap:
+        print("nothing to capture (all skipped/deferred).")
+        return EXIT_OK
+
+    rc, canon_head = run_git(["rev-parse", "--short", "HEAD"], canon_root)
+    canon_head = canon_head if rc == 0 else "unknown"
+    # captured_at = canon HEAD commit date (deterministic): re-running on the same
+    # canon content reproduces an identical manifest, so capture is idempotent and
+    # does not churn the vault with wall-clock-only commits. --stamp overrides.
+    if args.stamp != "manual":
+        stamp = args.stamp
+    else:
+        rc_d, cdate = run_git(["show", "-s", "--format=%cI", "HEAD"], canon_root)
+        stamp = cdate if rc_d == 0 else "unknown"
+    try:
+        with vault_lock(vault):
+            result = apply_capture(items, canon_root, args.upstream_steps, vault)
+            if result.canary_errors:
+                for e in result.canary_errors:
+                    print(f"  CANARY FAIL: {e}", file=sys.stderr)
+                print("capture HALTED — canary failed; vault NOT committed.", file=sys.stderr)
+                return EXIT_CONFLICT
+            overlay_md5s = {n: md5(vault / "overlays" / n) for n in result.overlays}
+            write_manifest(vault, result.overlays, result.forks, canon_head, stamp, overlay_md5s)
+            for f in result.forks:
+                extra = f"  ({f.note})" if f.note else ""
+                print(f"  fork {f.artifact}: storage={f.storage} density={f.density}{extra}")
+            if args.no_commit:
+                print(
+                    f"captured {len(result.overlays)} overlay(s) + "
+                    f"{len(result.forks)} fork(s); NOT committed (--no-commit)."
+                )
+                return EXIT_OK
+            wt_rc, wt_out = run_git(["rev-parse", "--is-inside-work-tree"], vault)
+            if wt_rc != 0 or wt_out != "true":
+                print(f"ABORT: vault is not a git work tree: {vault}", file=sys.stderr)
+                return EXIT_ERROR
+            run_git(["add", "-A"], vault)
+            _, st = run_git(["status", "--porcelain"], vault)
+            if not st:
+                print(f"captured: vault already up to date at {vault}")
+                return EXIT_OK
+            msg = (
+                f"feat(vault): capture {len(result.overlays)} overlays + "
+                f"{len(result.forks)} forks из odyssey@{canon_head}"
+            )
+            crc, _ = run_git(["commit", "-q", "-m", msg], vault)
+            if crc != 0:
+                print("ABORT: vault commit failed", file=sys.stderr)
+                return EXIT_ERROR
+            _, head = run_git(["rev-parse", "--short", "HEAD"], vault)
+            print(
+                f"captured {len(result.overlays)} overlay(s) + "
+                f"{len(result.forks)} fork(s); vault commit {head}"
+            )
+    except RuntimeError as exc:
+        print(f"ABORT: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_OK
+
+
 # ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
@@ -662,6 +1026,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--upstream", type=Path, default=DEFAULT_UPSTREAM,
                    help="BMAD core-skills upstream tree (fork census baseline)")
     p.add_argument("--exempt", type=Path, default=None, help="path to exempt.yaml")
+    p.add_argument("--vault", type=Path, default=DEFAULT_VAULT, help="vault repo path (capture)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--stamp", default="manual", help="backup subdir name (pass a timestamp)")
     sub = p.add_subparsers(dest="cmd")
@@ -670,6 +1035,13 @@ def build_parser() -> argparse.ArgumentParser:
     prop = sub.add_parser("propagate")
     prop.add_argument("--apply", action="store_true", help="actually write (default: dry-run)")
     sub.add_parser("revalidate")
+    cap = sub.add_parser("capture")
+    cap.add_argument("--apply", action="store_true",
+                     help="write vault + run canaries + commit (default: dry-run)")
+    cap.add_argument("--allow-dirty", action="store_true",
+                     help="capture uncommitted working-tree state (loudly listed)")
+    cap.add_argument("--no-commit", action="store_true",
+                     help="write vault but do not git-commit it")
     return p
 
 
@@ -683,6 +1055,7 @@ def main(argv: list[str] | None = None) -> int:
         "census": cmd_census,
         "propagate": cmd_propagate,
         "revalidate": cmd_revalidate,
+        "capture": cmd_capture,
     }
     try:
         return handlers[cmd](args)
