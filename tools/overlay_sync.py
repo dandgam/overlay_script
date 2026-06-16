@@ -13,6 +13,10 @@ Subcommands:
                  --dry-run is the DEFAULT; --apply writes (backup+atomic+verify).
     revalidate   rebuild manifest from disk, re-run invariants, assert convergence.
     census       Этап 1.5: 3-way fork census (worktree vs pinned upstream vs HEAD).
+    init-project Этап 2b: install vault overlays+forks into a fresh target.
+                 Idempotent, exempt-aware, never-clobber; --dry-run is the DEFAULT.
+    post-upgrade Этап 2b: re-apply fork patches onto a freshly re-vendored target.
+                 git-apply-check first; ANY reject => exit 6, tree untouched.
 
 Design rules enforced here (from the hardened plan):
   - overlay set = _bmad/custom/*.toml MINUS {config.toml, config.user.toml}
@@ -816,6 +820,258 @@ def write_manifest(
 
 
 # ----------------------------------------------------------------------------
+# Этап 2b: consume (vault -> target project): init-project + post-upgrade
+# ----------------------------------------------------------------------------
+
+
+def load_manifest(vault: Path) -> dict[str, list[dict[str, str]]]:
+    """Parse the capture manifest (our fixed hand-rolled YAML; see write_manifest).
+
+    Returns {'overlays': [{artifact, md5}], 'forks': [{artifact, rel, base_md5,
+    fork_md5, storage, ...}]}. Section-aware list-of-mappings reader; tolerant of
+    the leading top-level scalars and the inline `[]` empty lists. We own both the
+    writer and this reader, so the narrow format contract is intentional."""
+    mf = vault / "manifest.yaml"
+    if not mf.exists():
+        raise RuntimeError(f"vault has no manifest.yaml: {mf}")
+    sections: dict[str, list[dict[str, str]]] = {"overlays": [], "forks": []}
+    section: str | None = None
+    cur: dict[str, str] = {}
+
+    def flush() -> None:
+        if section in sections and cur.get("artifact"):
+            sections[section].append(dict(cur))
+
+    for raw in mf.read_text(encoding="utf-8").splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if not raw.startswith((" ", "\t")):  # top-level line ends a list/scalar
+            flush()
+            cur = {}
+            stripped = raw.rstrip()
+            name = stripped[:-1] if stripped.endswith(":") else ""
+            section = name if name in sections else None
+            continue
+        if section is None:
+            continue
+        item = raw.strip()
+        if item.startswith("- "):
+            flush()
+            cur = {}
+            item = item[2:].strip()
+        if ":" in item:
+            key, _, val = item.partition(":")
+            cur[key.strip()] = val.strip().strip("'\"")
+    flush()
+    return sections
+
+
+def apply_patch_onto(current: bytes, patch_text: str, name: str) -> tuple[bytes, bool]:
+    """Apply unified diff `patch_text` onto `current` in a throwaway git repo.
+
+    Returns (merged_bytes, True) on a clean apply, else (b"", False). Never partial:
+    `git apply --check` gates before the real apply, and git apply is atomic per
+    file (a reject leaves the temp file untouched and we discard it)."""
+    if not patch_text:
+        return current, True
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        run_git(["init", "-q"], d)
+        (d / name).write_bytes(current)
+        (d / "p.patch").write_text(patch_text, encoding="utf-8")
+        if run_git(["apply", "--check", "p.patch"], d)[0] != 0:
+            return b"", False
+        if run_git(["apply", "p.patch"], d)[0] != 0:
+            return b"", False
+        return (d / name).read_bytes(), True
+
+
+def reconstruct_fork(vault: Path, artifact: str) -> bytes:
+    """Rebuild fork bytes from the vault: read `<artifact>.snapshot`, or apply
+    `<artifact>.patch` onto `<artifact>.upstream`. Pure read of the vault; raises
+    RuntimeError on a corrupt/missing/non-applying vault entry (caller -> conflict)."""
+    fdir = vault / "forks"
+    snap = fdir / f"{artifact}.snapshot"
+    if snap.exists():
+        return snap.read_bytes()
+    patch = fdir / f"{artifact}.patch"
+    upstream = fdir / f"{artifact}.upstream"
+    if not patch.exists() or not upstream.exists():
+        raise RuntimeError(f"vault fork {artifact}: missing .snapshot and (.patch + .upstream)")
+    merged, ok = apply_patch_onto(
+        upstream.read_bytes(), patch.read_text(encoding="utf-8"), artifact
+    )
+    if not ok:
+        raise RuntimeError(f"vault fork {artifact}: pinned patch does not apply onto its own base")
+    return merged
+
+
+def atomic_write_bytes(dst: Path, data: bytes) -> None:
+    """Atomically write `data` to `dst` (tmp in same dir + os.replace)."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=".overlay_sync.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, dst)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+@dataclass
+class InstallItem:
+    category: str  # overlay | fork
+    artifact: str
+    rel: str  # path relative to the target project root
+    action: str  # install | skip-present | skip-exempt | conflict
+    detail: str = ""
+    content: bytes | None = None  # final bytes to write when action == "install"
+
+
+def plan_install(
+    vault: Path,
+    target_root: Path,
+    manifest: dict[str, list[dict[str, str]]],
+    exemptions: list[Exemption],
+    project: str,
+    mode: str,  # "init" | "post-upgrade"
+) -> list[InstallItem]:
+    """Decide, WITHOUT writing, what each artifact needs in the target. Idempotent
+    and never-clobber: a target already matching => skip-present; a target diverged
+    from BOTH the pinned base and our fork => conflict (caller HALTs, exit 6, never
+    partial). mode 'init' installs overlays+forks expecting the pinned 6.8.0 base;
+    mode 'post-upgrade' re-applies fork patches onto whatever upstream is on disk."""
+    items: list[InstallItem] = []
+
+    if mode == "init":
+        for ov in manifest["overlays"]:
+            name = ov["artifact"]
+            rel = str(OVERLAY_DIR / name)
+            dst = target_root / OVERLAY_DIR / name
+            if is_exempt(exemptions, name, project):
+                items.append(
+                    InstallItem(CAT_OVERLAY, name, rel, "skip-exempt", "by-design absent in target")
+                )
+                continue
+            src = vault / "overlays" / name
+            if not src.exists():
+                items.append(InstallItem(CAT_OVERLAY, name, rel, "conflict", "vault missing overlay file"))
+                continue
+            content = src.read_bytes()
+            if not dst.exists():
+                items.append(InstallItem(CAT_OVERLAY, name, rel, "install", "create", content))
+            elif md5_bytes(content) == md5(dst):
+                items.append(InstallItem(CAT_OVERLAY, name, rel, "skip-present", "identical"))
+            else:
+                items.append(
+                    InstallItem(CAT_OVERLAY, name, rel, "conflict", "present and differs — refusing to clobber")
+                )
+
+    for fk in manifest["forks"]:
+        name = fk["artifact"]
+        rel = fk.get("rel") or str(FORK_SKILL_STEPS / name)
+        base_md5 = fk.get("base_md5", "")
+        fork_md5 = fk.get("fork_md5", "")
+        storage = fk.get("storage", "")
+        dst = target_root / rel
+        cur_md5 = md5(dst) if dst.exists() else None
+
+        if cur_md5 is not None and cur_md5 == fork_md5:
+            items.append(InstallItem(CAT_FORK, name, rel, "skip-present", "already forked"))
+            continue
+        # Vault integrity: the reconstructed fork must match the recorded md5.
+        try:
+            fork_bytes = reconstruct_fork(vault, name)
+        except RuntimeError as exc:
+            items.append(InstallItem(CAT_FORK, name, rel, "conflict", str(exc)))
+            continue
+        if md5_bytes(fork_bytes) != fork_md5:
+            items.append(
+                InstallItem(CAT_FORK, name, rel, "conflict", "vault integrity: reconstructed fork md5 mismatch")
+            )
+            continue
+
+        if mode == "init":
+            if cur_md5 is None:
+                items.append(InstallItem(CAT_FORK, name, rel, "install", "create (step file absent)", fork_bytes))
+            elif cur_md5 == base_md5:
+                items.append(
+                    InstallItem(CAT_FORK, name, rel, "install", "apply fork onto pinned 6.8.0 base", fork_bytes)
+                )
+            else:
+                items.append(
+                    InstallItem(CAT_FORK, name, rel, "conflict",
+                                f"target is neither base nor fork ({cur_md5[:8]}) — manual review")
+                )
+            continue
+
+        # mode == "post-upgrade": re-apply onto current (possibly new) upstream.
+        if cur_md5 is None:
+            items.append(InstallItem(CAT_FORK, name, rel, "conflict", "step file absent after upgrade"))
+            continue
+        if storage == "snapshot":
+            if cur_md5 == base_md5:
+                items.append(
+                    InstallItem(CAT_FORK, name, rel, "install", "snapshot onto unchanged upstream", fork_bytes)
+                )
+            else:
+                items.append(
+                    InstallItem(CAT_FORK, name, rel, "conflict",
+                                "snapshot fork cannot merge onto changed upstream — re-author")
+                )
+            continue
+        patch_text = (vault / "forks" / f"{name}.patch").read_text(encoding="utf-8")
+        merged, ok = apply_patch_onto(dst.read_bytes(), patch_text, name)
+        if ok:
+            note = "patch onto upstream" + ("" if cur_md5 == base_md5 else " (changed — 3-way)")
+            items.append(InstallItem(CAT_FORK, name, rel, "install", note, merged))
+        else:
+            items.append(
+                InstallItem(CAT_FORK, name, rel, "conflict",
+                            "patch rejected onto new upstream — hunks need manual rebase")
+            )
+
+    return items
+
+
+def apply_install(
+    items: list[InstallItem], target_root: Path, backup_dir: Path
+) -> list[RollbackEntry]:
+    """Write install items into the target under git-guard + flock, with per-file
+    backup and a post-write md5 verify. Caller MUST have ensured zero conflicts."""
+    writes = [it for it in items if it.action == "install"]
+    guard = git_guard(target_root, [it.rel for it in writes])
+    if not guard.ok:
+        raise RuntimeError(f"git-guard refused {target_root.name}: {guard.reason} {guard.dirty_paths}")
+    rollback: list[RollbackEntry] = []
+    with project_lock(target_root):
+        for it in writes:
+            assert it.content is not None  # plan guarantees install items carry bytes
+            dst = target_root / it.rel
+            if dst.exists():
+                bdst = backup_dir / it.rel
+                bdst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(dst, bdst)
+                rollback.append(RollbackEntry(target_root.name, it.rel, str(bdst)))
+            else:
+                rollback.append(RollbackEntry(target_root.name, it.rel, None))
+            atomic_write_bytes(dst, it.content)
+            if md5(dst) != md5_bytes(it.content):
+                raise RuntimeError(f"verify failed after write: {dst}")
+    return rollback
+
+
+def rollback_install(rollback: list[RollbackEntry], target_root: Path) -> None:
+    for entry in reversed(rollback):
+        dst = target_root / entry.rel
+        if entry.backup is None:
+            dst.unlink(missing_ok=True)
+        else:
+            atomic_copy(Path(entry.backup), dst)
+
+
+# ----------------------------------------------------------------------------
 # Commands
 # ----------------------------------------------------------------------------
 
@@ -1013,6 +1269,85 @@ def cmd_capture(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _report_install(target: Path, mode: str, items: list[InstallItem]) -> None:
+    installs = [it for it in items if it.action == "install"]
+    skips = [it for it in items if it.action.startswith("skip")]
+    conflicts = [it for it in items if it.action == "conflict"]
+    print(
+        f"{mode} plan for {target.name}: {len(installs)} install, "
+        f"{len(skips)} skip, {len(conflicts)} conflict  -> {target}"
+    )
+    for it in installs:
+        print(f"  install  [{it.category}] {it.artifact} — {it.detail}")
+    for it in skips:
+        print(f"  skip     [{it.category}] {it.artifact} — {it.detail}")
+    for it in conflicts:
+        print(f"  CONFLICT [{it.category}] {it.artifact} — {it.detail}")
+
+
+def _resolve_target(args: argparse.Namespace) -> Path:
+    """A bare name resolves under --root; a path (has a slash / is absolute) is used as-is."""
+    t = str(args.target)
+    p = Path(t)
+    return p if (p.is_absolute() or "/" in t) else args.root / t
+
+
+def _consume(args: argparse.Namespace, mode: str) -> int:
+    if not getattr(args, "target", None):
+        print("ERROR: --target <project-name-or-path> is required", file=sys.stderr)
+        return EXIT_ERROR
+    target_root = _resolve_target(args)
+    vault: Path = args.vault
+    try:
+        manifest = load_manifest(vault)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    exemptions = load_exempt(args.exempt)
+    try:
+        items = plan_install(vault, target_root, manifest, exemptions, target_root.name, mode)
+    except (RuntimeError, OSError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    _report_install(target_root, mode, items)
+
+    if any(it.action == "conflict" for it in items):
+        n = sum(1 for it in items if it.action == "conflict")
+        print(
+            f"\n{n} conflict(s) — HALT, target NOT touched (exit 6, never partial).",
+            file=sys.stderr,
+        )
+        return EXIT_CONFLICT
+    installs = [it for it in items if it.action == "install"]
+    if not args.apply:
+        print("\n(dry-run — pass --apply to write target; nothing changed)")
+        return EXIT_OK
+    if not installs:
+        print("nothing to install — target already up to date.")
+        return EXIT_OK
+    backup_dir = target_root / "_bmad" / ".overlay_sync_backups" / args.stamp
+    try:
+        rollback = apply_install(items, target_root, backup_dir)
+    except (RuntimeError, OSError) as exc:
+        print(f"ABORT: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "ROLLBACK.json").write_text(
+        json.dumps([vars(e) for e in rollback], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"applied {len(installs)} install(s); backup at {backup_dir}")
+    return EXIT_OK
+
+
+def cmd_init_project(args: argparse.Namespace) -> int:
+    return _consume(args, "init")
+
+
+def cmd_post_upgrade(args: argparse.Namespace) -> int:
+    return _consume(args, "post-upgrade")
+
+
 # ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
@@ -1042,6 +1377,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="capture uncommitted working-tree state (loudly listed)")
     cap.add_argument("--no-commit", action="store_true",
                      help="write vault but do not git-commit it")
+    for verb in ("init-project", "post-upgrade"):
+        cp = sub.add_parser(verb)
+        cp.add_argument("--target", required=True,
+                        help="target project: a bare name (under --root) or a path")
+        cp.add_argument("--apply", action="store_true",
+                        help="actually write the target (default: dry-run)")
     return p
 
 
@@ -1056,6 +1397,8 @@ def main(argv: list[str] | None = None) -> int:
         "propagate": cmd_propagate,
         "revalidate": cmd_revalidate,
         "capture": cmd_capture,
+        "init-project": cmd_init_project,
+        "post-upgrade": cmd_post_upgrade,
     }
     try:
         return handlers[cmd](args)

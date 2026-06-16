@@ -305,3 +305,164 @@ def test_plan_capture_defers_auto_dev_skill(tmp_path: Path) -> None:
     skill = [i for i in items if i.category == osync.CAT_SKILL]
     assert len(skill) == 1
     assert skill[0].status == "defer"
+
+
+# --- consume (Этап 2b: vault -> target) ------------------------------------
+
+_STEP = "step-02b-ai-recommended.md"
+
+
+def _make_vault(
+    tmp_path: Path, *, base: bytes, fork: bytes, overlay_text: str = 'key = "v"\n'
+) -> tuple[Path, str]:
+    """Build a minimal vault (1 overlay + 1 patch-stored fork) via the REAL
+    write_manifest, so load_manifest is exercised against the true on-disk format.
+    Returns (vault_path, fork_rel)."""
+    vault = tmp_path / "vault"
+    (vault / "overlays").mkdir(parents=True)
+    (vault / "forks").mkdir(parents=True)
+    (vault / "overlays" / "bmad-x.toml").write_text(overlay_text, encoding="utf-8")
+    (vault / "forks" / f"{_STEP}.upstream").write_bytes(base)
+    (vault / "forks" / f"{_STEP}.patch").write_text(
+        osync.make_patch(base, fork, _STEP), encoding="utf-8"
+    )
+    rel = str(osync.FORK_SKILL_STEPS / _STEP)
+    cf = osync.CapturedFork(
+        _STEP, rel, osync.md5_bytes(base), osync.md5_bytes(fork), "patch", 0.1
+    )
+    osync.write_manifest(
+        vault, ["bmad-x.toml"], [cf], "deadbeef", "2026-06-17T00:00:00+07:00",
+        {"bmad-x.toml": osync.md5_bytes(overlay_text.encode())},
+    )
+    return vault, rel
+
+
+def _ten(repl: dict[int, str] | None = None) -> bytes:
+    repl = repl or {}
+    return b"".join((repl.get(i, f"l{i}") + "\n").encode() for i in range(10))
+
+
+def test_load_manifest_roundtrips_writer(tmp_path: Path) -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})
+    vault, rel = _make_vault(tmp_path, base=base, fork=fork)
+    man = osync.load_manifest(vault)
+    assert [o["artifact"] for o in man["overlays"]] == ["bmad-x.toml"]
+    fk = man["forks"][0]
+    assert fk["artifact"] == _STEP
+    assert fk["rel"] == rel
+    assert fk["storage"] == "patch"
+    assert fk["base_md5"] == osync.md5_bytes(base)
+    assert fk["fork_md5"] == osync.md5_bytes(fork)
+
+
+def test_reconstruct_fork_patch_and_snapshot(tmp_path: Path) -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})
+    vault, _ = _make_vault(tmp_path, base=base, fork=fork)
+    assert osync.reconstruct_fork(vault, _STEP) == fork  # patch path
+    # snapshot path takes precedence and returns its own bytes
+    snap = b"SNAP-ONLY\n"
+    (vault / "forks" / f"{_STEP}.snapshot").write_bytes(snap)
+    assert osync.reconstruct_fork(vault, _STEP) == snap
+
+
+def test_apply_patch_onto_clean_and_reject() -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})
+    patch = osync.make_patch(base, fork, _STEP)
+    merged, ok = osync.apply_patch_onto(base, patch, _STEP)
+    assert ok and merged == fork
+    # patch touches l5; a target that already replaced l5 cannot take the hunk
+    _, ok2 = osync.apply_patch_onto(_ten({5: "CONFLICT"}), patch, _STEP)
+    assert ok2 is False
+
+
+def _target_with_step(tmp_path: Path, rel: str, content: bytes) -> Path:
+    target = tmp_path / "proj"
+    target.mkdir(parents=True, exist_ok=True)  # git init needs an existing cwd
+    _git_repo(target)
+    _write(target / rel, content.decode())
+    osync.run_git(["add", "-A"], target)
+    osync.run_git(["commit", "-qm", "init"], target)
+    return target
+
+
+def test_init_project_installs_then_idempotent(tmp_path: Path) -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})
+    vault, rel = _make_vault(tmp_path, base=base, fork=fork)
+    target = _target_with_step(tmp_path, rel, base)  # step on pinned base, overlay absent
+
+    rc = osync.main(["--vault", str(vault), "init-project", "--target", str(target), "--apply"])
+    assert rc == osync.EXIT_OK
+    assert (target / "_bmad" / "custom" / "bmad-x.toml").read_text(encoding="utf-8") == 'key = "v"\n'
+    assert (target / rel).read_bytes() == fork  # fork applied onto base
+
+    osync.run_git(["add", "-A"], target)
+    osync.run_git(["commit", "-qm", "installed"], target)
+    rc2 = osync.main(["--vault", str(vault), "init-project", "--target", str(target), "--apply"])
+    assert rc2 == osync.EXIT_OK  # all skip-present, nothing to do
+    assert (target / rel).read_bytes() == fork
+
+
+def test_init_project_conflict_halts_never_partial(tmp_path: Path) -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})
+    vault, rel = _make_vault(tmp_path, base=base, fork=fork)
+    target = _target_with_step(tmp_path, rel, base)  # fork IS installable...
+    # ...but an overlay already exists and differs -> whole run must HALT
+    _write(target / "_bmad" / "custom" / "bmad-x.toml", "DIFFERENT\n")
+    osync.run_git(["add", "-A"], target)
+    osync.run_git(["commit", "-qm", "diff-overlay"], target)
+
+    rc = osync.main(["--vault", str(vault), "init-project", "--target", str(target), "--apply"])
+    assert rc == osync.EXIT_CONFLICT
+    # never partial: the installable fork was NOT written despite the overlay conflict
+    assert (target / rel).read_bytes() == base
+    assert (target / "_bmad" / "custom" / "bmad-x.toml").read_text(encoding="utf-8") == "DIFFERENT\n"
+
+
+def test_init_fork_diverged_is_conflict(tmp_path: Path) -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})
+    vault, rel = _make_vault(tmp_path, base=base, fork=fork)
+    target = _target_with_step(tmp_path, rel, b"NEITHER BASE NOR FORK\n")
+    rc = osync.main(["--vault", str(vault), "init-project", "--target", str(target)])
+    assert rc == osync.EXIT_CONFLICT  # dry-run still surfaces conflict + exit 6
+
+
+def test_init_respects_exempt_presence(tmp_path: Path) -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})
+    vault, rel = _make_vault(tmp_path, base=base, fork=fork)
+    target = _target_with_step(tmp_path, rel, base)
+    exempt = _write(
+        tmp_path / "exempt.yaml",
+        "- artifact: bmad-x.toml\n  project: proj\n  reason: by-design absent\n",
+    )
+    rc = osync.main(
+        ["--exempt", str(exempt), "--vault", str(vault), "init-project",
+         "--target", str(target), "--apply"]
+    )
+    assert rc == osync.EXIT_OK
+    assert not (target / "_bmad" / "custom" / "bmad-x.toml").exists()  # exempt -> not installed
+    assert (target / rel).read_bytes() == fork  # fork still installs
+
+
+def test_post_upgrade_3way_merge(tmp_path: Path) -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})  # patch touches l5
+    vault, rel = _make_vault(tmp_path, base=base, fork=fork)
+    # re-vendor bumped a DIFFERENT line (l0) -> patch must 3-way onto new upstream
+    new_up = _ten({0: "NEWUPSTREAM"})
+    target = _target_with_step(tmp_path, rel, new_up)
+
+    rc = osync.main(["--vault", str(vault), "post-upgrade", "--target", str(target), "--apply"])
+    assert rc == osync.EXIT_OK
+    merged = (target / rel).read_bytes()
+    assert b"NEWUPSTREAM" in merged and b"FORKED" in merged
+
+
+def test_post_upgrade_reject_is_conflict(tmp_path: Path) -> None:
+    base, fork = _ten(), _ten({5: "FORKED"})
+    vault, rel = _make_vault(tmp_path, base=base, fork=fork)
+    # re-vendor changed the SAME line the patch needs (l5) -> hunk rejects
+    new_up = _ten({5: "UPSTREAM-CHANGED-SAME-LINE"})
+    target = _target_with_step(tmp_path, rel, new_up)
+
+    rc = osync.main(["--vault", str(vault), "post-upgrade", "--target", str(target), "--apply"])
+    assert rc == osync.EXIT_CONFLICT
+    assert (target / rel).read_bytes() == new_up  # untouched, never partial
