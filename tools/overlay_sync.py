@@ -17,6 +17,8 @@ Subcommands:
                  Idempotent, exempt-aware, never-clobber; --dry-run is the DEFAULT.
     post-upgrade Этап 2b: re-apply fork patches onto a freshly re-vendored target.
                  git-apply-check first; ANY reject => exit 6, tree untouched.
+    menu         print the operational catalog (RU). Non-interactive; drives the
+                 /overlay skill so Claude can run the right verb on the user's behalf.
 
 Design rules enforced here (from the hardened plan):
   - overlay set = _bmad/custom/*.toml MINUS {config.toml, config.user.toml}
@@ -40,9 +42,9 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 # ----------------------------------------------------------------------------
@@ -91,6 +93,67 @@ EXIT_ERROR = 2
 EXIT_REVALIDATE = 3
 EXIT_INTERNAL = 5
 EXIT_CONFLICT = 6  # fork-patch-conflict / verify-present (Этап 2 verbs)
+
+
+# ----------------------------------------------------------------------------
+# Operational catalog (the `menu` command)
+# ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MenuEntry:
+    """One row of the human-facing catalog printed by `menu`."""
+
+    cmd: str
+    title: str          # short RU name
+    writes: bool        # True => mutates a project / vault (needs --apply + confirm)
+    desc: str           # one-line RU "what it does"
+    exits: str          # RU meaning of the exit codes
+    requires: tuple[str, ...] = ()  # required subcommand flags (e.g. ("--target",))
+
+
+# Display order = order here. Keys MUST equal HANDLERS minus "menu" — enforced by
+# test_menu_covers_handlers (anti single-source-drift: a new verb without a menu
+# row fails the suite).
+MENU_ENTRIES: tuple[MenuEntry, ...] = (
+    MenuEntry(
+        "check", "Проверить состояние", writes=False,
+        desc="показать расхождения оверлеев между проектами (read-only)",
+        exits="0 ок · 1 предупреждения · 2 ошибки",
+    ),
+    MenuEntry(
+        "census", "Перепись форков", writes=False,
+        desc="3-сторонний diff: сколько форков step-02a..d (read-only)",
+        exits="0",
+    ),
+    MenuEntry(
+        "propagate", "Разлить канон odyssey → проекты", writes=True,
+        desc="скопировать недостающие/устаревшие watched-файлы во все проекты",
+        exits="0/1/2 · 3 откат после revalidate",
+    ),
+    MenuEntry(
+        "revalidate", "Перепроверить сходимость", writes=False,
+        desc="пересобрать манифест с диска после разлива (read-only)",
+        exits="0 ок · 3 ошибки",
+    ),
+    MenuEntry(
+        "capture", "Захватить odyssey → vault", writes=True,
+        desc="снять оверлеи/форки/свой скилл в хранилище и закоммитить",
+        exits="0/1/2 · 6 канарейка упала (vault не закоммичен)",
+    ),
+    MenuEntry(
+        "init-project", "Развернуть vault → новый проект", writes=True,
+        desc="поставить оверлеи в свежий проект, never-clobber",
+        exits="0/2 · 6 конфликт (проект не тронут)",
+        requires=("--target",),
+    ),
+    MenuEntry(
+        "post-upgrade", "Переналожить форки после апгрейда BMAD", writes=True,
+        desc="git apply форк-патчей на свежевендоренный upstream",
+        exits="0/2 · 6 патч отклонён (дерево не тронуто)",
+        requires=("--target",),
+    ),
+)
 
 
 # ----------------------------------------------------------------------------
@@ -1448,6 +1511,29 @@ def cmd_post_upgrade(args: argparse.Namespace) -> int:
     return _consume(args, "post-upgrade")
 
 
+def cmd_menu(args: argparse.Namespace) -> int:
+    """Print the operational catalog (non-interactive). Drives the /overlay skill.
+
+    Text by default (human-readable RU); JSON with --json so Claude can parse it
+    and map a natural-language choice to the right verb. Never reads stdin.
+    """
+    if args.json:
+        print(json.dumps([asdict(e) for e in MENU_ENTRIES], ensure_ascii=False, indent=2))
+        return EXIT_OK
+    print("overlay_sync — операции (выбери словами, остальное запустит Claude):\n")
+    for i, e in enumerate(MENU_ENTRIES, start=1):
+        tag = "ПИШЕТ    " if e.writes else "read-only"
+        req = f"  (нужен {' '.join(e.requires)})" if e.requires else ""
+        print(f"  {i}. {e.cmd:13} [{tag}] {e.title}{req}")
+        print(f"       {e.desc}")
+        print(f"       exit: {e.exits}")
+    print(
+        "\nПишущие команды: сначала dry-run (без --apply) и показ плана, "
+        "затем --apply только по подтверждению."
+    )
+    return EXIT_OK
+
+
 # ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
@@ -1483,7 +1569,22 @@ def build_parser() -> argparse.ArgumentParser:
                         help="target project: a bare name (under --root) or a path")
         cp.add_argument("--apply", action="store_true",
                         help="actually write the target (default: dry-run)")
+    sub.add_parser("menu")
     return p
+
+
+# Single source of dispatchable verbs. test_menu_covers_handlers asserts
+# MENU_ENTRIES keys == HANDLERS minus "menu" (anti single-source-drift).
+HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "check": cmd_check,
+    "census": cmd_census,
+    "propagate": cmd_propagate,
+    "revalidate": cmd_revalidate,
+    "capture": cmd_capture,
+    "init-project": cmd_init_project,
+    "post-upgrade": cmd_post_upgrade,
+    "menu": cmd_menu,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1491,17 +1592,8 @@ def main(argv: list[str] | None = None) -> int:
     args.projects = [x for x in str(args.projects).split(",") if x]
     args.upstream_steps = args.upstream / FORK_SKILL / "steps"
     cmd = args.cmd or "check"
-    handlers = {
-        "check": cmd_check,
-        "census": cmd_census,
-        "propagate": cmd_propagate,
-        "revalidate": cmd_revalidate,
-        "capture": cmd_capture,
-        "init-project": cmd_init_project,
-        "post-upgrade": cmd_post_upgrade,
-    }
     try:
-        return handlers[cmd](args)
+        return HANDLERS[cmd](args)
     except KeyboardInterrupt:
         return EXIT_INTERNAL
 

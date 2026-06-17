@@ -8,6 +8,7 @@ git_show_head boundary, so the suite needs no git config.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -621,3 +622,38 @@ def test_post_upgrade_reject_is_conflict(tmp_path: Path) -> None:
     rc = osync.main(["--vault", str(vault), "post-upgrade", "--target", str(target), "--apply"])
     assert rc == osync.EXIT_CONFLICT
     assert (target / rel).read_bytes() == new_up  # untouched, never partial
+
+
+# --- menu (operational catalog, drives the /overlay skill) -----------------
+
+
+def test_menu_runs_and_lists_all(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = osync.main(["menu"])
+    out = capsys.readouterr().out
+    assert rc == osync.EXIT_OK
+    for e in osync.MENU_ENTRIES:
+        assert e.cmd in out  # every verb is offered
+        assert e.title in out
+    assert "ПИШЕТ" in out  # writing verbs are flagged so a write is never a surprise
+
+
+def test_menu_json_shape(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = osync.main(["--json", "menu"])
+    out = capsys.readouterr().out
+    assert rc == osync.EXIT_OK
+    catalog = json.loads(out)  # must be valid JSON so Claude can parse it
+    assert isinstance(catalog, list)
+    assert len(catalog) == len(osync.MENU_ENTRIES)
+    fields = {"cmd", "title", "writes", "desc", "exits", "requires"}
+    for row in catalog:
+        assert fields <= set(row)
+    by_cmd = {row["cmd"]: row for row in catalog}
+    assert "--target" in by_cmd["init-project"]["requires"]
+    assert "--target" in by_cmd["post-upgrade"]["requires"]
+
+
+def test_menu_covers_handlers() -> None:
+    # Anti single-source-drift: every dispatchable verb (except menu itself) has a
+    # catalog row, and the catalog invents no phantom verb. A new subcommand added
+    # to HANDLERS without a MENU_ENTRIES row fails here.
+    assert {e.cmd for e in osync.MENU_ENTRIES} == set(osync.HANDLERS) - {"menu"}
