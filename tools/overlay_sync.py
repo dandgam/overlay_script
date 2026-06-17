@@ -451,9 +451,19 @@ def run_invariants(
                 continue
             pinfo = info.projects[proj]
             if not pinfo.present:
-                findings.append(
-                    Finding("INV-OVERLAY-PRESENT", "error", name, proj, "missing in target")
-                )
+                # Presence-scope exempt: artifact absent BY DESIGN (e.g. auto-dev.toml
+                # is odyssey-only) -> warn, not a propagatable error. Matches exempt
+                # artifact name (basename for overlays, rel for watched files).
+                ex = is_exempt(exemptions, name, proj)
+                if ex:
+                    findings.append(
+                        Finding("INV-OVERLAY-PRESENT", "warn", name, proj,
+                                f"absent by-design (exempt: {ex.reason or 'no reason'})")
+                    )
+                else:
+                    findings.append(
+                        Finding("INV-OVERLAY-PRESENT", "error", name, proj, "missing in target")
+                    )
             elif pinfo.md5 != info.canonical_md5:
                 ex = is_exempt(exemptions, name, proj)
                 if ex:

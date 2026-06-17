@@ -194,6 +194,25 @@ def test_invariant_present_and_identical(tree: Path, monkeypatch: pytest.MonkeyP
     assert not any(f.artifact == "bmad-prd.toml" for f in findings)
 
 
+def test_presence_exempt_downgrades_missing(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # auto-dev.toml lives only in odyssey -> missing in legal. exempt presence -> warn,
+    # so propagate's revalidate does not treat it as a blocking error.
+    ex = [osync.Exemption("bmad-auto-dev.toml", "legal", "odyssey-only by-design")]
+    m = _manifest(tree, monkeypatch, ex)
+    adv = [
+        f for f in osync.run_invariants(m, tree, ex)
+        if f.inv == "INV-OVERLAY-PRESENT" and f.artifact == "bmad-auto-dev.toml" and f.project == "legal"
+    ]
+    assert adv and adv[0].severity == "warn"
+    # no exempt -> stays a hard error
+    m2 = _manifest(tree, monkeypatch, [])
+    adv2 = [
+        f for f in osync.run_invariants(m2, tree, [])
+        if f.inv == "INV-OVERLAY-PRESENT" and f.artifact == "bmad-auto-dev.toml" and f.project == "legal"
+    ]
+    assert adv2 and adv2[0].severity == "error"
+
+
 def test_invariant_stale_then_exempt(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # make legal's prd differ
     _write(tree / "legal" / "_bmad" / "custom" / "bmad-prd.toml", "prd-DIFFERENT\n")
