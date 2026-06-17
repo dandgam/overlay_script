@@ -237,6 +237,27 @@ def test_build_plan_create_and_replace(tree: Path, monkeypatch: pytest.MonkeyPat
     assert ("REPLACE", "bmad-prd.toml", "legal") in actions
 
 
+def test_propagate_all_create_writes_rollback(tmp_path: Path) -> None:
+    # Regression: an all-CREATE plan makes no backups, so backup_dir does not exist
+    # when ROLLBACK.json is written. cmd_propagate must mkdir it (else FileNotFound).
+    root = tmp_path / "root"
+    _write(root / "odyssey" / "_bmad" / "custom" / "bmad-x.toml", 'k = "v"\n')
+    (root / "legal").mkdir(parents=True, exist_ok=True)
+    for proj in ("odyssey", "legal"):
+        _git_repo(root / proj)
+        osync.run_git(["add", "-A"], root / proj)
+        osync.run_git(["commit", "-qm", "init"], root / proj)
+    up = tmp_path / "upstream"
+    up.mkdir()
+    rc = osync.main(
+        ["--root", str(root), "--canonical", "odyssey", "--projects", "odyssey,legal",
+         "--upstream", str(up), "propagate", "--apply"]
+    )
+    assert rc == osync.EXIT_OK
+    assert (root / "legal" / "_bmad" / "custom" / "bmad-x.toml").read_text(encoding="utf-8") == 'k = "v"\n'
+    assert list((root / "odyssey" / "_bmad" / ".overlay_sync_backups").rglob("ROLLBACK.json"))
+
+
 def test_plan_respects_exempt(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write(tree / "legal" / "_bmad" / "custom" / "bmad-prd.toml", "prd-DIFFERENT\n")
     ex = [osync.Exemption("bmad-prd.toml", "legal", "intentional")]

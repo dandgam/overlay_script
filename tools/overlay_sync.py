@@ -1249,6 +1249,8 @@ def cmd_propagate(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(f"ABORT: {exc}", file=sys.stderr)
         return EXIT_ERROR
+    # An all-CREATE plan makes no backups, so backup_dir may not exist yet.
+    backup_dir.mkdir(parents=True, exist_ok=True)
     (backup_dir / "ROLLBACK.json").write_text(
         json.dumps([vars(e) for e in rollback], ensure_ascii=False, indent=2),
         encoding="utf-8",
