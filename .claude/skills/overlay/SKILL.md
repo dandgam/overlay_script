@@ -18,10 +18,20 @@ description: Меню для overlay_sync прямо в чате Claude Code —
 ```
 
 **Жёсткие правила вызова (легко ошибиться руками — потому это и делает skill):**
-- **Глобальные флаги идут ДО подкоманды.** Всегда подставляй `--exempt /home/server/.claude/bmad-overlays/exempt.yaml`. Дефолты канона/проектов/vault менять не нужно (odyssey · odyssey,legal,pcb,Antares · `~/.claude/bmad-overlays`).
-- Подкоманда и её флаги (`--apply`, `--target`, …) идут ПОСЛЕ.
+- **Глобальные флаги идут СТРОГО ДО подкоманды.** Глобальные = `--exempt`, `--stamp`,
+  `--json`, `--vault`, `--canonical`, `--projects`, `--root`, `--upstream`. Если поставить
+  любой из них ПОСЛЕ подкоманды — argparse падает `unrecognized arguments` (exit 2,
+  ничего не пишется). **`--stamp` — глобальный, частая ошибка: он идёт ДО, не после.**
+- Подкоманда и её СОБСТВЕННЫЕ флаги (`--apply`, `--target`, `--allow-dirty`, `--no-commit`) идут ПОСЛЕ.
+- **Строгий порядок (шаблон):**
+  ```
+  …overlay_sync.py  --exempt <exempt.yaml> [--stamp <ts>] [--json]   <подкоманда>   [--apply] [--target X]
+                    └──────────── глобальные (ДО) ────────────┘      └──── подкоманда + её флаги (ПОСЛЕ) ────┘
+  ```
+  Пример записи: `…overlay_sync.py --exempt … --stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" propagate --apply`
+- Всегда подставляй `--exempt /home/server/.claude/bmad-overlays/exempt.yaml`. Дефолты канона/проектов/vault менять не нужно (odyssey · odyssey,legal,pcb,Antares · `~/.claude/bmad-overlays`).
 - `init-project` / `post-upgrade` требуют `--target <имя-или-путь>` — спроси, если не назван.
-- При записи добавляй `--stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)"` (имя папки бэкапа).
+- При записи добавляй глобальный `--stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)"` (имя папки бэкапа) — ДО подкоманды.
 - Для чтения используй `--json` где возможно (`check`, `census`, `revalidate`, `menu`) — парсь и пересказывай, не вываливай сырой вывод.
 
 ## Что делать при вызове
