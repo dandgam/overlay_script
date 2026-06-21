@@ -652,6 +652,12 @@ _COUNT_CAT_RE = re.compile(r"(\d+)\s+(?:[A-Za-z]+\s+){0,2}categor", re.IGNORECAS
 # Only the list-bullet form, mirroring _PARSE_LINE_RE — a mid-prose "Includes:" must
 # not harvest sentence words as phantom techniques (false-red).
 _INCLUDES_RE = re.compile(r"^\s*[-*]\s*Includes:\s*(.+)", re.IGNORECASE)
+# Numbered example headings ("**1. SCAMPER Method**") are a SECOND call source. But
+# 02b uses the SAME "N. **bold**" syntax for checklist headings ("Goal Analysis:")
+# and placeholders ("[Technique 1]"); the colon/bracket filter in _numbered_calls
+# rejects those so they do not false-red. Free-prose mentions stay OUT of scope
+# (catching them needs fuzzy matching = false-red) — a documented blind spot (#4).
+_NUMBERED_TECH_RE = re.compile(r"\*\*\s*\d+\.\s+(.+?)\*\*")
 # Cut the Parse line at the first spaced em/en-dash. The fork writes
 # "category, technique_name, description — these are the ONLY 3 columns…"; splitting
 # the whole line on commas would mint a phantom column from the trailing prose.
@@ -664,6 +670,17 @@ def _extract_columns(tail: str) -> tuple[str, ...]:
     head = _PARSE_DASH_CUT_RE.split(tail, maxsplit=1)[0]
     cols = (c.strip().strip("`") for c in head.split(","))
     return tuple(c for c in cols if _COLUMN_TOKEN_RE.match(c))
+
+
+def _numbered_calls(line: str) -> list[str]:
+    """Technique names from numbered example headings, minus checklist headings (end
+    with ':') and placeholders (contain '[' or ']') — 02b reuses the same syntax."""
+    out: list[str] = []
+    for m in _NUMBERED_TECH_RE.finditer(line):
+        name = re.sub(r"\s*\(.*?\)\s*$", "", m.group(1)).strip()
+        if name and not name.endswith(":") and "[" not in name and "]" not in name:
+            out.append(name)
+    return out
 
 
 def step_parse(path: Path) -> StepFacts:
@@ -685,6 +702,7 @@ def step_parse(path: Path) -> StepFacts:
         im = _INCLUDES_RE.search(line)
         if im:
             called.extend(c.strip() for c in im.group(1).split(",") if c.strip())
+        called.extend(_numbered_calls(line))
     return StepFacts(path.name, tuple(cols), tuple(declared), tuple(called))
 
 
@@ -753,12 +771,23 @@ def inv_phantom_call(step: StepFacts, facts: CsvFacts, project: str) -> list[Fin
                     f"step references techniques absent from brain-methods.csv: {', '.join(phantom)}")]
 
 
+# The pinned CSV schema the canary reconciles against. A re-vendor that renames /
+# reorders / drops a column breaks the ground truth (csv_parse would positional-guess)
+# — INV-CSV-SCHEMA catches that instead of silently misreading (finding #6).
+BRAIN_CSV_EXPECTED_COLS = ("category", "technique_name", "description")
+
+
 def run_text_invariants(csv_path: Path, step_paths: list[Path], project: str) -> list[Finding]:
     """Run the three brain text invariants. ALONGSIDE run_invariants (byte/git),
     never replacing it. Fail-open on a missing CSV (nothing to reconcile against)."""
     if not csv_path.exists():
         return []
     facts = csv_parse(csv_path)
+    if facts.columns != BRAIN_CSV_EXPECTED_COLS:
+        # Ground truth drifted: emit ONE loud finding and skip per-step reconciliation
+        # (running it on a misread CSV would spray false phantoms / false counts).
+        return [Finding("INV-CSV-SCHEMA", "error", csv_path.name, project,
+                        f"CSV header {list(facts.columns)} != pinned {list(BRAIN_CSV_EXPECTED_COLS)}")]
     findings: list[Finding] = []
     for sp in step_paths:
         if not sp.exists():

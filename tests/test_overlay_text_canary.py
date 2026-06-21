@@ -288,3 +288,52 @@ def test_meta_proof_phantom_call_mutation(tmp_path: Path) -> None:
     assert not ok and "false-red" in reason
     step.write_text(original, encoding="utf-8")
     assert osync.golden_gate("6.8.0", golden_root=root)[0]
+
+
+# === 6. FOLLOW-UPS #4 (numbered call source) + #6 (CSV schema guard) ========
+
+
+def test_numbered_example_phantom_now_caught(tmp_path: Path) -> None:
+    """#4: a phantom referenced ONLY as a numbered example (not in Includes:) is
+    now caught — closing the call-source blind spot."""
+    facts = osync.csv_parse(GOLDEN / "brain-methods.csv")
+    step = osync.step_parse(_write(tmp_path / "s.md", '"**1. Ghost Method**"\n'))
+    assert "Ghost Method" in step.called_techniques
+    assert osync.inv_phantom_call(step, facts, "t")
+    ok = osync.step_parse(_write(tmp_path / "ok.md", "**2. Six Thinking Hats**\n"))
+    assert osync.inv_phantom_call(ok, facts, "t") == []
+
+
+def test_numbered_checklist_headings_not_false_red(tmp_path: Path) -> None:
+    """#4 guard: 02b reuses 'N. **bold**' for checklist headings / placeholders;
+    those must NOT be harvested as techniques (would false-red on healthy steps)."""
+    facts = osync.csv_parse(GOLDEN / "brain-methods.csv")
+    text = (
+        "1. **Goal Analysis:** assess the goal\n"
+        "2. **[Technique 1]:** placeholder\n"
+        "3. **Energy/Tone Assessment:** mood\n"
+    )
+    step = osync.step_parse(_write(tmp_path / "s.md", text))
+    assert step.called_techniques == ()
+    assert osync.inv_phantom_call(step, facts, "t") == []
+
+
+def test_csv_schema_drift_caught(tmp_path: Path) -> None:
+    """#6: a renamed CSV header breaks the ground truth — INV-CSV-SCHEMA fires once
+    and per-step reconciliation is skipped (no false-phantom spray)."""
+    bad = _write(tmp_path / "b.csv", "cat,name,desc\nCreative,SCAMPER Method,x\n")
+    step = _write(tmp_path / "s.md", "- Includes: Ghost Technique\n")
+    findings = osync.run_text_invariants(bad, [step], "t")
+    assert len(findings) == 1
+    assert findings[0].inv == "INV-CSV-SCHEMA"
+
+
+def test_golden_gate_refuses_on_renamed_csv(tmp_path: Path) -> None:
+    """#6 at gate level: a drifted CSV schema makes golden_gate refuse to trust."""
+    root = _clone_golden(tmp_path)
+    csv_path = root / "6.8.0" / "brain-methods.csv"
+    lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines[0] = "cat,name,desc\n"
+    csv_path.write_text("".join(lines), encoding="utf-8")
+    ok, _ = osync.golden_gate("6.8.0", golden_root=root)
+    assert not ok
