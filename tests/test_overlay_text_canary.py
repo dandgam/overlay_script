@@ -16,8 +16,11 @@ files describing it did).
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 _SPEC = importlib.util.spec_from_file_location(
     "overlay_sync", Path(__file__).resolve().parents[1] / "tools" / "overlay_sync.py"
@@ -87,3 +90,108 @@ def test_step_parse_sick_keeps_phantom_columns() -> None:
         "facilitation_prompts", "best_for", "energy_level", "typical_duration",
     )
     assert (36, 7) in s.declared_counts
+
+
+# === 2. INVARIANTS =========================================================
+
+
+def test_invariants_fire_on_sick_silent_on_healthy() -> None:
+    csv_path = GOLDEN / "brain-methods.csv"
+    sick = sorted((GOLDEN / "sick").glob("step-02*.md"))
+    healthy = sorted((GOLDEN / "healthy").glob("step-02*.md"))
+    sick_findings = osync.run_text_invariants(csv_path, sick, "golden-sick")
+    healthy_findings = osync.run_text_invariants(csv_path, healthy, "golden-healthy")
+    # sick must trip all three invariants; healthy must be silent.
+    invs = {f.inv for f in sick_findings}
+    assert invs == {"INV-BRAIN-COLS", "INV-COUNT-RECON", "INV-PHANTOM-CALL"}
+    assert healthy_findings == []
+
+
+def test_phantom_call_uses_curated_alias_not_fuzzy() -> None:
+    facts = osync.csv_parse(GOLDEN / "brain-methods.csv")
+    # "SCAMPER" is a curated alias of the real "SCAMPER Method" -> accepted.
+    assert osync._call_is_known("SCAMPER", facts)
+    # "Pirate Code" is a real upstream phantom; the CSV has "Pirate Code Brainstorm".
+    # Fuzzy/prefix matching would wrongly accept it -> we must NOT.
+    assert not osync._call_is_known("Pirate Code", facts)
+    assert osync._call_is_known("Pirate Code Brainstorm", facts)
+
+
+# === 3. GOLDEN GATE + META-PROOF ===========================================
+
+
+def test_golden_gate_passes_on_pinned_pair() -> None:
+    ok, reason = osync.golden_gate("6.8.0")
+    assert ok, reason
+
+
+def test_golden_gate_refuses_unknown_version() -> None:
+    ok, reason = osync.golden_gate("9.9.9")
+    assert not ok
+    assert "no golden fixture" in reason
+
+
+def _clone_golden(tmp_path: Path) -> Path:
+    root = tmp_path / "golden"
+    shutil.copytree(GOLDEN, root / "6.8.0")
+    return root
+
+
+def test_meta_proof_fourth_column_makes_healthy_fail_then_pass(tmp_path: Path) -> None:
+    """Inject a 4th (phantom) column into the HEALTHY Parse line -> INV-BRAIN-COLS
+    must FAIL; revert -> PASS. Proves the invariant actually discriminates."""
+    root = _clone_golden(tmp_path)
+    step = root / "6.8.0" / "healthy" / "step-02a-user-selected.md"
+    original = step.read_text(encoding="utf-8")
+
+    mutated = original.replace(
+        "- Parse: category, technique_name, description —",
+        "- Parse: category, technique_name, description, phantom_col —",
+    )
+    assert mutated != original  # the anchor was found
+    step.write_text(mutated, encoding="utf-8")
+    ok, reason = osync.golden_gate("6.8.0", golden_root=root)
+    assert not ok and "false-red" in reason  # healthy golden now fires
+
+    step.write_text(original, encoding="utf-8")
+    ok, reason = osync.golden_gate("6.8.0", golden_root=root)
+    assert ok, reason  # reverted -> trusted again
+
+
+def test_meta_proof_silent_canary_is_caught(tmp_path: Path) -> None:
+    """If the canary goes silent on the SICK sample (false-green), the gate must
+    refuse — replace the sick steps with healthy copies and expect a refusal."""
+    root = _clone_golden(tmp_path)
+    sick_dir = root / "6.8.0" / "sick"
+    for f in sick_dir.glob("step-02*.md"):
+        f.unlink()
+    for f in (root / "6.8.0" / "healthy").glob("step-02*.md"):
+        shutil.copy(f, sick_dir / f.name)
+    ok, reason = osync.golden_gate("6.8.0", golden_root=root)
+    assert not ok and "false-green" in reason
+
+
+def test_golden_gate_version_pin_mismatch(tmp_path: Path) -> None:
+    root = _clone_golden(tmp_path)
+    (root / "6.8.0" / "VERSION").write_text("6.7.0\n", encoding="utf-8")
+    ok, reason = osync.golden_gate("6.8.0", golden_root=root)
+    assert not ok and "VERSION pin mismatch" in reason
+
+
+# === 4. FEATURE FLAG (off by default) ======================================
+
+
+def test_text_canary_flag_off_by_default() -> None:
+    args = osync.build_parser().parse_args(["check"])
+    assert osync._text_canary_enabled(args) is False
+
+
+def test_text_canary_flag_via_cli() -> None:
+    args = osync.build_parser().parse_args(["--text-canary", "check"])
+    assert osync._text_canary_enabled(args) is True
+
+
+def test_text_canary_flag_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BMAD_OVERLAY_TEXT_CANARY", "on")
+    args = osync.build_parser().parse_args(["check"])
+    assert osync._text_canary_enabled(args) is True

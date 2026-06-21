@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """overlay_sync — keep BMAD overlays/forks byte-consistent across projects.
 
-Этап 1 (byte-core) + Этап 1.5 (computed fork census). NO text parsing of
-anchors/methods and NO brain-methods canary here — those live behind the
-golden-fixture gate in Этап 3 (see plan witty-sauteeing-blanket.md). The vault
+Этап 1 (byte-core) + Этап 1.5 (computed fork census). Этап 3 СРЕЗ 1 adds the
+brain-methods text canary (csv_parse/step_parse + three invariants) BEHIND the
+golden-fixture gate and a feature flag (off by default, canary-armed). The vault
 (`capture`/`init-project`/`post-upgrade`) is Этап 2; until it exists the
 canonical PROJECT (odyssey) is the propagation source.
 
@@ -672,6 +672,109 @@ def step_parse(path: Path) -> StepFacts:
         if im:
             called.extend(c.strip() for c in im.group(1).split(",") if c.strip())
     return StepFacts(path.name, parse_columns, tuple(declared), tuple(called))
+
+
+# ----------------------------------------------------------------------------
+# Text canary (Этап 3, СРЕЗ 1) — invariants + golden gate
+#
+# Three invariants reconcile each step file against the CSV ground truth. They
+# emit the same Finding type as run_invariants, so _report/_exit_code need no
+# change. The golden gate proves the canary DISCRIMINATES (sick→RED, healthy→
+# GREEN) on a version-pinned pair before its verdict on live files is trusted.
+# ----------------------------------------------------------------------------
+
+# Curated alias allow-list: legitimate step-prose surface forms that map to a real
+# CSV technique. EXPLICIT, never fuzzy/auto-derived — prefix matching would wrongly
+# accept "Dream Fusion" -> "Dream Fusion Laboratory" and blind the canary. The
+# category overview writes "SCAMPER"; the CSV row is "SCAMPER Method". Grows ONLY
+# by a human adding a verified entry (governance), exactly like check-kinds.
+BRAIN_CALL_ALIASES: dict[str, str] = {
+    "SCAMPER": "SCAMPER Method",
+}
+
+
+def _call_is_known(name: str, facts: CsvFacts) -> bool:
+    if name in facts.technique_names:
+        return True
+    target = BRAIN_CALL_ALIASES.get(name)
+    return target is not None and target in facts.technique_names
+
+
+def inv_brain_cols(step: StepFacts, facts: CsvFacts, project: str) -> list[Finding]:
+    """INV-BRAIN-COLS: columns the step parses must be a subset of the CSV header."""
+    phantom = [c for c in step.parse_columns if c not in facts.columns]
+    if not phantom:
+        return []
+    return [Finding("INV-BRAIN-COLS", "error", step.name, project,
+                    f"step parses columns absent from brain-methods.csv: {', '.join(phantom)}")]
+
+
+def inv_count_recon(step: StepFacts, facts: CsvFacts, project: str) -> list[Finding]:
+    """INV-COUNT-RECON: declared counts must reconcile with the CSV rollups (61/10)."""
+    out: list[Finding] = []
+    for techs, cats in dict.fromkeys(step.declared_counts):  # dedup, order-stable
+        if techs != facts.techniques or cats != facts.categories:
+            out.append(Finding("INV-COUNT-RECON", "error", step.name, project,
+                f"step declares {techs} techniques/{cats} categories; "
+                f"brain-methods.csv has {facts.techniques}/{facts.categories}"))
+    return out
+
+
+def inv_phantom_call(step: StepFacts, facts: CsvFacts, project: str) -> list[Finding]:
+    """INV-PHANTOM-CALL: referenced techniques must exist in the CSV (or be a curated
+    alias). Exact match only — fuzzy matching would blind real drift (a phantom
+    "Pirate Code" would silently match the real "Pirate Code Brainstorm")."""
+    phantom = [n for n in dict.fromkeys(step.called_techniques) if not _call_is_known(n, facts)]
+    if not phantom:
+        return []
+    return [Finding("INV-PHANTOM-CALL", "error", step.name, project,
+                    f"step references techniques absent from brain-methods.csv: {', '.join(phantom)}")]
+
+
+def run_text_invariants(csv_path: Path, step_paths: list[Path], project: str) -> list[Finding]:
+    """Run the three brain text invariants. ALONGSIDE run_invariants (byte/git),
+    never replacing it. Fail-open on a missing CSV (nothing to reconcile against)."""
+    if not csv_path.exists():
+        return []
+    facts = csv_parse(csv_path)
+    findings: list[Finding] = []
+    for sp in step_paths:
+        if not sp.exists():
+            continue
+        step = step_parse(sp)
+        findings += inv_brain_cols(step, facts, project)
+        findings += inv_count_recon(step, facts, project)
+        findings += inv_phantom_call(step, facts, project)
+    return findings
+
+
+# Versioned golden reference shipped with the tool; rebuild when BMAD_VERSION bumps.
+GOLDEN_BRAIN_DIR = Path(__file__).resolve().parent / "golden" / "brain"
+
+
+def golden_gate(version: str, golden_root: Path | None = None) -> tuple[bool, str]:
+    """The "ТЕСТ" button: run the canary on a pinned pair whose answer is known
+    (sick→RED, healthy→GREEN) BEFORE trusting it on live files. Version-pinned:
+    a BMAD bump must rebuild the fixture, else the golden lies silently (stress #25)."""
+    base = (golden_root or GOLDEN_BRAIN_DIR) / version
+    vfile = base / "VERSION"
+    if not base.is_dir() or not vfile.exists():
+        return False, f"no golden fixture for BMAD {version}"
+    if vfile.read_text(encoding="utf-8").strip() != version:
+        return False, f"golden VERSION pin mismatch at {vfile}"
+    csv_path = base / "brain-methods.csv"
+    sick = sorted((base / "sick").glob("step-02*.md"))
+    healthy = sorted((base / "healthy").glob("step-02*.md"))
+    if not (csv_path.exists() and sick and healthy):
+        return False, f"golden fixture incomplete under {base}"
+    sick_findings = run_text_invariants(csv_path, sick, "golden-sick")
+    healthy_findings = run_text_invariants(csv_path, healthy, "golden-healthy")
+    if not sick_findings:
+        return False, "canary SILENT on sick golden (false-green) — parser/invariants broken"
+    if healthy_findings:
+        det = ", ".join(f"{f.inv}@{f.artifact}" for f in healthy_findings)
+        return False, f"canary FIRES on healthy golden (false-red): {det}"
+    return True, f"ok ({len(sick_findings)} sick findings, 0 healthy)"
 
 
 # ----------------------------------------------------------------------------
@@ -1360,12 +1463,37 @@ def _exit_code(findings: list[Finding]) -> int:
     return EXIT_OK
 
 
+def _text_canary_enabled(args: argparse.Namespace) -> bool:
+    """OFF by default (canary-armed). Enabled by --text-canary or the disk/env flag
+    BMAD_OVERLAY_TEXT_CANARY (888 convention: code-default fail-open, flag opts in)."""
+    if getattr(args, "text_canary", False):
+        return True
+    return os.environ.get("BMAD_OVERLAY_TEXT_CANARY", "").strip().lower() in {
+        "1", "on", "true", "yes",
+    }
+
+
+def _text_canary_findings(args: argparse.Namespace) -> list[Finding]:
+    ok, reason = golden_gate(BMAD_VERSION)
+    if not ok:
+        # Fail-open: a broken/stale golden must NOT block the byte core. Emit a
+        # visible warn and skip the text invariants (never a false error).
+        return [Finding("INV-GOLDEN-GATE", "warn", "brain-canary", args.canonical,
+                        f"text canary disabled: {reason}")]
+    canon_root = args.root / args.canonical
+    csv_path = canon_root / WATCHED_CSVS[0]
+    step_paths = sorted((canon_root / FORK_SKILL_STEPS).glob("step-02*.md"))
+    return run_text_invariants(csv_path, step_paths, args.canonical)
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     exemptions = load_exempt(args.exempt)
     manifest = build_manifest(
         args.root, args.canonical, args.projects, args.upstream_steps, exemptions
     )
     findings = run_invariants(manifest, args.root, exemptions)
+    if _text_canary_enabled(args):
+        findings += _text_canary_findings(args)
     _report(manifest, findings, args.json)
     return _exit_code(findings)
 
@@ -1642,6 +1770,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exempt", type=Path, default=None, help="path to exempt.yaml")
     p.add_argument("--vault", type=Path, default=DEFAULT_VAULT, help="vault repo path (capture)")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--text-canary", action="store_true",
+                   help="run the brain-methods text canary behind the golden gate (default: off)")
     p.add_argument("--stamp", default="manual", help="backup subdir name (pass a timestamp)")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("check")
