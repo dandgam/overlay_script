@@ -32,11 +32,13 @@ Design rules enforced here (from the hardened plan):
 from __future__ import annotations
 
 import argparse
+import csv
 import difflib
 import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -579,6 +581,97 @@ def run_invariants(
                         )
                     )
     return findings
+
+
+# ----------------------------------------------------------------------------
+# Text canary (Этап 3, СРЕЗ 1) — parsers
+#
+# Deterministic readers of brain-methods.csv (ground truth) and step-02*.md
+# (which DESCRIBE the CSV). They feed three text invariants behind the
+# golden-fixture gate. Parsers come FIRST: a lying parser yields a false-green
+# or false-red canary, so they are golden-tested before any invariant runs.
+# These live ALONGSIDE run_invariants (byte/git) and never replace it.
+# ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CsvFacts:
+    """Ground truth parsed from brain-methods.csv (csv.reader: quote/comma-safe)."""
+
+    columns: tuple[str, ...]          # header columns, e.g. (category, technique_name, description)
+    techniques: int                   # data-row rollup (61 in 6.8.0)
+    categories: int                   # distinct values in the `category` column (10 in 6.8.0)
+    technique_names: frozenset[str]   # exact `technique_name` surface forms
+
+
+def csv_parse(path: Path) -> CsvFacts:
+    """Parse brain-methods.csv into facts. Robust to a trailing newline (empty
+    rows dropped), commas inside quoted cells (51/61 descriptions have them),
+    em-dashes and apostrophes — csv.reader handles all of these natively."""
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = [r for r in csv.reader(fh) if any(cell.strip() for cell in r)]
+    if not rows:
+        return CsvFacts((), 0, 0, frozenset())
+    header = tuple(c.strip() for c in rows[0])
+    data = rows[1:]
+    cat_idx = header.index("category") if "category" in header else 0
+    name_idx = header.index("technique_name") if "technique_name" in header else 1
+    categories = {
+        r[cat_idx].strip() for r in data if len(r) > cat_idx and r[cat_idx].strip()
+    }
+    names = {
+        r[name_idx].strip() for r in data if len(r) > name_idx and r[name_idx].strip()
+    }
+    return CsvFacts(header, len(data), len(categories), frozenset(names))
+
+
+@dataclass(frozen=True)
+class StepFacts:
+    """What a step-02*.md claims about the CSV (parsed deterministically)."""
+
+    name: str                              # basename, for findings
+    parse_columns: tuple[str, ...]         # columns the step says it parses
+    declared_counts: tuple[tuple[int, int], ...]  # (techniques, categories) declarations
+    called_techniques: tuple[str, ...]     # names listed on `Includes:` lines
+
+
+# A column token is a bare lowercase/snake identifier; prose is not a column.
+_COLUMN_TOKEN_RE = re.compile(r"^[a-z][a-z_]*$")
+_PARSE_LINE_RE = re.compile(r"-\s*Parse:\s*(.+)", re.IGNORECASE)
+# "61 techniques across 10 categories" / "36+ Techniques Across 7 Categories".
+_COUNT_RE = re.compile(r"(\d+)\s*\+?\s*techniques?\s+across\s+(\d+)\s+categor", re.IGNORECASE)
+_INCLUDES_RE = re.compile(r"Includes:\s*(.+)")
+# Cut the Parse line at the first spaced dash (em/en/hyphen). The fork writes
+# "category, technique_name, description — these are the ONLY 3 columns…"; splitting
+# the whole line on commas would mint a phantom column from the trailing prose.
+# This is the spec §3 fix: the old anchor-regex dropped 40/53 lines of intent.
+_PARSE_DASH_CUT_RE = re.compile(r"\s[—–-]\s")
+
+
+def _extract_columns(tail: str) -> tuple[str, ...]:
+    head = _PARSE_DASH_CUT_RE.split(tail, maxsplit=1)[0]
+    cols = (c.strip().strip("`") for c in head.split(","))
+    return tuple(c for c in cols if _COLUMN_TOKEN_RE.match(c))
+
+
+def step_parse(path: Path) -> StepFacts:
+    """Parse a step-02*.md into the three signals the canary reconciles vs CSV."""
+    text = path.read_text(encoding="utf-8")
+    parse_columns: tuple[str, ...] = ()
+    declared: list[tuple[int, int]] = []
+    called: list[str] = []
+    for line in text.splitlines():
+        if not parse_columns:
+            pm = _PARSE_LINE_RE.search(line)
+            if pm:
+                parse_columns = _extract_columns(pm.group(1))
+        cm = _COUNT_RE.search(line)
+        if cm:
+            declared.append((int(cm.group(1)), int(cm.group(2))))
+        im = _INCLUDES_RE.search(line)
+        if im:
+            called.extend(c.strip() for c in im.group(1).split(",") if c.strip())
+    return StepFacts(path.name, parse_columns, tuple(declared), tuple(called))
 
 
 # ----------------------------------------------------------------------------
