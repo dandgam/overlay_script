@@ -195,3 +195,96 @@ def test_text_canary_flag_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BMAD_OVERLAY_TEXT_CANARY", "on")
     args = osync.build_parser().parse_args(["check"])
     assert osync._text_canary_enabled(args) is True
+
+
+# === 5. HARDENING (from adversarial review) ================================
+
+
+def test_count_recon_tolerates_phrasing_drift(tmp_path: Path) -> None:
+    """INV-COUNT-RECON must catch a count lie regardless of connector/adjective/noun
+    phrasing — coupling to the literal 'across N categor' template was a false-green."""
+    facts = osync.csv_parse(GOLDEN / "brain-methods.csv")  # 61/10
+    for phrasing in (
+        "- CSV contains 36 techniques in 7 categories",
+        "- 36 methods spanning 7 categories",
+        "- 36 techniques across 7 distinct categories",
+    ):
+        step = osync.step_parse(_write(tmp_path / "s.md", phrasing + "\n"))
+        assert step.declared_counts == ((36, 7),), phrasing
+        assert osync.inv_count_recon(step, facts, "t"), f"missed lie: {phrasing}"
+    truthful = osync.step_parse(_write(tmp_path / "ok.md", "- 61 techniques in 10 categories\n"))
+    assert osync.inv_count_recon(truthful, facts, "t") == []
+
+
+def test_count_recon_ignores_per_category_lines(tmp_path: Path) -> None:
+    # "[2] Deep (8 techniques)" has a technique count but no category count -> not a
+    # declaration; it must not manufacture a phantom (8, ?) finding.
+    step = osync.step_parse(_write(tmp_path / "s.md", "**[2] Deep** (8 techniques)\n"))
+    assert step.declared_counts == ()
+
+
+def test_brain_cols_catches_non_snake_phantom(tmp_path: Path) -> None:
+    facts = osync.csv_parse(GOLDEN / "brain-methods.csv")
+    for phantom in ("energyLevel", "energy-level", "prompts2"):
+        line = f"- Parse: category, technique_name, description, {phantom}\n"
+        step = osync.step_parse(_write(tmp_path / "s.md", line))
+        assert phantom in step.parse_columns, phantom
+        assert osync.inv_brain_cols(step, facts, "t"), f"missed phantom: {phantom}"
+
+
+def test_extract_columns_union_across_all_parse_lines(tmp_path: Path) -> None:
+    text = (
+        "- Parse: category, technique_name, description\n"
+        "intervening text\n"
+        "- Parse: category, technique_name, description, sneaky_col\n"
+    )
+    step = osync.step_parse(_write(tmp_path / "s.md", text))
+    assert "sneaky_col" in step.parse_columns  # a later lying Parse line is not hidden
+
+
+def test_phantom_call_curly_apostrophe_not_false_red() -> None:
+    facts = osync.csv_parse(GOLDEN / "brain-methods.csv")
+    assert "Nature's Solutions" in facts.technique_names
+    assert osync._call_is_known("Nature’s Solutions", facts)  # curly apostrophe folded
+
+
+def test_includes_anchored_to_bullet_not_prose(tmp_path: Path) -> None:
+    facts = osync.csv_parse(GOLDEN / "brain-methods.csv")
+    prose = "This phase Includes: thinking, talking, and reviewing with the user.\n"
+    step = osync.step_parse(_write(tmp_path / "s.md", prose))
+    assert step.called_techniques == ()
+    assert osync.inv_phantom_call(step, facts, "t") == []
+
+
+def test_golden_gate_requires_every_invariant_on_sick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-invariant vacuity guard: if one invariant silently breaks, the gate must
+    refuse — not pass on the strength of the other two (findings #9/#10)."""
+    monkeypatch.setattr(osync, "inv_phantom_call", lambda step, facts, project: [])
+    ok, reason = osync.golden_gate("6.8.0")
+    assert not ok
+    assert "INV-PHANTOM-CALL" in reason and "missing" in reason
+
+
+def test_meta_proof_count_recon_mutation(tmp_path: Path) -> None:
+    """Gate-level meta-proof for INV-COUNT-RECON (mirrors the 4th-column proof)."""
+    root = _clone_golden(tmp_path)
+    step = root / "6.8.0" / "healthy" / "step-02a-user-selected.md"
+    original = step.read_text(encoding="utf-8")
+    step.write_text(original + "\n- Now 61 techniques across 9 categories\n", encoding="utf-8")
+    ok, reason = osync.golden_gate("6.8.0", golden_root=root)
+    assert not ok and "false-red" in reason
+    step.write_text(original, encoding="utf-8")
+    assert osync.golden_gate("6.8.0", golden_root=root)[0]
+
+
+def test_meta_proof_phantom_call_mutation(tmp_path: Path) -> None:
+    """Gate-level meta-proof for INV-PHANTOM-CALL."""
+    root = _clone_golden(tmp_path)
+    step = root / "6.8.0" / "healthy" / "step-02a-user-selected.md"
+    original = step.read_text(encoding="utf-8")
+    step.write_text(original + "\n- Includes: Ghost Technique That Does Not Exist\n",
+                    encoding="utf-8")
+    ok, reason = osync.golden_gate("6.8.0", golden_root=root)
+    assert not ok and "false-red" in reason
+    step.write_text(original, encoding="utf-8")
+    assert osync.golden_gate("6.8.0", golden_root=root)[0]

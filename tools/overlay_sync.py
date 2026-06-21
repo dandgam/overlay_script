@@ -635,17 +635,29 @@ class StepFacts:
     called_techniques: tuple[str, ...]     # names listed on `Includes:` lines
 
 
-# A column token is a bare lowercase/snake identifier; prose is not a column.
-_COLUMN_TOKEN_RE = re.compile(r"^[a-z][a-z_]*$")
+# A column token is a single identifier-shaped word (camelCase / snake / hyphen /
+# digits all allowed); multi-word prose is NOT a column. Widened from a snake-only
+# rule so a phantom column named e.g. `energyLevel` / `energy-level` is not dropped.
+_COLUMN_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _PARSE_LINE_RE = re.compile(r"-\s*Parse:\s*(.+)", re.IGNORECASE)
-# "61 techniques across 10 categories" / "36+ Techniques Across 7 Categories".
-_COUNT_RE = re.compile(r"(\d+)\s*\+?\s*techniques?\s+across\s+(\d+)\s+categor", re.IGNORECASE)
-_INCLUDES_RE = re.compile(r"Includes:\s*(.+)")
-# Cut the Parse line at the first spaced dash (em/en/hyphen). The fork writes
+# Count declaration, tolerant of phrasing drift across BMAD versions: technique count
+# ("61 techniques" / "36 methods") and category count ("10 categories" / "in 7
+# categories" / "across 7 distinct categories") are matched INDEPENDENTLY on one line
+# — coupling to the literal "...across N categor" template was a false-green risk.
+_COUNT_TECH_RE = re.compile(r"(\d+)\s*\+?\s*(?:techniques?|methods?)\b", re.IGNORECASE)
+# Intervening words are ALPHA-only so the category number is the one nearest
+# "categor" (e.g. in "61 techniques across 10 categories" we must capture 10, not
+# 61 — a \w+ gap would skip the digit 10 and wrongly grab 61).
+_COUNT_CAT_RE = re.compile(r"(\d+)\s+(?:[A-Za-z]+\s+){0,2}categor", re.IGNORECASE)
+# Only the list-bullet form, mirroring _PARSE_LINE_RE — a mid-prose "Includes:" must
+# not harvest sentence words as phantom techniques (false-red).
+_INCLUDES_RE = re.compile(r"^\s*[-*]\s*Includes:\s*(.+)", re.IGNORECASE)
+# Cut the Parse line at the first spaced em/en-dash. The fork writes
 # "category, technique_name, description — these are the ONLY 3 columns…"; splitting
 # the whole line on commas would mint a phantom column from the trailing prose.
-# This is the spec §3 fix: the old anchor-regex dropped 40/53 lines of intent.
-_PARSE_DASH_CUT_RE = re.compile(r"\s[—–-]\s")
+# This is the spec §3 fix. Bare hyphen is excluded: a real column list may contain
+# " - " and cutting there would hide trailing (phantom) columns.
+_PARSE_DASH_CUT_RE = re.compile(r"\s[—–]\s")
 
 
 def _extract_columns(tail: str) -> tuple[str, ...]:
@@ -657,21 +669,23 @@ def _extract_columns(tail: str) -> tuple[str, ...]:
 def step_parse(path: Path) -> StepFacts:
     """Parse a step-02*.md into the three signals the canary reconciles vs CSV."""
     text = path.read_text(encoding="utf-8")
-    parse_columns: tuple[str, ...] = ()
-    declared: list[tuple[int, int]] = []
+    cols: list[str] = []  # union across ALL Parse lines (a decoy-clean first line
+    declared: list[tuple[int, int]] = []  # must not hide a later lying one)
     called: list[str] = []
     for line in text.splitlines():
-        if not parse_columns:
-            pm = _PARSE_LINE_RE.search(line)
-            if pm:
-                parse_columns = _extract_columns(pm.group(1))
-        cm = _COUNT_RE.search(line)
-        if cm:
-            declared.append((int(cm.group(1)), int(cm.group(2))))
+        pm = _PARSE_LINE_RE.search(line)
+        if pm:
+            for c in _extract_columns(pm.group(1)):
+                if c not in cols:
+                    cols.append(c)
+        tm = _COUNT_TECH_RE.search(line)
+        cm = _COUNT_CAT_RE.search(line)
+        if tm and cm:
+            declared.append((int(tm.group(1)), int(cm.group(1))))
         im = _INCLUDES_RE.search(line)
         if im:
             called.extend(c.strip() for c in im.group(1).split(",") if c.strip())
-    return StepFacts(path.name, parse_columns, tuple(declared), tuple(called))
+    return StepFacts(path.name, tuple(cols), tuple(declared), tuple(called))
 
 
 # ----------------------------------------------------------------------------
@@ -693,11 +707,19 @@ BRAIN_CALL_ALIASES: dict[str, str] = {
 }
 
 
+def _norm_apostrophe(s: str) -> str:
+    """Fold curly quotes to straight so "Nature’s" matches CSV "Nature's" (false-red
+    guard): a re-vendor may typeset apostrophes differently than the CSV."""
+    return s.replace("’", "'").replace("‘", "'")
+
+
 def _call_is_known(name: str, facts: CsvFacts) -> bool:
-    if name in facts.technique_names:
+    csv_norm = {_norm_apostrophe(n) for n in facts.technique_names}
+    norm = _norm_apostrophe(name)
+    if norm in csv_norm:
         return True
-    target = BRAIN_CALL_ALIASES.get(name)
-    return target is not None and target in facts.technique_names
+    target = BRAIN_CALL_ALIASES.get(name) or BRAIN_CALL_ALIASES.get(norm)
+    return target is not None and _norm_apostrophe(target) in csv_norm
 
 
 def inv_brain_cols(step: StepFacts, facts: CsvFacts, project: str) -> list[Finding]:
@@ -769,12 +791,21 @@ def golden_gate(version: str, golden_root: Path | None = None) -> tuple[bool, st
         return False, f"golden fixture incomplete under {base}"
     sick_findings = run_text_invariants(csv_path, sick, "golden-sick")
     healthy_findings = run_text_invariants(csv_path, healthy, "golden-healthy")
-    if not sick_findings:
-        return False, "canary SILENT on sick golden (false-green) — parser/invariants broken"
+    # Per-invariant discrimination: EVERY promised invariant must earn its keep on
+    # the sick pair. A mere "something fired" check would pass even if one invariant
+    # silently broke (e.g. a fuzzy-match regression in INV-PHANTOM-CALL).
+    sick_invs = {f.inv for f in sick_findings}
+    expected = {"INV-BRAIN-COLS", "INV-COUNT-RECON", "INV-PHANTOM-CALL"}
+    if sick_invs != expected:
+        missing = sorted(expected - sick_invs)
+        return False, (
+            "sick golden must exercise every invariant (false-green guard): "
+            f"missing {missing or 'none'}, got {sorted(sick_invs)}"
+        )
     if healthy_findings:
         det = ", ".join(f"{f.inv}@{f.artifact}" for f in healthy_findings)
         return False, f"canary FIRES on healthy golden (false-red): {det}"
-    return True, f"ok ({len(sick_findings)} sick findings, 0 healthy)"
+    return True, f"ok ({len(sick_findings)} sick findings across {len(expected)} invariants, 0 healthy)"
 
 
 # ----------------------------------------------------------------------------
@@ -1464,8 +1495,8 @@ def _exit_code(findings: list[Finding]) -> int:
 
 
 def _text_canary_enabled(args: argparse.Namespace) -> bool:
-    """OFF by default (canary-armed). Enabled by --text-canary or the disk/env flag
-    BMAD_OVERLAY_TEXT_CANARY (888 convention: code-default fail-open, flag opts in)."""
+    """OFF by default (canary-armed). Enabled by --text-canary or the env flag
+    BMAD_OVERLAY_TEXT_CANARY (code-default fail-open, flag opts in)."""
     if getattr(args, "text_canary", False):
         return True
     return os.environ.get("BMAD_OVERLAY_TEXT_CANARY", "").strip().lower() in {
