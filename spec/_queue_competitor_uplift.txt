@@ -1,0 +1,7 @@
+spec/spec_competitor_quickwins.md
+spec/spec_dual_source_verdict.md
+spec/spec_policy_snapshot_marker.md
+spec/spec_operator_first_class_modes.md
+spec/spec_verifier_contracts.md
+spec/spec_adversarial_review_bundled.md
+spec/spec_step_file_runtime_architecture.md

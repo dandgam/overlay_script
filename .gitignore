@@ -32,6 +32,13 @@ env/
 .claude/bmad-bot.log
 .claude/bmad-stub.log
 
+# Worker/persona runtime артефакты (логи/pid/prompt/out — генерируются воркерами)
+.claude/*.log
+.claude/*.pid
+.claude/*.prompt
+.claude/*.logpath
+.claude/*.out
+
 # State snapshots для rollback (per-session, не коммитим)
 .claude/state/
 
@@ -71,3 +78,4 @@ _config/projects/
 evals/.worktrees-eval/
 evals/results-*.json
 evals/baseline/
+htmls/quality-scan/
