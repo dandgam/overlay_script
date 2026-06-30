@@ -3,3 +3,7 @@ projects:
     bmad_layout: bmm-v6
     path: /home/server/Antares
     sandbox_overrides: {}
+  bmad-cmp:
+    bmad_layout: bmm-v6
+    path: /tmp/bmad-cmp
+    sandbox_overrides: {}

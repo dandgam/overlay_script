@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Точки-события: git → GitHub → деплой</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#151b23;
+    --ink:#e6edf3; --dim:#9aa4af; --faint:#6b7480; --line:#252e3a;
+    --gate:#f0883e; --gate-bd:rgba(240,136,62,.55);
+    --obs:#56b6c2; --obs-bd:rgba(86,182,194,.50);
+    --bridge:#bc8cff; --bridge-bg:rgba(188,140,255,.10);
+    --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.4;
+    -webkit-font-smoothing:antialiased;padding:26px 18px 40px}
+  .wrap{max-width:1080px;margin:0 auto}
+
+  /* header */
+  .head{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:18px}
+  .title{font-family:var(--mono);font-size:22px;font-weight:700;letter-spacing:-.5px;
+    display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .title .arr{color:var(--faint);font-weight:400}
+  .sub{color:var(--dim);font-size:12.5px;margin-top:6px;max-width:780px}
+  .sub b{color:var(--gate);font-weight:600}
+  .sub i{color:var(--obs);font-style:normal;font-weight:600}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;font-size:11.5px}
+  .lg{display:flex;align-items:center;gap:7px;color:var(--dim)}
+  .lg .mk{font-size:11px;line-height:1}
+  .lg b{font-family:var(--mono);font-weight:700;font-size:11px}
+  .gate .mk,.gate b{color:var(--gate)}
+  .obs .mk,.obs b{color:var(--obs)}
+  .brg .mk,.brg b{color:var(--bridge)}
+
+  /* table */
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:9px}
+  table{border-collapse:collapse;width:100%;min-width:720px;font-size:11.5px}
+  thead th{
+    position:sticky;top:0;background:#11161d;color:var(--faint);
+    font-size:10px;letter-spacing:1.1px;text-transform:uppercase;font-weight:700;
+    text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap;z-index:2
+  }
+  tbody td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+
+  /* zone band rows */
+  tr.zone th{
+    text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);
+    font-size:12px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase
+  }
+  tr.zone .tag{color:var(--faint);font-weight:500;letter-spacing:.4px;font-size:10.5px;text-transform:none;margin-left:8px}
+  tr.zone .dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:9px;vertical-align:middle}
+  tr.zone-local th{background:rgba(240,136,62,.07)} tr.zone-local .dot{background:var(--gate)}
+  tr.zone-gh th{background:rgba(86,182,194,.06)} tr.zone-gh .dot{background:var(--obs)}
+
+  /* phase sub-header rows */
+  tr.phase td{
+    background:#10151c;padding:6px 12px;border-bottom:1px solid var(--line);
+    font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--faint);font-weight:600
+  }
+  tr.phase .opt{color:var(--bridge);letter-spacing:.3px;text-transform:none;font-weight:500}
+
+  /* bridge row */
+  tr.bridge td{
+    background:var(--bridge-bg);border-top:1px dashed var(--bridge);border-bottom:1px dashed var(--bridge);
+    padding:11px 14px
+  }
+  .bridge-in{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .bridge-in .bcode{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--bridge);white-space:nowrap}
+  .bridge-in .bflow{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink);font-weight:600}
+  .bridge-in .bflow .x{color:var(--bridge);font-size:14px}
+  .bridge-in .bnote{font-size:10.5px;color:var(--dim);margin-left:auto}
+
+  /* data cells */
+  td.c-ev{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--ink);
+    letter-spacing:-.2px;white-space:nowrap;width:1%}
+  td.c-type{white-space:nowrap;width:1%;font-family:var(--mono);font-size:10.5px;font-weight:700}
+  td.c-type .mk{font-size:10px;margin-right:4px}
+  td.c-when{color:var(--dim);min-width:180px}
+  td.c-what{color:var(--dim);min-width:230px}
+  td.c-what .stop{color:var(--gate);font-weight:600}
+
+  tbody tr.row:hover td{background:rgba(255,255,255,.02)}
+  tr.g td.c-ev{border-left:3px solid var(--gate-bd)}
+  tr.o td.c-ev{border-left:3px solid var(--obs-bd)}
+  tr.g td.c-type{color:var(--gate)}
+  tr.o td.c-type{color:var(--obs)}
+  tbody tr:last-child td{border-bottom:none}
+
+  /* footer */
+  .foot{margin-top:22px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .fcard{background:#1a212b;border:1px solid var(--line);border-radius:8px;padding:11px 13px}
+  .fcard h4{font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--faint);margin-bottom:6px;font-weight:700}
+  .fcard p{font-size:11.5px;color:var(--dim);line-height:1.5}
+  .fcard p code{font-family:var(--mono);color:var(--ink);font-size:11px}
+  .fcard i{font-style:normal}
+  .fcard .hl-g{color:var(--gate);font-weight:600}
+  .fcard .hl-o{color:var(--obs);font-weight:600}
+
+  @media (max-width:560px){
+    .foot{grid-template-columns:1fr}
+    .title{font-size:19px}
+    .bridge-in .bnote{margin-left:0;width:100%}
+  }
+  @media print{
+    body{background:#fff;color:#111;padding:0}
+    .tablewrap,.fcard{border-color:#ccc}
+    thead th{background:#f3f3f3;color:#555}
+    tr.zone-local th{background:#fdf3ec} tr.zone-gh th{background:#eef7f8}
+    tr.phase td{background:#f6f6f6} tr.bridge td{background:#faf5ff}
+    td.c-ev,.fcard p code,.bridge-in .bflow{color:#111}
+    td.c-when,td.c-what,.sub,.fcard p{color:#444}
+    .fcard{background:#fff}
+    tbody tr.row:hover td{background:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <div class="title">git&nbsp;hooks <span class="arr">→</span> GitHub&nbsp;workflows <span class="arr">→</span> деплой</div>
+    <p class="sub">Все точки-события от первого касания файлов до прода. Везде одна парадигма «событие → действие». <b>pre-</b> = гейт, срабатывает <i>до</i> и может заблокировать (exit≠0 останавливает). <b>post-</b> = обсервер, срабатывает после и только реагирует.</p>
+    <div class="legend">
+      <span class="lg gate"><span class="mk">◆</span><b>ГЕЙТ</b> — pre-, блокирует</span>
+      <span class="lg obs"><span class="mk">◇</span><b>ОБСЕРВЕР</b> — post-, реагирует</span>
+      <span class="lg brg"><span class="mk">┃</span><b>git&nbsp;push</b> — мост: локально → облако</span>
+    </div>
+  </header>
+
+  <div class="tablewrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Событие</th>
+        <th>Тип</th>
+        <th>Когда срабатывает</th>
+        <th>Что вешают / зачем</th>
+      </tr>
+    </thead>
+    <tbody>
+
+      <!-- ЛОКАЛЬНО -->
+      <tr class="zone zone-local"><th colspan="4"><span class="dot"></span>Локально<span class="tag">твоя машина · хуки в .git/hooks или core.hooksPath</span></th></tr>
+
+      <tr class="phase"><td colspan="4">① ветка / worktree</td></tr>
+      <tr class="row o"><td class="c-ev">post-checkout</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">после switch / создания worktree — файлы на диске</td><td class="c-what">настроить окружение под ветку</td></tr>
+
+      <tr class="phase"><td colspan="4">② коммит</td></tr>
+      <tr class="row g"><td class="c-ev">pre-commit</td><td class="c-type"><span class="mk">◆</span>ГЕЙТ</td><td class="c-when">перед рождением коммита</td><td class="c-what">быстрые тесты, линтер, секреты. <span class="stop">Упало → коммита нет</span></td></tr>
+      <tr class="row o"><td class="c-ev">prepare-commit-msg</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">перед редактором сообщения</td><td class="c-what">подставить шаблон / префикс в сообщение</td></tr>
+      <tr class="row g"><td class="c-ev">commit-msg</td><td class="c-type"><span class="mk">◆</span>ГЕЙТ</td><td class="c-when">перед фиксацией коммита</td><td class="c-what">проверка формата сообщения. <span class="stop">Упало → отказ</span></td></tr>
+      <tr class="row o"><td class="c-ev">post-commit</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">коммит создан</td><td class="c-what">уведомление, лог</td></tr>
+
+      <tr class="phase"><td colspan="4">③ локальный merge <span class="opt">если мерджишь ветки на машине</span></td></tr>
+      <tr class="row g"><td class="c-ev">pre-merge-commit</td><td class="c-type"><span class="mk">◆</span>ГЕЙТ</td><td class="c-when">перед merge-коммитом</td><td class="c-what">тесты на результате слияния. <span class="stop">Упало → отказ</span></td></tr>
+      <tr class="row o"><td class="c-ev">post-merge</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">merge завершён</td><td class="c-what">пересобрать, обновить зависимости</td></tr>
+
+      <tr class="phase"><td colspan="4">④ push</td></tr>
+      <tr class="row g"><td class="c-ev">pre-push</td><td class="c-type"><span class="mk">◆</span>ГЕЙТ</td><td class="c-when">перед отправкой на удалёнку</td><td class="c-what">тяжёлые тесты. <span class="stop">Упало → push не уходит</span></td></tr>
+
+      <!-- МОСТ -->
+      <tr class="bridge"><td colspan="4"><div class="bridge-in"><span class="bcode">git&nbsp;push</span><span class="bflow">локально <span class="x">→</span> облако</span><span class="bnote">код покидает машину и появляется на GitHub · граница «твой комп ↔ удалёнка»</span></div></td></tr>
+
+      <tr class="phase"><td colspan="4">⑤ свой git-сервер <span class="opt">опционально · только push-to-deploy на свой bare-репо вместо GitHub</span></td></tr>
+      <tr class="row g"><td class="c-ev">pre-receive</td><td class="c-type"><span class="mk">◆</span>ГЕЙТ</td><td class="c-when">сервер принял push, до записи</td><td class="c-what">политика на весь push. Отказ</td></tr>
+      <tr class="row g"><td class="c-ev">update</td><td class="c-type"><span class="mk">◆</span>ГЕЙТ</td><td class="c-when">на каждую обновляемую ветку</td><td class="c-what">правила по конкретной ветке</td></tr>
+      <tr class="row o"><td class="c-ev">post-receive</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">push принят сервером</td><td class="c-what">собрать + рестарт сервиса (это и есть деплой)</td></tr>
+
+      <!-- GITHUB -->
+      <tr class="zone zone-gh"><th colspan="4"><span class="dot"></span>GitHub<span class="tag">оркестратор читает .github/workflows/*.yml по событию · раннер выполняет</span></th></tr>
+
+      <tr class="phase"><td colspan="4">⑥ после push</td></tr>
+      <tr class="row o"><td class="c-ev">on: push</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">push дошёл до GitHub</td><td class="c-what">CI: lint + типы + все тесты на чистом раннере</td></tr>
+      <tr class="row o"><td class="c-ev">on: pull_request</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">PR открыт / обновлён пушем</td><td class="c-what">CI на PR, авто-ревью Claude Code Action</td></tr>
+
+      <tr class="phase"><td colspan="4">⑦ ревью и merge-гейт</td></tr>
+      <tr class="row o"><td class="c-ev">on: issue_comment</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">коммент в PR / issue</td><td class="c-what">триггер <code style="font-family:var(--mono);color:var(--ink)">@claude</code> (ревью / правка по запросу)</td></tr>
+      <tr class="row o"><td class="c-ev">on: pull_request_review</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">ревьювер отправил ревью</td><td class="c-what">реакция на аппрув / реджект</td></tr>
+      <tr class="row g"><td class="c-ev">branch protection</td><td class="c-type"><span class="mk">◆</span>ГЕЙТ</td><td class="c-when">попытка нажать Merge в main</td><td class="c-what"><span class="stop">блок, пока CI не зелёный + нет аппрува.</span> Главный merge-гейт</td></tr>
+      <tr class="row o"><td class="c-ev">on: merge_group</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">элемент попал в merge queue</td><td class="c-what">финальный прогон перед автомерджем</td></tr>
+
+      <tr class="phase"><td colspan="4">⑧ после merge → CD → прод</td></tr>
+      <tr class="row o"><td class="c-ev">on: push (main)</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">merge влил → снова push, но в main</td><td class="c-what">сборка артефакта, скан</td></tr>
+      <tr class="row o"><td class="c-ev">on: release</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">опубликован тег / релиз</td><td class="c-what">деплой на staging / прод</td></tr>
+      <tr class="row o"><td class="c-ev">on: workflow_dispatch</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">кнопка «Run workflow» вручную</td><td class="c-what">осознанный деплой нажатием</td></tr>
+      <tr class="row o"><td class="c-ev">on: schedule (cron)</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">по таймеру, ночью</td><td class="c-what">nightly: тяжёлые E2E / нагрузка</td></tr>
+      <tr class="row o"><td class="c-ev">on: deployment_status</td><td class="c-type"><span class="mk">◇</span>обс</td><td class="c-when">статус деплоя изменился</td><td class="c-what">оповещение, авто-откат при сбое</td></tr>
+
+    </tbody>
+  </table>
+  </div>
+
+  <div class="foot">
+    <div class="fcard">
+      <h4>асимметрия гейтов</h4>
+      <p>Слева гейтов <span class="hl-g">много</span> — это <code>pre-*</code> хуки на твоей машине. Справа гейт по сути <span class="hl-g">один</span> — <code>branch protection</code>. Почти все GitHub-события — <span class="hl-o">обсерверы</span>: они <i>запускают</i> раннер, а блокировку даёт exit-код <i>внутри</i> него или защита ветки, а не само событие.</p>
+    </div>
+    <div class="fcard">
+      <h4>третий этаж той же парадигмы</h4>
+      <p>Claude Code hooks — <code>PreToolUse</code> / <code>PostToolUse</code> / <code>Stop</code> / <code>SubagentStop</code> — это события <i style="color:var(--ink);font-weight:600">агента</i>, отдельная система от git-хуков и workflow. Та же логика «событие → действие», но git-хук ловит git-операцию, а Claude-хук — действие агента. Не смешивать.</p>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
