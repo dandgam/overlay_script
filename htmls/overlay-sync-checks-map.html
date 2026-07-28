@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>overlay_sync — шпаргалка: команды × проверки</title>
+<style>
+  :root {
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --hairline:  #e1e0d9;
+    --ring:      rgba(11,11,11,0.10);
+    --good:      #0ca30c;   /* есть */
+    --good-bg:   #e8f6e8;
+    --flag:      #b47708;   /* за флагом (тёмный шаг warning для читаемости текста) */
+    --flag-bg:   #fdf3dc;
+    --plan:      #2a78d6;   /* планируется */
+    --plan-bg:   #e5effb;
+    --absent:    #52514e;   /* специально НЕТ */
+    --absent-bg: #f0efec;
+    --crit:      #d03b3b;
+    --blk:       #4a3aa7;   /* общий блок Б1..Б8 */
+    --blk-bg:    #eae7f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page:      #0d0d0d;
+      --surface:   #1a1a19;
+      --ink:       #ffffff;
+      --ink-2:     #c3c2b7;
+      --muted:     #898781;
+      --hairline:  #2c2c2a;
+      --ring:      rgba(255,255,255,0.10);
+      --good:      #0ca30c;  --good-bg:   #12300f;
+      --flag:      #fab219;  --flag-bg:   #3a2d07;
+      --plan:      #3987e5;  --plan-bg:   #10233c;
+      --absent:    #c3c2b7;  --absent-bg: #262624;
+      --crit:      #e66767;
+      --blk:       #9085e9;  --blk-bg:    #262045;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--page); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1280px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 36px 0 10px; padding-top: 14px; border-top: 1px solid var(--hairline); }
+  h3 { font-size: 14px; margin: 18px 0 6px; color: var(--ink-2); }
+  .sub { color: var(--ink-2); margin: 0 0 18px; }
+  code, .ln {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 12.5px; background: var(--absent-bg);
+    padding: 0 4px; border-radius: 3px; white-space: nowrap;
+  }
+  .ln { color: var(--muted); background: none; padding: 0; }
+  .card {
+    background: var(--surface); border: 1px solid var(--ring);
+    border-radius: 10px; padding: 16px 18px; margin: 12px 0;
+  }
+  /* ---------- легенда ---------- */
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .b-yes  { color: var(--good); background: var(--good-bg);  border-color: var(--good); }
+  .b-flag { color: var(--flag); background: var(--flag-bg);  border-color: var(--flag); }
+  .b-no   { color: var(--absent); background: var(--absent-bg); border-color: var(--muted); }
+  .b-plan { color: var(--plan); background: var(--plan-bg);  border-color: var(--plan); }
+  .b-na   { color: var(--muted); }
+  /* ---------- конвейер ---------- */
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 10px 0; }
+  .step {
+    background: var(--surface); border: 1.5px solid var(--ink-2);
+    border-radius: 8px; padding: 6px 12px; text-align: center; line-height: 1.25;
+  }
+  .step b { display: block; font-size: 13.5px; }
+  .step small { color: var(--ink-2); font-size: 11.5px; }
+  .step.ro { border-style: dashed; }
+  .step.future { border-color: var(--plan); color: var(--plan); }
+  .step.future small { color: var(--plan); }
+  .arrow { color: var(--muted); font-size: 18px; padding: 0 2px; }
+  .lane-label { width: 100%; font-size: 12px; font-weight: 700; color: var(--muted);
+                text-transform: uppercase; letter-spacing: .04em; margin-top: 8px; }
+  /* ---------- матрица ---------- */
+  .matrix-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { border: 1px solid var(--hairline); padding: 5px 8px; text-align: center; vertical-align: middle; }
+  th { background: var(--absent-bg); font-size: 12px; }
+  thead th { position: sticky; top: 0; z-index: 2; }
+  td.rowhead, th.rowhead { text-align: left; min-width: 260px; background: var(--surface); font-size: 12.5px; }
+  tr.group td {
+    text-align: left; background: var(--absent-bg); font-weight: 700; font-size: 12.5px;
+    border-top: 2px solid var(--muted);
+  }
+  td .badge { font-size: 11px; padding: 1px 6px; }
+  td sup { color: var(--crit); font-weight: 700; }
+  th.future-col, td.future-col { border-left: 2px solid var(--plan); }
+  .dash { color: var(--muted); }
+  /* ---------- reuse-карта ---------- */
+  .fn-row { display: grid; grid-template-columns: 300px 24px 1fr; gap: 8px; align-items: start;
+            padding: 8px 0; border-bottom: 1px solid var(--hairline); }
+  .fn-row:last-child { border-bottom: none; }
+  .fn-name { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; font-weight: 600; }
+  .fn-name small { display: block; font-family: system-ui, sans-serif; font-weight: 400; color: var(--ink-2); }
+  .fn-users { display: flex; flex-wrap: wrap; gap: 6px; }
+  /* ---------- карточки команд ---------- */
+  .cmd-card { background: var(--surface); border: 1.5px solid var(--ink-2); border-radius: 10px;
+              padding: 12px 16px; margin: 12px 0; }
+  .cmd-card.ro { border-style: dashed; }
+  .cmd-card.future { border-color: var(--plan); }
+  .cmd-title { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .cmd-title b { font-size: 15.5px; }
+  .cmd-title .ln { font-size: 12px; }
+  .cmd-steps { display: flex; flex-direction: column; gap: 5px; }
+  .stepline { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .also { color: var(--muted); font-size: 11px; margin-left: auto; white-space: nowrap; }
+  .cmd-flags { color: var(--ink-2); font-size: 12px; margin: -2px 0 8px; }
+  .stepno { color: var(--muted); min-width: 20px; text-align: right;
+            font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px;
+          font-weight: 700; white-space: nowrap; border: 1px solid transparent; }
+  .chip-b   { color: var(--blk); background: var(--blk-bg); border-color: var(--blk); }
+  .chip-own { color: var(--absent); background: var(--absent-bg); border-color: var(--muted); }
+  .chip-flag{ color: var(--flag); background: var(--flag-bg); border-color: var(--flag); }
+  .chip-fut { color: var(--plan); background: var(--plan-bg); border-color: var(--plan); }
+  .cmd-take { margin: 8px 0 0; padding-top: 6px; border-top: 1px dashed var(--hairline);
+              color: var(--ink-2); font-size: 12.5px; }
+  table.lib th, table.lib td { text-align: left; }
+  details.card > summary { cursor: pointer; font-weight: 700; font-size: 15px; }
+  /* ---------- сноски ---------- */
+  ol.notes { padding-left: 22px; }
+  ol.notes li { margin: 7px 0; }
+  ol.notes b { color: var(--crit); }
+  /* ---------- термины ---------- */
+  dl.gloss { display: grid; grid-template-columns: 220px 1fr; gap: 4px 14px; margin: 0; }
+  dl.gloss dt { font-weight: 600; }
+  dl.gloss dd { margin: 0; color: var(--ink-2); }
+  @media print { body { padding: 8px; } .card { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<main>
+
+<h1>overlay_sync — команды × проверки</h1>
+<p class="sub">Шпаргалка по живому коду <code>bmad-orchestrator/tools/overlay_sync.py</code> (1886 строк, BMAD 6.8.0)
+и роадмапу волн (<code>post-iridescent-oasis.md</code> + <code>overlay-sync-cozy-fox.md</code>).
+Все клетки выверены адверсарной проверкой по коду · 2026-07-02.</p>
+
+<div class="card">
+  <div class="legend">
+    <span class="badge b-yes">✔ есть</span><span>проверка встроена, работает всегда</span>
+    <span class="badge b-flag">⚑ за флагом</span><span>есть в коде, включается <code>--text-canary</code> / <code>BMAD_OVERLAY_TEXT_CANARY</code></span>
+    <span class="badge b-no">⊘ спец. НЕТ</span><span>отсутствует <b>осознанно</b> — причина в сноске ¹…⁸</span>
+    <span class="badge b-plan">◌ W0–W4</span><span>планируется (номер волны роадмапа)</span>
+    <span class="b-na">—</span><span>не применимо (команде нечего так проверять)</span>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2>1 · Порядок команд (кто за кем стоит)</h2>
+
+<div class="card">
+  <div class="flow">
+    <span class="lane-label">Сегодня — рутина синхронизации (запускается руками, слева направо)</span>
+    <div class="step ro"><b>menu</b><small>каталог команд</small></div><span class="arrow">─►</span>
+    <div class="step ro"><b>census</b><small>перепись форков</small></div><span class="arrow">─►</span>
+    <div class="step ro"><b>check</b><small>диагноз (дефолт)</small></div><span class="arrow">─►</span>
+    <div class="step"><b>capture</b><small>odyssey → vault</small></div><span class="arrow">─►</span>
+    <div class="step"><b>propagate</b><small>odyssey → проекты<br>внутри: гейт+откат</small></div><span class="arrow">─►</span>
+    <div class="step ro"><b>revalidate</b><small>перепроверка руками</small></div>
+  </div>
+  <div class="flow">
+    <span class="lane-label">Отдельные дороги (по событию, не в рутине)</span>
+    <div class="step"><b>init-project</b><small>vault → новый проект</small></div>
+    <span style="width:24px"></span>
+    <div class="step"><b>post-upgrade</b><small>vault → target после ручного ре-вендора BMAD</small></div>
+  </div>
+  <div class="flow">
+    <span class="lane-label">Будущее (Волна 2) — vendor-sync оборачивает всё в одну воронку</span>
+    <div class="step future"><b>vendor-sync</b><small>fetch + сравнить версии <span class="ln">2.1</span></small></div><span class="arrow">─►</span>
+    <div class="step future"><b>diff</b><small>старый ↔ новый upstream <span class="ln">2.2</span></small></div><span class="arrow">─►</span>
+    <div class="step future"><b>приземление в VAULT</b><small>*.upstream + rebase патчей <span class="ln">2.3</span></small></div><span class="arrow">─►</span>
+    <div class="step"><b>post-upgrade</b><small>как фаза</small></div><span class="arrow">─►</span>
+    <div class="step"><b>propagate</b><small>как фаза</small></div><span class="arrow">─►</span>
+    <div class="step ro"><b>check + канарейка</b><small>как фаза <span class="ln">2.4</span></small></div>
+  </div>
+  <div class="flow">
+    <span class="lane-label">Будущее (Волна 3) — рождение форка</span>
+    <div class="step future"><b>fork-intake</b><small>заявка + агенты-ревьюверы (advisory)</small></div><span class="arrow">─►</span>
+    <div class="step ro"><b>человек: «да»</b><small></small></div><span class="arrow">─►</span>
+    <div class="step"><b>capture</b><small>единственный писатель реестра</small></div>
+  </div>
+  <p class="sub" style="margin:8px 0 0">Пунктирная рамка = read-only (только читает). Сплошная = пишет
+  (у всех пишущих dry-run по умолчанию, запись только с <code>--apply</code>). Синяя = ещё не построено.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>2 · Библиотека общих блоков Б1–Б8 — кирпичи, которые команды берут напрокат</h2>
+<p class="sub">Каждая команда собрана из этих блоков + немного «своего». Заимствование видно по фиолетовому чипу
+<span class="chip chip-b">Б3 байт-судья</span> в карточках ниже: один и тот же чип в двух карточках = одна и та же функция кода.</p>
+
+<div class="card matrix-wrap">
+<table class="lib">
+<thead><tr><th>блок</th><th>функция · строка</th><th>что делает</th><th>кто берёт</th></tr></thead>
+<tbody>
+<tr><td><span class="chip chip-b">Б1 слепок</span></td><td><code>build_manifest</code> <span class="ln">:472</span></td>
+    <td>«сфотографировать диск как есть» — никогда не пишется руками; внутри сам зовёт Б2</td>
+    <td>check · propagate <b>(×2 — до и после записи!)</b> · revalidate</td></tr>
+<tr><td><span class="chip chip-b">Б2 перепись</span></td><td><code>fork_census</code> <span class="ln">:341</span></td>
+    <td>какие step-файлы — форки (3-сторонний диф: диск ↔ upstream ↔ HEAD)</td>
+    <td>census · Б1 (значит check/propagate/revalidate) · capture (<span class="ln">:1014</span>)</td></tr>
+<tr><td><span class="chip chip-b">Б3 байт-судья</span></td><td><code>run_invariants</code> <span class="ln">:507</span></td>
+    <td>3 инварианта: PRESENT (файл есть?) · IDENTICAL (байты совпадают?) · PERSIST (закоммичено в каноне?)</td>
+    <td>check <span class="ln">:1554</span> · propagate-гейт <span class="ln">:1606</span> · revalidate <span class="ln">:1621</span> — трое судят ПО-РАЗНОМУ (сноски ¹ ²)</td></tr>
+<tr><td><span class="chip chip-b">Б4 канарейка</span></td><td><code>golden_gate</code> <span class="ln">:806</span> + <code>run_text_invariants</code> <span class="ln">:780</span></td>
+    <td>смысловая проверка (шаги честно описывают CSV) за самотестом golden-gate; включается флагом</td>
+    <td>check ⚑ <span class="ln">:1546</span> · <span class="chip chip-fut">◌W0.1 capture</span> · <span class="chip chip-fut">◌W2.4 vendor-sync</span></td></tr>
+<tr><td><span class="chip chip-b">Б5 льготы</span></td><td><code>load_exempt</code> <span class="ln">:276</span></td>
+    <td>прочитать exempt.yaml: «этот файл отличается by-design» → warn вместо error</td>
+    <td>check · propagate · revalidate · init-project/post-upgrade (<span class="ln">:1750</span>). <b>НЕ capture</b>⁵ · ◌W1: клон = <code>load_fork_proposals</code></td></tr>
+<tr><td><span class="chip chip-b">Б6 замок-запись</span></td><td><code>git_guard</code> <span class="ln">:214</span> + <code>project_lock</code> <span class="ln">:232</span> + atomic + md5-verify</td>
+    <td>тройка безопасной записи в чужое дерево: дерево чистое? → замок → записать → сверить байты</td>
+    <td>apply_plan (propagate) · apply_install (init-project/post-upgrade) · ◌W2</td></tr>
+<tr><td><span class="chip chip-b">Б7 патч-движок</span></td><td><code>apply_patch_onto</code> <span class="ln">:1259</span> + <code>reconstruct_fork</code> <span class="ln">:1279</span></td>
+    <td>наложить патч с предпроверкой <code>git apply --check</code>; собрать форк из vault (snapshot ИЛИ база+патч)</td>
+    <td>capture (внутри verify_patch <span class="ln">:983</span>) · init-project/post-upgrade (<span class="ln">:1395/:1435</span>) · ◌W2.3 rebase</td></tr>
+<tr><td><span class="chip chip-b">Б8 табло</span></td><td><code>_report</code> <span class="ln">:1489</span> + <code>_exit_code</code> <span class="ln">:1518</span></td>
+    <td>единый рендер находок + правило exit (error→2, warn→1)</td>
+    <td>check · revalidate · ◌W1: SUPERSEDED эмитит тот же Finding — пару НЕ трогают</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2>3 · Карточки команд: что внутри, по порядку, и что заимствовано</h2>
+<p class="sub">Серым справа у шага: <b>⇄ также</b> — какие ещё команды зовут ТОТ ЖЕ код (не копию!).
+⚠ Глобальные флаги (<code>--root/--canonical/--projects/--upstream/--exempt/--vault/--json/--text-canary/--stamp</code>)
+пишутся <b>ДО</b> подкоманды: <code>overlay_sync --json check</code>, не <code>check --json</code>.</p>
+
+<div class="cmd-card ro">
+  <div class="cmd-title"><b>check</b><span class="badge b-na">read-only · команда по умолчанию</span><span class="ln">cmd_check :1549 · exit 0/1/2</span></div>
+  <div class="cmd-flags">флаги: <code>--json</code> · ⚑ <code>--text-canary</code> / env <code>BMAD_OVERLAY_TEXT_CANARY</code> · <code>--exempt</code></div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-b">Б5 льготы</span><span>прочитать exempt.yaml</span><span class="also">⇄ также: propagate · revalidate · init/upg</span></div>
+    <div class="stepline"><span class="stepno">2.</span><span class="chip chip-b">Б1 слепок</span><span>сфотографировать диск (внутри — <span class="chip chip-b">Б2 перепись</span>)</span><span class="also">⇄ Б1: propagate(×2) · revalidate; Б2: census · capture</span></div>
+    <div class="stepline"><span class="stepno">3.</span><span class="chip chip-b">Б3 байт-судья</span><span>все 3 инварианта, PERSIST = полноценный error</span><span class="also">⇄ также: propagate-гейт · revalidate</span></div>
+    <div class="stepline"><span class="stepno">4.</span><span class="chip chip-flag">⚑ Б4 канарейка</span><span>только если флаг; сломан golden → warn и мимо (fail-open³)</span><span class="also">⇄ также: ◌capture(W0.1) · ◌vendor-sync(2.4)</span></div>
+    <div class="stepline"><span class="stepno">5.</span><span class="chip chip-b">Б8 табло</span><span>отчёт + exit 0/1/2</span><span class="also">⇄ также: revalidate</span></div>
+  </div>
+  <p class="cmd-take">Своего кода почти нет — check это «пульт», собранный целиком из общих блоков. Все остальные читающие проверки — его подмножества.</p>
+</div>
+
+<div class="cmd-card ro">
+  <div class="cmd-title"><b>census</b><span class="badge b-na">read-only</span><span class="ln">cmd_census :1561 · exit всегда 0</span></div>
+  <div class="cmd-flags">флаги: <code>--json</code> · <code>--upstream</code> (база сравнения)</div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-b">Б2 перепись</span><span>классифицировать step-файлы → свой принт. Всегда exit 0.</span><span class="also">⇄ также: Б1 (check/pro/rev) · plan_capture (capture)</span></div>
+  </div>
+  <p class="cmd-take">Проверок НЕТ по замыслу: перепись, а не суд. Поэтому дом будущего INV-FORK-SUPERSEDED — check, не census.</p>
+</div>
+
+<div class="cmd-card">
+  <div class="cmd-title"><b>propagate</b><span class="badge b-yes">пишет в проекты</span><span class="ln">cmd_propagate :1575 · exit 0 / 2 ABORT / 3 гейт-откат</span></div>
+  <div class="cmd-flags">флаги: <code>--apply</code> (без него dry-run) · <code>--exempt</code> · <code>--stamp</code> (имя папки бэкапа)</div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-b">Б5 льготы</span><span class="chip chip-b">Б1 слепок</span><span>как у check</span><span class="also">⇄ тот же код: check · revalidate</span></div>
+    <div class="stepline"><span class="stepno">2.</span><span class="chip chip-own">СВОЁ build_plan :845</span><span>список CREATE/REPLACE (кому чего не хватает)</span><span class="also">только здесь</span></div>
+    <div class="stepline"><span class="stepno">3.</span><span class="chip chip-b">Б6 замок-запись</span><span>(--apply) guard → flock → бэкап → atomic → md5. ⚠ ABORT посреди записи = exit 2: бэкапы на диске есть, но ROLLBACK.json ещё НЕ записан</span><span class="also">⇄ те же кирпичи: init/upg (apply_install)</span></div>
+    <div class="stepline"><span class="stepno">4.</span><span class="chip chip-b">Б1</span><span class="chip chip-b">Б3</span><span><b>ГЕЙТ после записи</b> — тот же судья, что в check, но фильтр: только error и БЕЗ PERSIST¹</span><span class="also">⇄ тот же судья: check · revalidate</span></div>
+    <div class="stepline"><span class="stepno">5.</span><span class="chip chip-own">СВОЁ rollback_plan :1610</span><span>гейт красный → АВТО-откат, exit 3</span><span class="also">только здесь (у init/upg авто-отката НЕТ⁷)</span></div>
+  </div>
+  <p class="cmd-take">Б4-канарейку не зовёт⁴ — возит байты, смысл проверяет check. ◌W4.2 добавит freshness-арбитр («сперва capture»).</p>
+</div>
+
+<div class="cmd-card ro">
+  <div class="cmd-title"><b>revalidate</b><span class="badge b-na">read-only</span><span class="ln">cmd_revalidate :1616 · exit 0 / 3</span></div>
+  <div class="cmd-flags">флаги: <code>--exempt</code> · <code>--json</code></div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-b">Б5</span><span class="chip chip-b">Б1</span><span class="chip chip-b">Б3</span><span class="chip chip-b">Б8</span><span>= check МИНУС канарейка</span><span class="also">⇄ все 4 блока — те же, что в check</span></div>
+  </div>
+  <p class="cmd-take">Единственное отличие от check: exit-код считается БЕЗ PERSIST² (провал сходимости = exit 3, а не 2). Это «ручная копия» гейта из propagate-шага 4.</p>
+</div>
+
+<div class="cmd-card">
+  <div class="cmd-title"><b>capture</b><span class="badge b-yes">пишет в vault</span><span class="ln">cmd_capture :1627 · exit 0 / 2 ABORT / 6 канарейка</span></div>
+  <div class="cmd-flags">флаги: <code>--apply</code> · <code>--allow-dirty</code> (взять незакоммиченное, громко) · <code>--no-commit</code> · <code>--vault</code> · <code>--stamp</code> (дефолт = дата HEAD-коммита канона → идемпотентность: повторный capture не плодит коммиты)</div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-b">Б2 перепись</span><span class="chip chip-own">СВОЁ plan_capture :1007</span><span>dirty-check канона вместо Б5-льгот⁵</span><span class="also">⇄ Б2: census · check/pro/rev</span></div>
+    <div class="stepline"><span class="stepno">2.</span><span class="chip chip-own">СВОЙ vault_lock :991</span><span>(--apply) замок vault'а; Б6-guard не нужен⁵</span><span class="also">брат project_lock (Б6), но свой файл</span></div>
+    <div class="stepline"><span class="stepno">3.</span><span class="chip chip-own">СВОИ канарейки :1063</span><span>TOML-парс · verify_patch :973 (та же механика git apply --check, что у Б7) · py-compile · SKILL.md · md5</span><span class="also">только здесь</span></div>
+    <div class="stepline"><span class="stepno">4.</span><span class="chip chip-own">ГЕЙТ-HALT</span><span>любая канарейка упала → exit 6, vault НЕ закоммичен⁶ <span class="ln">:1666</span></span><span class="also">аналог conflict-гейта init/upg</span></div>
+    <div class="stepline"><span class="stepno">5.</span><span class="chip chip-own">манифест + git commit</span><span>только после чистых канареек; vault не git-репо → ABORT 2</span><span class="also">write_manifest читает потом load_manifest (init/upg)</span></div>
+    <div class="stepline"><span class="stepno">◌</span><span class="chip chip-fut">◌W0.1 + Б4 канарейка</span><span>fail-closed³: провал golden = блок capture. ◌W1.2: + write_registry (единственный писатель реестра) · ◌W1.3 self-check предиката на записи</span><span class="also">⇄ Б4 — тот же код, что в check</span></div>
+  </div>
+  <p class="cmd-take">Самая «своя» команда: почти ничего не заимствует из судейских блоков, зато все её канарейки — только её.</p>
+</div>
+
+<div class="cmd-card">
+  <div class="cmd-title"><b>init-project · post-upgrade</b><span class="badge b-yes">пишут в target</span><span class="ln">общее тело _consume :1739 · exit 0 / 2 / 6 conflict</span></div>
+  <div class="cmd-flags">флаги: <code>--target</code> (обязателен: имя проекта или путь) · <code>--apply</code> · <code>--vault</code> · <code>--exempt</code> · <code>--stamp</code></div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-own">СВОЁ load_manifest :1217</span><span>прочитать vault (◌W2.0: научить читать bmad_version)</span><span class="also">читает то, что записал capture</span></div>
+    <div class="stepline"><span class="stepno">2.</span><span class="chip chip-b">Б5 льготы</span><span>exempt-файлы пропустить</span><span class="also">⇄ также: check · propagate · revalidate</span></div>
+    <div class="stepline"><span class="stepno">3.</span><span class="chip chip-own">СВОЁ plan_install :1322</span><span>целостность vault (<span class="chip chip-b">Б7</span> reconstruct + md5) · never-clobber · <b>init:</b> ставит на пиненную базу или чистое место · <b>post-upgrade:</b> патч на новый upstream через <span class="chip chip-b">Б7</span>; snapshot на изменённую базу → conflict «re-author»</span><span class="also">⇄ Б7: та же механика в verify_patch (capture) · ◌W2.3</span></div>
+    <div class="stepline"><span class="stepno">4.</span><span class="chip chip-own">conflict-ГЕЙТ</span><span>ЛЮБОЙ conflict → exit 6, target не тронут <span class="ln">:1758</span></span><span class="also">аналог канарейка-HALT в capture</span></div>
+    <div class="stepline"><span class="stepno">5.</span><span class="chip chip-b">Б6 замок-запись</span><span>(--apply) запись + ROLLBACK.json</span><span class="also">⇄ те же кирпичи: propagate (apply_plan)</span></div>
+  </div>
+  <p class="cmd-take">⚠ Авто-отката НЕТ⁷: ROLLBACK.json — только файл для ручного отката (в отличие от propagate, где откат автоматический). Разница команд — один аргумент mode: init ставит с нуля и never-clobber, post-upgrade переналагает патчи на новый upstream.</p>
+</div>
+
+<div class="cmd-card ro">
+  <div class="cmd-title"><b>menu</b><span class="badge b-na">read-only · каталог</span><span class="ln">cmd_menu :1795 · exit 0</span></div>
+  <div class="cmd-flags">флаги: <code>--json</code> (для /overlay-скилла — Claude парсит и подбирает глагол)</div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-own">MENU_ENTRIES :120</span><span>печать каталога: писатель/read-only, exit-коды, обязательные флаги</span><span class="also">честность держит мета-тест test_menu_covers_handlers</span></div>
+  </div>
+  <p class="cmd-take">Проверок в рантайме нет; проверка живёт в pytest: новый глагол в HANDLERS без строки меню роняет сюиту (анти single-source-drift).</p>
+</div>
+
+<div class="cmd-card future">
+  <div class="cmd-title"><b>◌ vendor-sync</b><span class="badge b-plan">Волна 2 · будет</span></div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-fut">СВОЁ fetch + version-compare</span><span>2.1 — новая версия bmad-method vs эталон</span></div>
+    <div class="stepline"><span class="stepno">2.</span><span class="chip chip-fut">СВОЁ diff</span><span>2.2 — added/changed/removed + проза для ревью</span></div>
+    <div class="stepline"><span class="stepno">3.</span><span class="chip chip-fut">приземление в VAULT</span><span>2.3 — на <span class="chip chip-b">Б7 патч-движке</span>; SUPERSEDED предлагает снять форк; conflict → HALT</span></div>
+    <div class="stepline"><span class="stepno">4.</span><span class="chip chip-own">фазы: post-upgrade → propagate → check+Б4</span><span>2.4 — зовёт ГОТОВЫЕ команды, движок не дублируется</span></div>
+  </div>
+  <p class="cmd-take">Новых проверок почти нет — это новая ОБВЯЗКА (воронка) вокруг существующих: байты → текст → человек.</p>
+</div>
+
+<div class="cmd-card future">
+  <div class="cmd-title"><b>◌ fork-intake</b><span class="badge b-plan">Волна 3 · будет</span></div>
+  <div class="cmd-steps">
+    <div class="stepline"><span class="stepno">1.</span><span class="chip chip-fut">заявка → агенты-ревьюверы</span><span>advisory (только советуют) → человек «да»</span></div>
+    <div class="stepline"><span class="stepno">2.</span><span class="chip chip-fut">передаёт capture</span><span>сам НИЧЕГО не пишет: вся запись и self-check — у capture (уточнение B)</span></div>
+  </div>
+  <p class="cmd-take">Намеренно пустой по проверкам: вход ↔ выход. fork-proposals.yaml пишет человек, forks-registry.yaml — только capture.</p>
+</div>
+
+<details class="card">
+<summary>Приложение (развернуть) · Полная матрица «проверки × команды» — для точной сверки со строками кода</summary>
+<div class="matrix-wrap">
+<table>
+<thead>
+<tr>
+  <th class="rowhead">проверка (движок · строка)</th>
+  <th>check</th><th>census</th><th>propagate</th><th>revalidate</th>
+  <th>capture</th><th>init-project</th><th>post-upgrade</th>
+  <th class="future-col">vendor-sync<br>◌W2</th><th>fork-intake<br>◌W3</th>
+</tr>
+</thead>
+<tbody>
+
+<tr class="group"><td colspan="10">А · БАЙТОВЫЕ ИНВАРИАНТЫ — один движок <code>run_invariants</code> <span class="ln">:507</span>, три вызова: check <span class="ln">:1554</span> · propagate-гейт <span class="ln">:1606</span> · revalidate <span class="ln">:1621</span></td></tr>
+<tr>
+  <td class="rowhead">INV-OVERLAY-PRESENT <span class="ln">:525</span><br><small>файл отсутствует в проекте (exempt → warn)</small></td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔ гейт</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2.4</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">INV-OVERLAY-IDENTICAL <span class="ln">:537</span><br><small>байты ≠ канону (exempt.yaml → warn)</small></td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔ гейт</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2.4</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">INV-PERSIST <span class="ln">:561</span><br><small>незакоммичено в каноне = риск потери</small></td>
+  <td><span class="badge b-yes">✔ error</span></td><td class="dash">—</td>
+  <td><span class="badge b-no">⊘ из гейта</span><sup>1</sup></td>
+  <td><span class="badge b-no">⊘ из exit</span><sup>2</sup></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2.4</span></td><td class="dash">—</td>
+</tr>
+
+<tr class="group"><td colspan="10">Б · ТЕКСТ-КАНАРЕЙКА (смысл, не байты) — <code>run_text_invariants</code> <span class="ln">:780</span> за <code>golden_gate</code> <span class="ln">:806</span>; флаг <span class="ln">:1526</span>, вход <span class="ln">:1536</span></td></tr>
+<tr>
+  <td class="rowhead">golden-gate — самотест канарейки<br><small>sick→RED по всем 3 инвариантам, healthy→GREEN, version-pin</small></td>
+  <td><span class="badge b-flag">⚑ fail-open</span><sup>3</sup></td><td class="dash">—</td>
+  <td><span class="badge b-no">⊘</span><sup>4</sup></td><td><span class="badge b-no">⊘</span><sup>4</sup></td>
+  <td><span class="badge b-plan">◌0.1 fail-closed</span><sup>3</sup></td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2.4</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">INV-CSV-SCHEMA <span class="ln">:786</span><br><small>заголовок CSV ≠ пину → 1 громкая ошибка, шаги пропущены</small></td>
+  <td><span class="badge b-flag">⚑</span></td><td class="dash">—</td>
+  <td><span class="badge b-no">⊘</span><sup>4</sup></td><td><span class="badge b-no">⊘</span><sup>4</sup></td>
+  <td><span class="badge b-plan">◌0.1</span></td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2.4</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">INV-BRAIN-COLS <span class="ln">:743</span> · INV-COUNT-RECON <span class="ln">:752</span> · INV-PHANTOM-CALL <span class="ln">:763</span><br><small>шаг описывает CSV честно: колонки ⊆ header, счётчики 61/10, техники существуют</small></td>
+  <td><span class="badge b-flag">⚑</span></td><td class="dash">—</td>
+  <td><span class="badge b-no">⊘</span><sup>4</sup></td><td><span class="badge b-no">⊘</span><sup>4</sup></td>
+  <td><span class="badge b-plan">◌0.1</span></td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2.4</span></td><td class="dash">—</td>
+</tr>
+
+<tr class="group"><td colspan="10">В · КАНАРЕЙКИ CAPTURE — внутри <code>apply_capture</code> <span class="ln">:1063</span>; любой провал → HALT exit 6, vault НЕ коммитится <span class="ln">:1666</span></td></tr>
+<tr>
+  <td class="rowhead">TOML-парс каждого оверлея <span class="ln">:1087</span></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col dash">—</td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">verify_patch — патч катается туда-обратно <span class="ln">:1116</span><br><small>провал → fallback на snapshot (НЕ halt)</small></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col dash">—</td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">py-compile каждого .py <span class="ln">:1149</span> + SKILL.md обязателен <span class="ln">:1156</span></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col dash">—</td><td class="dash">—</td>
+</tr>
+
+<tr class="group"><td colspan="10">Г · ЦЕЛОСТНОСТЬ VAULT + NEVER-CLOBBER — внутри <code>plan_install</code> <span class="ln">:1322</span>; любой conflict → exit 6, target не тронут <span class="ln">:1758</span></td></tr>
+<tr>
+  <td class="rowhead">reconstruct_fork + сверка md5 с манифестом <span class="ln">:1395-1403</span><br><small>vault сам себе не верит на слово</small></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="dash">—</td><td><span class="badge b-yes">✔</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="future-col"><span class="badge b-plan">◌2.3</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">git apply --check перед реальным наложением <span class="ln">:1272, :983</span></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td><td><span class="badge b-yes">✔</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="future-col"><span class="badge b-plan">◌2.3</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">never-clobber: есть-и-отличается → conflict <span class="ln">:1358</span>;<br><small>snapshot на изменённый upstream → conflict «re-author» <span class="ln">:1429</span></small></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="dash">—</td><td><span class="badge b-yes">✔</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="future-col"><span class="badge b-plan">◌2.3</span></td><td class="dash">—</td>
+</tr>
+
+<tr class="group"><td colspan="10">Д · ПРИМИТИВЫ БЕЗОПАСНОЙ ЗАПИСИ — общие кирпичи всех пишущих команд</td></tr>
+<tr>
+  <td class="rowhead">git_guard — чужое дерево чистое? <span class="ln">:214</span><br><small>fail-closed; вызовы <span class="ln">:882, :1454</span></small></td>
+  <td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td>
+  <td><span class="badge b-no">⊘ своё</span><sup>5</sup></td>
+  <td><span class="badge b-yes">✔</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="future-col"><span class="badge b-plan">◌</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">flock — замок от параллельных прогонов<br><small>project_lock <span class="ln">:232</span> / vault_lock <span class="ln">:991</span></small></td>
+  <td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔ proj</span></td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔ vault</span></td>
+  <td><span class="badge b-yes">✔ proj</span></td><td><span class="badge b-yes">✔ proj</span></td>
+  <td class="future-col"><span class="badge b-plan">◌</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">атомарная запись + md5-сверка ПОСЛЕ записи<br><small><span class="ln">:897-899, :1469-1471, :1093/:1129/:1146</span></small></td>
+  <td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td>
+  <td><span class="badge b-yes">✔</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="future-col"><span class="badge b-plan">◌</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">dry-run по умолчанию (запись только с --apply)</td>
+  <td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td>
+  <td><span class="badge b-yes">✔</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="future-col"><span class="badge b-plan">◌</span></td><td><span class="badge b-plan">◌</span></td>
+</tr>
+<tr>
+  <td class="rowhead">backup + ROLLBACK.json <span class="ln">:1598, :1779</span></td>
+  <td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔</span></td><td class="dash">—</td>
+  <td><span class="badge b-no">⊘ git</span><sup>6</sup></td>
+  <td><span class="badge b-yes">✔</span></td><td><span class="badge b-yes">✔</span></td>
+  <td class="future-col"><span class="badge b-plan">◌</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">пост-записьный гейт-revalidate + АВТО-откат<br><small><span class="ln">:1603-1611</span>, exit 3</small></td>
+  <td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-yes">✔ авто</span></td><td class="dash">—</td>
+  <td><span class="badge b-no">⊘</span><sup>6</sup></td>
+  <td><span class="badge b-no">⊘ вручную</span><sup>7</sup></td><td><span class="badge b-no">⊘ вручную</span><sup>7</sup></td>
+  <td class="future-col"><span class="badge b-plan">◌2.4</span></td><td class="dash">—</td>
+</tr>
+
+<tr class="group"><td colspan="10">Е · БУДУЩИЕ ПРОВЕРКИ — Волны 0–4 (решения owner зафиксированы, постройка по «строим»)</td></tr>
+<tr>
+  <td class="rowhead">INV-FORK-SUPERSEDED — «форк стал лишним» <span class="badge b-flag" style="font-size:10px">warn</span><br><small>грепнуть supersede_signal в новом upstream, 3-way base+target</small></td>
+  <td><span class="badge b-plan">◌1.4</span></td><td class="dash">—</td>
+  <td><span class="badge b-no">⊘ warn!</span><sup>8</sup></td><td class="dash">—</td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2.3</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">self-check предиката — «два мира»<br><small>баг есть→нужен / баг убран→не нужен; одинаково → ОТКАЗ (fail-closed)</small></td>
+  <td><span class="badge b-plan">◌D перед SUPERSEDED</span></td><td class="dash">—</td>
+  <td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-plan">◌1.3 на записи</span></td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2</span></td><td><span class="badge b-plan">◌3.1</span></td>
+</tr>
+<tr>
+  <td class="rowhead">контракт-тест реестр↔манифест (3 уровня: forward · backward · deep inputs==parser)</td>
+  <td colspan="7"><span class="badge b-plan">◌1 · живёт в pytest, не в командах</span></td>
+  <td class="future-col dash">—</td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">version-compare — новый upstream доступен?<br><small>требует фикс: load_manifest <span class="ln">:1217</span> читает bmad_version ◌2.0</small></td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col"><span class="badge b-plan">◌2.1</span></td><td class="dash">—</td>
+</tr>
+<tr>
+  <td class="rowhead">freshness-арбитр — «сперва capture»<br><small>блок propagate, пока odyssey впереди vault</small></td>
+  <td class="dash">—</td><td class="dash">—</td>
+  <td><span class="badge b-plan">◌4.2</span></td><td class="dash">—</td>
+  <td class="dash">—</td><td class="dash">—</td><td class="dash">—</td>
+  <td class="future-col dash">—</td><td class="dash">—</td>
+</tr>
+</tbody>
+</table>
+<p class="sub" style="margin:10px 0 0">
+<b>census</b> — единственная команда вообще без проверок (перепись, не суд: всегда exit 0).
+<b>menu</b> — не в матрице: печатает каталог; его честность держит мета-тест <code>test_menu_covers_handlers</code>.
+<b>fork-intake</b> (W3) намеренно почти пуст: он только собирает заявку и советует — все гейты у <b>capture</b>.</p>
+</div>
+</details>
+
+<!-- ============================================================ -->
+<h2>4 · Почему «специально НЕТ» — сноски ¹…⁸</h2>
+<div class="card">
+<ol class="notes">
+  <li><b>INV-PERSIST вне гейта propagate</b> <span class="ln">:1607</span> — разлив копирует канон → проекты и не может вылечить «незакоммичено в каноне». Оставить его в гейте = гейт всегда красный = каждый правильный разлив откатывался бы.</li>
+  <li><b>INV-PERSIST вне exit-кода revalidate</b> <span class="ln">:1622</span> — печатается в отчёте, но exit 3 только по «разливаемым» ошибкам. Та же причина, что ¹.</li>
+  <li><b>Один golden-gate — два режима.</b> В <b>check</b> провал = fail-open <span class="ln">:1541</span> (warn INV-GOLDEN-GATE, канарейка молча выключается — сломанная фикстура не должна ронять байтовое ядро). В <b>capture</b> (◌W0.1) провал = fail-closed (HALT до commit — в источник истины вслепую не пишем). Протухшая фикстура заблокирует ВСЕ capture — осознанный размен «безопасность &gt; доступность».</li>
+  <li><b>Текст-канарейки нет в propagate/revalidate</b> — они возят и сверяют байты; смысл проверяет check (и придёт в capture). Дублировать смысловую проверку при каждом разливе = двойная работа без новой информации.</li>
+  <li><b>capture без git_guard</b> — он пишет в vault, а не в проект. Замена: dirty-check канона в plan_capture <span class="ln">:1020</span> + vault_lock <span class="ln">:1664</span> + проверка «vault — git-репо» <span class="ln">:1687</span>.</li>
+  <li><b>capture без ROLLBACK.json и без пост-гейта</b> — его откат это git самого vault'а, а канарейки бьют HALT ДО commit <span class="ln">:1666</span>: откатывать обычно нечего.</li>
+  <li><b>init-project / post-upgrade: авто-отката НЕТ</b> — ROLLBACK.json пишется <span class="ln">:1779</span>, но <code>rollback_install</code> <span class="ln">:1475</span> в командах не вызывается (только тесты/вручную). Асимметрия с propagate — знать при факапе!</li>
+  <li><b>INV-FORK-SUPERSEDED = warn, а не error</b> (решение 1.4) — лишний форк propagate не чинит; error из общего run_invariants попал бы в его гейт <span class="ln">:1606-1607</span> и откатывал бы чужой правильный разлив, потребовав второй «костыль-исключение» как у INV-PERSIST.</li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2>5 · Мета-тесты — проверки самих проверок (pytest, 65 шт.)</h2>
+<div class="card">
+  <dl class="gloss">
+    <dt>golden_gate (рантайм!)</dt><dd>единственный мета-тест, который гоняется при КАЖДОМ прогоне канарейки, а не только в pytest: sick-фикстура обязана зажечь все 3 инварианта, healthy — ни одного <span class="ln">:826-836</span></dd>
+    <dt>test_menu_covers_handlers</dt><dd>меню == HANDLERS минус menu <span class="ln">test_overlay_sync.py:655</span> — новый глагол без строки меню роняет сюиту (анти single-source-drift)</dd>
+    <dt>test_meta_proof_* ×4</dt><dd>«сломай→RED, почини→GREEN»: 4-я колонка, замолчавшая канарейка, мутации count-recon и phantom-call <span class="ln">test_overlay_text_canary.py:140·161·268·280</span> — доказывают, что канарейка не тавтология</dd>
+    <dt>◌W1 контракт-тест реестра</dt><dd>3 уровня: каждая запись реестра → форк в манифесте (forward), каждый форк → паспорт в реестре (backward), inputs предиката == парсер(тело форка) (deep)</dd>
+  </dl>
+</div>
+
+<!-- ============================================================ -->
+<h2>6 · Exit-коды (общие для всех команд)</h2>
+<div class="card">
+  <dl class="gloss">
+    <dt><code>0</code> OK</dt><dd>чисто (или dry-run показал план)</dd>
+    <dt><code>1</code> WARN</dt><dd>есть предупреждения (exempt-отличия, INV-GOLDEN-GATE, будущий SUPERSEDED)</dd>
+    <dt><code>2</code> ERROR</dt><dd>есть ошибки-находки, либо ABORT записи (git_guard/verify)</dd>
+    <dt><code>3</code> REVALIDATE</dt><dd>только propagate/revalidate: сходимость не подтвердилась (у propagate — уже после авто-отката)</dd>
+    <dt><code>5</code> INTERNAL</dt><dd>прервано (Ctrl-C)</dd>
+    <dt><code>6</code> CONFLICT</dt><dd>капкан: канарейка capture упала (vault не закоммичен) / конфликт install (target не тронут). Никогда «наполовину»</dd>
+  </dl>
+</div>
+
+<!-- ============================================================ -->
+<h2>7 · Термины</h2>
+<div class="card">
+  <dl class="gloss">
+    <dt>инвариант (invariant)</dt><dd>правило, которое обязано выполняться всегда; нарушение = находка (Finding)</dd>
+    <dt>канарейка (canary)</dt><dd>маленькая проверка-сторож, которая падает первой и громко</dd>
+    <dt>гейт (gate)</dt><dd>ворота: проверка, провал которой блокирует следующий шаг</dd>
+    <dt>мета-тест / meta-proof</dt><dd>проверка самой проверки: «сломай нарочно → RED, почини → GREEN»; ловит канарейку-тавтологию</dd>
+    <dt>fail-open / fail-closed</dt><dd>что делать, если сторож сам сломан: пропустить (open) или заблокировать (closed)</dd>
+    <dt>предикат (predicate)</dt><dd>вопрос с ответом да/нет — supersede_signal форка: «фикс уже в upstream?»</dd>
+    <dt>vault</dt><dd>хранилище-репозиторий <code>~/.claude/bmad-overlays</code> — единственный источник истины для оверлеев/форков</dd>
+    <dt>канон (canonical)</dt><dd>проект-эталон odyssey; никогда не цель записи, только источник</dd>
+    <dt>dry-run</dt><dd>прогон «понарошку»: показать план, ничего не записав; у всех пишущих команд — режим по умолчанию</dd>
+    <dt>never-clobber</dt><dd>«никогда не затирать»: файл существует и отличается → конфликт, а не перезапись</dd>
+  </dl>
+</div>
+
+<p class="sub" style="margin-top:24px">Источник: <code>tools/overlay_sync.py</code> @ ветка dev ·
+планы <code>~/.claude/plans/post-iridescent-oasis.md</code>, <code>overlay-sync-cozy-fox.md</code> ·
+собрано и адверсарно выверено 2026-07-02 (23/23 утверждений подтверждены).</p>
+
+</main>
+</body>
+</html>
