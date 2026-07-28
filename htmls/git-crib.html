@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git-шпаргалка: рабочие команды</title>
+<style>
+  :root{
+    --bg:#f7f7f5; --card:#ffffff; --ink:#1f2328; --muted:#6a737d;
+    --line:#e1e4e8; --code-bg:#f0f1f3; --accent:#1d4ed8; --accent-bg:#eff6ff;
+    --guar:#166534; --red:#b91c1c; --warn-bg:#fff7ed; --warn:#b45309;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1115; --card:#171a21; --ink:#e6e8eb; --muted:#9aa4af;
+      --line:#2a2f3a; --code-bg:#1e222b; --accent:#60a5fa; --accent-bg:#101c33;
+      --guar:#4ade80; --red:#f87171; --warn-bg:#2a2010; --warn:#fbbf24;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:24px;background:var(--bg);color:var(--ink);
+       font:15px/1.5 -apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif;}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:var(--muted);margin-bottom:20px;font-size:14px}
+  h2{font-size:17px;margin:26px 0 8px;border-bottom:2px solid var(--line);padding-bottom:5px}
+  table{width:100%;border-collapse:collapse;margin:8px 0;background:var(--card)}
+  th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top;font-size:14px}
+  th{background:var(--code-bg);font-size:13px}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+  code{background:var(--code-bg);padding:1px 5px;border-radius:4px;white-space:nowrap}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+      padding:12px;overflow-x:auto;line-height:1.45;margin:8px 0}
+  .rule{background:var(--warn-bg);border-left:4px solid var(--warn);padding:8px 12px;
+        border-radius:0 8px 8px 0;margin:8px 0;font-size:14px}
+  .dim{color:var(--muted)}
+  .todo{color:var(--muted);border:2px dashed var(--line);border-radius:8px;padding:10px 14px;margin:10px 0;font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>🧭 Git-шпаргалка</h1>
+<div class="sub">рабочие команды по мере обучения · repo: bmad-orchestrator · remote: <code>script</code> (НЕ origin!) · дописываем по пути</div>
+
+<h2>0 · Карта трёх позиций — держать в голове всегда</h2>
+<pre>
+①  dev            моя ЛОКАЛЬНАЯ ветка (указатель на коммит)
+②  script/dev     мой КЭШ знаний о GitHub (протухает! обновляет fetch/push)
+③  GitHub         живой сервер
+
+ls-remote  смотрит ③, ничего не двигает          (градусник, read-only)
+fetch      двигает ② → ③                          (кэш освежить, работу не трогает)
+pull       = fetch + merge: двигает ② И ①         (может принести конфликт)
+push       двигает ③ ← ① (и ② заодно)             (действие НАРУЖУ — видно другим)
+</pre>
+
+<h2>1 · Осмотреться</h2>
+<table>
+<tr><th>команда</th><th>что даёт</th></tr>
+<tr><td><code>git status</code></td><td>ветка · чистота · что в staging · ahead/behind <span class="dim">(vs кэш ②!)</span></td></tr>
+<tr><td><code>git log --oneline -5</code></td><td>последние 5 коммитов: хэш + сообщение (одна строка = один коммит)</td></tr>
+<tr><td><code>git log --oneline --graph -10</code></td><td>+ ASCII-схема веток и слияний</td></tr>
+<tr><td><code>git log --oneline -- путь/файл</code></td><td>кто и когда менял ЭТОТ файл</td></tr>
+<tr><td><code>git show --stat HEAD</code></td><td>последний коммит: шапка + список файлов <span class="dim">(HEAD~1 = предпоследний)</span></td></tr>
+<tr><td><code>git show &lt;хэш&gt;</code></td><td>коммит целиком с диффом (+ добавлено / − убрано)</td></tr>
+<tr><td><code>git show &lt;хэш&gt;:путь/файл</code></td><td>файл ЦЕЛИКОМ, каким был в том коммите (машина времени)</td></tr>
+<tr><td><code>git branch -vv</code></td><td>локальные ветки: где я (*), привязка [script/dev], ahead/behind</td></tr>
+<tr><td><code>git remote -v</code></td><td>подключённые удалённые репо (у нас один: script)</td></tr>
+<tr><td><code>git worktree list</code></td><td>все рабочие копии репо (в т.ч. прод /home/server/overlay_sync_prod)</td></tr>
+</table>
+
+<h2>2 · Сравнить ветки / позиции</h2>
+<table>
+<tr><th>команда</th><th>что даёт</th></tr>
+<tr><td><code>git fetch script</code></td><td>освежить кэш ② до правды сервера — ПЕРЕД любым сравнением</td></tr>
+<tr><td><code>git rev-parse dev script/dev</code></td><td>хэши обеих точек (ветка = указатель; совпали = идентичны)</td></tr>
+<tr><td><code>git ls-remote --heads script dev</code></td><td>хэш ветки НА СЕРВЕРЕ прямо сейчас (мимо кэша, read-only)</td></tr>
+<tr><td><code>git rev-list --left-right --count dev...script/dev</code></td><td>счёт расхождения: <code>1 0</code>=я впереди · <code>0 0</code>=идентичны · <code>2 1</code>=разошлись</td></tr>
+<tr><td><code>git log --oneline dev..script/dev</code></td><td>КАКИЕ коммиты есть у них, но нет у меня (две точки = разница)</td></tr>
+</table>
+<div class="rule">Повседневная пара: <code>git fetch script</code> → <code>git branch -vv</code>. Остальное — спецмерки при странностях.</div>
+
+<h2>2б · Кто я / привязка / три хэша — точечные команды</h2>
+<table>
+<tr><th>вопрос</th><th>команда</th><th>увидишь</th></tr>
+<tr><td>на какой я ветке?</td><td><code>git branch --show-current</code></td><td><code>dev</code></td></tr>
+<tr><td>с кем она связана?</td><td><code>git rev-parse --abbrev-ref @{u}</code></td><td><code>script/dev</code> <span class="dim">(@{u} = @{upstream}, привязка ТЕКУЩЕЙ ветки; ошибка = ветка-сирота)</span></td></tr>
+<tr><td>привязка из конфига</td><td><code>git config branch.dev.remote</code></td><td><code>script</code> <span class="dim">(+ <code>…merge</code> → refs/heads/dev)</span></td></tr>
+<tr><td>хэш ① локальной</td><td><code>git rev-parse HEAD</code></td><td><span class="dim">(или по имени: <code>git rev-parse dev</code>)</span></td></tr>
+<tr><td>хэш ② кэша</td><td><code>git rev-parse @{u}</code></td><td><span class="dim">(или <code>git rev-parse script/dev</code>)</span></td></tr>
+<tr><td>хэш ③ сервера живьём</td><td><code>git ls-remote --heads script dev</code></td><td>хэш + refs/heads/dev</td></tr>
+</table>
+<pre>
+чтение трёх хэшей:
+  ①=②=③   полная синхронизация
+  ①≠②=③   накоммитил локально, push ещё не делал (ahead)
+  ①=②≠③   КЭШ ПРОТУХ — на сервере новое → git fetch script
+</pre>
+
+<h2>2в · Ветки: создать · переключиться · привязать · удалить</h2>
+<table>
+<tr><th>команда</th><th>что даёт</th></tr>
+<tr><td><code>git switch имя</code></td><td>переключиться на существующую ветку</td></tr>
+<tr><td><code>git switch -c имя</code></td><td>создать новую от текущего коммита и перейти на неё</td></tr>
+<tr><td><code>git switch -c имя точка</code></td><td>создать от указанной точки (хэш / main / script/main)</td></tr>
+<tr><td><code>git push -u script имя</code></td><td>ПЕРВЫЙ push новой ветки: создаёт её на GitHub + записывает привязку (-u = --set-upstream, один раз; дальше хватает голого <code>git push</code>)</td></tr>
+<tr><td><code>git branch -m старое новое</code></td><td>переименовать локальную ветку</td></tr>
+<tr><td><code>git branch -d имя</code></td><td>удалить локальную (откажет, если не влита — защита; форс <code>-D</code> осознанно)</td></tr>
+<tr><td><code>git push script --delete имя</code></td><td>удалить ветку НА GitHub (действие наружу!)</td></tr>
+</table>
+<div class="rule">Ветка на GitHub рождается в момент первого <code>push -u</code> — заранее заводить не надо. Имя локальной и серверной может различаться (<code>git push script лок:серв</code>), но одинаковые имена = конвенция, спасающая рассудок.</div>
+
+<h2>3 · Изменить и закоммитить</h2>
+<pre>
+РАБОЧАЯ ПАПКА ──git add──► STAGING ──git commit──► ИСТОРИЯ ──git push──► GITHUB
+ (файлы)                  (предбанник:            (навсегда,            (видно
+                           состав будущего         append-only           другим)
+                           коммита)                после push)
+</pre>
+<table>
+<tr><th>команда</th><th>что даёт</th></tr>
+<tr><td><code>git add путь/файл</code></td><td>положить файл в staging (точечно — предпочтительно)</td></tr>
+<tr><td><code>git add -A</code></td><td>сгрести ВСЁ изменённое+новое → обязателен взгляд в <code>git status</code> до коммита</td></tr>
+<tr><td><code>git commit -m 'тип(скоуп): описание'</code></td><td>коммит из staging; сообщение = enum-формат, по-русски</td></tr>
+<tr><td><code>git commit --amend -m '…'</code></td><td>переписать ПОСЛЕДНИЙ коммит (сообщение/состав). Хэш сменится!</td></tr>
+<tr><td><code>git push</code></td><td>отправить коммиты на GitHub (привязка уже настроена → без аргументов)</td></tr>
+<tr><td><code>git stash</code> / <code>git stash pop</code></td><td>заначка: спрятать незаконченное вбок / вернуть (не путать со staging)</td></tr>
+</table>
+
+<h2>4 · Формат сообщения коммита (enum-словарь)</h2>
+<pre>
+тип(скоуп): что сделано            ← по-русски, грепается: git log --oneline | grep 'fix('
+типы:   feat · fix · docs · refactor · test · chore · infra
+скоупы: dag · worker · merge-gate · policy · cli · sdk · spec · overlay-sync
+</pre>
+
+<h2>5 · Правила безопасности (куплены уроками)</h2>
+<div class="rule">🚫 <b>amend / rebase ТОЛЬКО до push.</b> После push история append-only: правки — новым коммитом. (Хэш при amend меняется → у сервера была бы другая история.)</div>
+<div class="rule">🚫 <b>Никогда</b> <code>--force</code>, <code>--no-verify</code>, <code>reset --hard</code> без явного решения с холодной головой.</div>
+<div class="rule">👀 <code>add -A</code> → всегда <code>git status</code> перед commit: смотри, ЧТО кладёшь.</div>
+<div class="rule">📡 <code>git status</code> сравнивает с КЭШЕМ ②: «up to date» ≠ правда сервера. Сомнение → <code>fetch</code> сначала.</div>
+<div class="rule">✍️ Сообщение пишется 1 раз — читается десятки. «html» = слепая строка в оглавлении истории.</div>
+
+<h2>6 · Путь PR → merge → деплой</h2>
+<div class="todo">◌ дописываем по мере прохождения: создание PR (gh pr create) · merge → main · деплой в прод-worktree · синхронизация dev ← main · ворота ступеней 1-6 (pre-commit → branch protection → CI → LLM-ревью → deploy-скрипт → канарейка пайплайна)</div>
+
+</div>
+</body>
+</html>
