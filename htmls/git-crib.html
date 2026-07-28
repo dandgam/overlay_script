@@ -43,6 +43,29 @@
 <h1>🧭 Git-шпаргалка</h1>
 <div class="sub">рабочие команды по мере обучения · repo: bmad-orchestrator · remote: <code>script</code> (НЕ origin!) · дописываем по пути</div>
 
+<h2>0а · Четыре слова: репозиторий · ветка · worktree · remote</h2>
+<table>
+<tr><th>термин</th><th>что это ФИЗИЧЕСКИ</th><th>сколько у нас</th></tr>
+<tr><td><b>Репозиторий</b> <span class="dim">(разг. «репо»)</span></td><td>проект + ВСЯ история — папка <code>.git</code></td><td>2: локальный + копия на GitHub</td></tr>
+<tr><td><b>Ветка</b></td><td>именованный УКАЗАТЕЛЬ на коммит (строка внутри <code>.git</code>)</td><td>много: dev, main, …</td></tr>
+<tr><td><b>Worktree</b></td><td>РАБОЧАЯ ПАПКА: файлы на диске, разложенные по одной ветке</td><td>4 у локального репо</td></tr>
+<tr><td><b>Remote</b></td><td>сохранённый АДРЕС чужого репозитория + короткое имя</td><td>1: <code>script</code> → GitHub</td></tr>
+</table>
+<pre>
+РЕПОЗИТОРИЙ №1 (твоя машина) — история ОДНА на все папки
+├── ВЕТКИ (указатели в .git):  dev → 5138136 · main → 4a6342d · …
+└── WORKTREE (папки на диске, каждая на СВОЕЙ ветке):
+    ├── ~/bmad-orchestrator             ← dev   (тут кодишь)
+    ├── /home/server/overlay_sync_prod  ← main  (ПРОД)
+    └── .claude/worktrees/agent-…×2     ← ветки агентов-воркеров
+
+        ▲ push / pull ▼   через remote «script»
+
+РЕПОЗИТОРИЙ №2 (GitHub, dandgam/overlay_script) — ОТДЕЛЬНАЯ копия истории
+└── ветки: script/dev · script/main
+</pre>
+<div class="rule">🔑 <b>Ветка = запись в истории, worktree = файлы на диске.</b> Обычно папка одна и ты переключаешь её (<code>git switch</code>) — файлы перезаписываются. Worktree даёт НЕСКОЛЬКО папок сразу, каждую на своей ветке. Следствия: ① одна ветка = максимум одна папка (<code>main</code> занята продом → <code>git switch main</code> здесь откажет, знак <code>+</code> в <code>branch -vv</code>); ② история ОБЩАЯ — коммит из любой папки виден всем, потому прод обновляется обычным <code>git pull</code>, а не копированием файлов.</div>
+
 <h2>0 · Карта трёх позиций — держать в голове всегда</h2>
 <pre>
 ①  dev            моя ЛОКАЛЬНАЯ ветка (указатель на коммит)
@@ -65,7 +88,11 @@ push       двигает ③ ← ① (и ② заодно)             (дей�
 <tr><td><code>git show --stat HEAD</code></td><td>последний коммит: шапка + список файлов <span class="dim">(HEAD~1 = предпоследний)</span></td></tr>
 <tr><td><code>git show &lt;хэш&gt;</code></td><td>коммит целиком с диффом (+ добавлено / − убрано)</td></tr>
 <tr><td><code>git show &lt;хэш&gt;:путь/файл</code></td><td>файл ЦЕЛИКОМ, каким был в том коммите (машина времени)</td></tr>
-<tr><td><code>git branch -vv</code></td><td>локальные ветки: где я (*), привязка [script/dev], ahead/behind</td></tr>
+<tr><td><code>git branch -vv</code></td><td>локальные ветки: где я (*), привязка [script/dev], ahead/behind <span class="dim">(удалённые НЕ показывает!)</span></td></tr>
+<tr><td><code>git branch -vv -a</code></td><td>то же + строки <code>remotes/script/*</code> = <b>содержимое кэша ②</b> — так проверяют, что fetch отработал</td></tr>
+<tr><td><code>git branch --show-current</code></td><td>только имя текущей ветки, одной строкой</td></tr>
+<tr><td><code>git log --oneline --graph --all -10</code></td><td>граф ВСЕХ веток: видно скрепки merge и кто где стоит</td></tr>
+<tr><td><code>git ls-remote script 'refs/pull/*'</code></td><td>PR'ы на GitHub: <code>/head</code> = вершина ветки PR, <code>/merge</code> = пробное слияние (по нему GitHub судит «mergeable»)</td></tr>
 <tr><td><code>git remote -v</code></td><td>подключённые удалённые репо (у нас один: script)</td></tr>
 <tr><td><code>git worktree list</code></td><td>все рабочие копии репо (в т.ч. прод /home/server/overlay_sync_prod)</td></tr>
 </table>
@@ -108,6 +135,7 @@ push       двигает ③ ← ① (и ② заодно)             (дей�
 <tr><td><code>git branch -m старое новое</code></td><td>переименовать локальную ветку</td></tr>
 <tr><td><code>git branch -d имя</code></td><td>удалить локальную (откажет, если не влита — защита; форс <code>-D</code> осознанно)</td></tr>
 <tr><td><code>git push script --delete имя</code></td><td>удалить ветку НА GitHub (действие наружу!)</td></tr>
+<tr><td><code>git worktree list</code></td><td>все рабочие копии репо. Знак <code>+</code> у ветки в <code>branch -vv</code> = она ЗАНЯТА другим worktree, переключиться сюда нельзя <span class="dim">(наш прод: /home/server/overlay_sync_prod на main)</span></td></tr>
 </table>
 <div class="rule">Ветка на GitHub рождается в момент первого <code>push -u</code> — заранее заводить не надо. Имя локальной и серверной может различаться (<code>git push script лок:серв</code>), но одинаковые имена = конвенция, спасающая рассудок.</div>
 
@@ -128,6 +156,24 @@ push       двигает ③ ← ① (и ② заодно)             (дей�
 <tr><td><code>git stash</code> / <code>git stash pop</code></td><td>заначка: спрятать незаконченное вбок / вернуть (не путать со staging)</td></tr>
 </table>
 
+<h2>3б · Забрать чужое: git pull</h2>
+<pre>
+git pull  =  git fetch  +  git merge     ← ЕДИНСТВЕННАЯ команда, что двигает ① и ФАЙЛЫ на диске
+                                            (потому только она умеет дать КОНФЛИКТ)
+
+три исхода — смотри git rev-list --left-right --count dev...script/main ДО:
+  0 N   своего нет      → fast-forward: указатель просто перемотан, новых коммитов НЕТ
+  M N   оба ушли вперёд → создаст MERGE-КОММИТ (скрепку с двумя родителями)
+  правки в тех же строках → КОНФЛИКТ, разрешаешь руками
+</pre>
+<table>
+<tr><th>команда</th><th>что даёт</th></tr>
+<tr><td><code>git pull</code></td><td>из привязки <code>@{u}</code>: стоя на dev → возьмёт script/dev</td></tr>
+<tr><td><code>git pull script main</code></td><td>явно: взять script/main → влить в <b>ТЕКУЩУЮ</b> ветку <span class="dim">(источник указан, приёмник всегда там, где стоишь — легко влить не туда!)</span></td></tr>
+<tr><td><code>git pull --ff-only</code></td><td><b>хорошая привычка:</b> только перемотка; нужен merge-коммит → откажется, решаешь сам</td></tr>
+<tr><td><code>git pull --rebase</code></td><td>вместо скрепки перенести СВОИ коммиты поверх чужих (история линейная). Опасно после push — переписывает хэши</td></tr>
+</table>
+
 <h2>4 · Формат сообщения коммита (enum-словарь)</h2>
 <pre>
 тип(скоуп): что сделано            ← по-русски, грепается: git log --oneline | grep 'fix('
@@ -142,8 +188,32 @@ push       двигает ③ ← ① (и ② заодно)             (дей�
 <div class="rule">📡 <code>git status</code> сравнивает с КЭШЕМ ②: «up to date» ≠ правда сервера. Сомнение → <code>fetch</code> сначала.</div>
 <div class="rule">✍️ Сообщение пишется 1 раз — читается десятки. «html» = слепая строка в оглавлении истории.</div>
 
-<h2>6 · Путь PR → merge → деплой</h2>
-<div class="todo">◌ дописываем по мере прохождения: создание PR (gh pr create) · merge → main · деплой в прод-worktree · синхронизация dev ← main · ворота ступеней 1-6 (pre-commit → branch protection → CI → LLM-ревью → deploy-скрипт → канарейка пайплайна)</div>
+<h2>6 · Канонический круг: код → PR → main → прод</h2>
+<pre>
+① кодим + коммитим                              локально, ветка dev
+② git push                                      dev ──────► script/dev
+③ PR + merge на GitHub (Create a merge commit)  script/dev ──► script/main
+      ▲ ЗДЕСЬ рождается СКРЕПКА — новый коммит с ДВУМЯ родителями.
+        Потому хэш main ≠ хэш dev. (Squash/rebase не берём: squash слепит
+        коммиты в один, rebase перепишет хэши.)
+④ git pull --ff-only script main                script/main ──► dev  (перемотка:
+      ▲ твой коммит — РОДИТЕЛЬ скрепки, значит предок → указатель просто едет вперёд)
+⑤ git push                                      dev ──────► script/dev  (закрыть ahead 1)
+⑥ git -C /home/server/overlay_sync_prod pull --ff-only script main   ──► ПРОД
+</pre>
+<table>
+<tr><th>шаг</th><th>кто двигается</th><th>где происходит</th></tr>
+<tr><td>②</td><td>script/dev</td><td>машина → GitHub</td></tr>
+<tr><td>③</td><td>script/main + скрепка</td><td><b>на GitHub</b></td></tr>
+<tr><td>④</td><td>локальная dev</td><td>машина ← GitHub</td></tr>
+<tr><td>⑤</td><td>script/dev</td><td>машина → GitHub</td></tr>
+<tr><td>⑥</td><td>прод-worktree</td><td>машина ← GitHub</td></tr>
+</table>
+<div class="rule">🏠 <b>Репозиторий ОДИН</b> — две рабочие папки на разных ветках (worktree): <code>~/bmad-orchestrator</code> = dev · <code>/home/server/overlay_sync_prod</code> = main (прод). История общая. Отсюда <code>+</code> в <code>branch -vv</code> и <code>-C путь</code> вместо cd.</div>
+<div class="rule">⬇️ <b>Деплой у нас pull-based:</b> прод сам ЗАБИРАЕТ проверенный main (входящих подключений к машине нет — облачный runner до неё не дотянется). Гарантия качества приходит не из деплоя, а из ворот ДО main.</div>
+
+<h2>7 · Ворота — что предстоит построить</h2>
+<div class="todo">◌ лестница ступеней, каждая с RED-экзаменом: ① pre-commit (ruff+узкие тесты) · ② branch protection + PR-флоу <span class="dim">(⚠️ на приватном репо Free-плана недоступна; включить «Do not allow bypass» — админ иначе обходит сам себя)</span> · ③ CI на PR как required check · ④ LLM-ревью на PR · ⑤ deploy-скрипт + smoke · ⑥ канарейка пайплайна + heartbeat</div>
 
 </div>
 </body>
