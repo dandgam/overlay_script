@@ -81,6 +81,36 @@ push       двигает ③ ← ① (и ② заодно)             (дей�
 </table>
 <div class="rule">Повседневная пара: <code>git fetch script</code> → <code>git branch -vv</code>. Остальное — спецмерки при странностях.</div>
 
+<h2>2б · Кто я / привязка / три хэша — точечные команды</h2>
+<table>
+<tr><th>вопрос</th><th>команда</th><th>увидишь</th></tr>
+<tr><td>на какой я ветке?</td><td><code>git branch --show-current</code></td><td><code>dev</code></td></tr>
+<tr><td>с кем она связана?</td><td><code>git rev-parse --abbrev-ref @{u}</code></td><td><code>script/dev</code> <span class="dim">(@{u} = @{upstream}, привязка ТЕКУЩЕЙ ветки; ошибка = ветка-сирота)</span></td></tr>
+<tr><td>привязка из конфига</td><td><code>git config branch.dev.remote</code></td><td><code>script</code> <span class="dim">(+ <code>…merge</code> → refs/heads/dev)</span></td></tr>
+<tr><td>хэш ① локальной</td><td><code>git rev-parse HEAD</code></td><td><span class="dim">(или по имени: <code>git rev-parse dev</code>)</span></td></tr>
+<tr><td>хэш ② кэша</td><td><code>git rev-parse @{u}</code></td><td><span class="dim">(или <code>git rev-parse script/dev</code>)</span></td></tr>
+<tr><td>хэш ③ сервера живьём</td><td><code>git ls-remote --heads script dev</code></td><td>хэш + refs/heads/dev</td></tr>
+</table>
+<pre>
+чтение трёх хэшей:
+  ①=②=③   полная синхронизация
+  ①≠②=③   накоммитил локально, push ещё не делал (ahead)
+  ①=②≠③   КЭШ ПРОТУХ — на сервере новое → git fetch script
+</pre>
+
+<h2>2в · Ветки: создать · переключиться · привязать · удалить</h2>
+<table>
+<tr><th>команда</th><th>что даёт</th></tr>
+<tr><td><code>git switch имя</code></td><td>переключиться на существующую ветку</td></tr>
+<tr><td><code>git switch -c имя</code></td><td>создать новую от текущего коммита и перейти на неё</td></tr>
+<tr><td><code>git switch -c имя точка</code></td><td>создать от указанной точки (хэш / main / script/main)</td></tr>
+<tr><td><code>git push -u script имя</code></td><td>ПЕРВЫЙ push новой ветки: создаёт её на GitHub + записывает привязку (-u = --set-upstream, один раз; дальше хватает голого <code>git push</code>)</td></tr>
+<tr><td><code>git branch -m старое новое</code></td><td>переименовать локальную ветку</td></tr>
+<tr><td><code>git branch -d имя</code></td><td>удалить локальную (откажет, если не влита — защита; форс <code>-D</code> осознанно)</td></tr>
+<tr><td><code>git push script --delete имя</code></td><td>удалить ветку НА GitHub (действие наружу!)</td></tr>
+</table>
+<div class="rule">Ветка на GitHub рождается в момент первого <code>push -u</code> — заранее заводить не надо. Имя локальной и серверной может различаться (<code>git push script лок:серв</code>), но одинаковые имена = конвенция, спасающая рассудок.</div>
+
 <h2>3 · Изменить и закоммитить</h2>
 <pre>
 РАБОЧАЯ ПАПКА ──git add──► STAGING ──git commit──► ИСТОРИЯ ──git push──► GITHUB
