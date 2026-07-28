@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Мастер-карта конвейера: миры, обязательность, верификаторы</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#151b23;
+    --ink:#e6edf3; --dim:#9aa4af; --faint:#6b7480; --line:#252e3a;
+    --gate:#f0883e; --gate-bd:rgba(240,136,62,.55);
+    --obs:#56b6c2; --obs-bd:rgba(86,182,194,.50);
+    --bridge:#bc8cff; --bridge-bg:rgba(188,140,255,.10);
+    --pc:#6cb6ff; --pc-bg:rgba(108,182,255,.11);
+    --gh:#d2a8ff; --gh-bg:rgba(210,168,255,.11);
+    --prod:#5fd38d; --prod-bg:rgba(95,211,141,.11);
+    --req:#ff6b81; --opt:#e3b341; --none:#6b7480;
+    --w-fill:#cdd6e0; --w-empty:#333c48;
+    --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.4;
+    -webkit-font-smoothing:antialiased;padding:26px 18px 40px}
+  .wrap{max-width:1320px;margin:0 auto}
+
+  .head{padding-bottom:14px;margin-bottom:16px}
+  .title{font-family:var(--mono);font-size:21px;font-weight:700;letter-spacing:-.5px;display:flex;gap:10px;flex-wrap:wrap;align-items:baseline}
+  .title .arr{color:var(--faint);font-weight:400}
+  .sub{color:var(--dim);font-size:12.5px;margin-top:6px;max-width:900px}
+
+  /* three-machine diagram */
+  .machines{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:stretch;gap:0;margin:6px 0 18px}
+  .mbox{border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+  .mbox.pc{background:var(--pc-bg);border-color:var(--pc)}
+  .mbox.gh{background:var(--gh-bg);border-color:var(--gh)}
+  .mbox.prod{background:var(--prod-bg);border-color:var(--prod)}
+  .mbox .mt{font-family:var(--mono);font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px}
+  .mbox.pc .mt{color:var(--pc)} .mbox.gh .mt{color:var(--gh)} .mbox.prod .mt{color:var(--prod)}
+  .mbox .mev{font-size:10.5px;color:var(--dim);margin-top:6px;line-height:1.5}
+  .mbox .mev b{color:var(--ink);font-weight:600}
+  .mbox .mev code{font-family:var(--mono);font-size:10px}
+  .conn{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 10px;min-width:96px}
+  .conn .lbl{font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--bridge);white-space:nowrap}
+  .conn .ar{color:var(--bridge);font-size:18px;line-height:1}
+  .conn .dir{font-size:9px;color:var(--faint);white-space:nowrap;margin-top:2px}
+  .mnote{font-size:11px;color:var(--dim);margin-top:10px;padding:9px 12px;border-left:3px solid var(--gh);background:var(--gh-bg);border-radius:0 7px 7px 0;line-height:1.5}
+  .mnote b{color:var(--gh)} .mnote .pcw{color:var(--pc);font-weight:600} .mnote .prw{color:var(--prod);font-weight:600}
+
+  /* principle */
+  .principle{margin:14px 0 4px;padding:11px 14px;border-radius:8px;background:linear-gradient(rgba(240,136,62,.08),rgba(240,136,62,.08)),#151b23;border:1px solid var(--gate-bd);font-size:12px;line-height:1.55}
+  .principle b{color:var(--gate);font-weight:700}
+  .principle .socket{font-family:var(--mono);color:var(--obs);font-size:11px}
+
+  /* legend */
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0 0;font-size:11px;color:var(--dim)}
+  .lg{display:flex;align-items:center;gap:6px}
+  .lg .mk{font-size:11px}
+  .lg b{font-family:var(--mono);font-weight:700;font-size:10.5px}
+  .gateL .mk,.gateL b{color:var(--gate)} .obsL .mk,.obsL b{color:var(--obs)}
+  .pcL b{color:var(--pc)} .ghL b{color:var(--gh)} .prodL b{color:var(--prod)}
+  .reqL b{color:var(--req)} .optL b{color:var(--opt)} .noneL b{color:var(--none)}
+  .lg .wbar{font-family:var(--mono);letter-spacing:-1px} .lg .wbar .f{color:var(--w-fill)} .lg .wbar .e{color:var(--w-empty)}
+
+  /* table */
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:9px;margin-top:14px}
+  table{border-collapse:collapse;width:100%;min-width:1040px;font-size:11.5px}
+  thead th{position:sticky;top:0;background:#11161d;color:var(--faint);font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap;z-index:2}
+  tbody td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+
+  /* machine zone bands */
+  tr.zone th{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);font-size:12px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase}
+  tr.zone .tag{color:var(--faint);font-weight:500;letter-spacing:.3px;font-size:10.5px;text-transform:none;margin-left:8px}
+  tr.zone-pc th{background:var(--pc-bg);color:var(--pc)}
+  tr.zone-gh th{background:var(--gh-bg);color:var(--gh)}
+  tr.phase td{background:#10151c;padding:6px 12px;border-bottom:1px solid var(--line);font-size:10px;letter-spacing:1.1px;text-transform:uppercase;color:var(--faint);font-weight:600}
+  tr.phase .opt{color:var(--bridge);letter-spacing:.3px;text-transform:none;font-weight:500}
+  tr.bridge td{background:var(--bridge-bg);border-top:1px dashed var(--bridge);border-bottom:1px dashed var(--bridge);padding:10px 14px}
+  .bridge-in{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .bridge-in .bcode{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--bridge)}
+  .bridge-in .bnote{font-size:10.5px;color:var(--dim);margin-left:auto}
+
+  td.c-ev{width:1%;white-space:nowrap;border-left:3px solid transparent}
+  .ev-name{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--ink);letter-spacing:-.2px}
+  .ev-when{font-size:10px;color:var(--faint);margin-top:3px}
+  tr.g td.c-ev{border-left-color:var(--gate-bd)} tr.o td.c-ev{border-left-color:var(--obs-bd)}
+  td.c-ev .ev-desc{white-space:normal;max-width:185px;font-size:9.5px;color:var(--faint);margin-top:4px;line-height:1.5}
+  td.c-ev .ev-desc code{font-family:var(--mono);color:var(--dim);font-size:9px}
+  td.c-why code{font-family:var(--mono);color:var(--ink);font-size:10px}
+
+  td.c-mach{white-space:nowrap;width:1%;font-size:11px;font-weight:600}
+  .chip-pc{color:var(--pc)} .chip-gh{color:var(--gh)} .chip-prod{color:var(--prod)}
+  td.c-mach .land{display:block;font-size:9.5px;color:var(--faint);font-weight:400;margin-top:2px}
+
+  td.c-obl{white-space:nowrap;width:1%;font-size:10.5px;font-weight:700}
+  .obl-req{color:var(--req)} .obl-opt{color:var(--opt)} .obl-none{color:var(--none)}
+  td.c-obl .sub2{display:block;font-size:9px;font-weight:400;color:var(--faint);margin-top:2px}
+
+  td.c-ver{color:var(--ink);min-width:300px;line-height:1.55}
+  td.c-ver .t{font-family:var(--mono);font-size:10.5px;color:var(--obs);font-weight:600}
+  td.c-ver .tool{font-family:var(--mono);font-size:10px;color:var(--faint)}
+  td.c-ver .wbar{font-family:var(--mono);font-size:11px;letter-spacing:-1px;margin-left:4px} td.c-ver .wbar .f{color:var(--w-fill)} td.c-ver .wbar .e{color:var(--w-empty)}
+  td.c-ver.none{color:var(--faint)}
+  td.c-ver .vrow{display:block;font-size:10.5px;line-height:1.5;margin-bottom:2px;color:var(--dim)}
+  td.c-ver .vrow b{color:var(--obs);font-weight:600;font-family:var(--mono);font-size:10.5px}
+  td.c-ver .vrow code{font-family:var(--mono);color:var(--faint);font-size:9.5px}
+  td.c-why{color:var(--dim);min-width:200px;line-height:1.5}
+  td.c-why .stop{color:var(--gate);font-weight:600}
+
+  tr.mute td{opacity:.5} tr.mute:hover td{opacity:.78}
+  tbody tr.row:hover td{background:rgba(255,255,255,.02)}
+  tbody tr:last-child td{border-bottom:none}
+
+  /* cards */
+  .cards{margin-top:20px;display:grid;grid-template-columns:1.1fr 1fr;gap:14px}
+  .card{background:#1a212b;border:1px solid var(--line);border-radius:9px;padding:13px 15px}
+  .card h4{font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:var(--faint);margin-bottom:9px;font-weight:700}
+  .card p{font-size:11.5px;color:var(--dim);line-height:1.55} .card p+p{margin-top:7px}
+  .card code{font-family:var(--mono);color:var(--ink);font-size:11px}
+  .card .n{color:var(--ink);font-weight:600}
+
+  /* pyramid */
+  .pyr{font-family:var(--mono);font-size:10.5px;line-height:1.7;margin:4px 0}
+  .pyr .lvl{display:block;white-space:nowrap}
+  .pyr .e2e{color:#ff8da1} .pyr .ctr{color:#d2a8ff} .pyr .intg{color:#56b6c2} .pyr .unit{color:#5fd38d} .pyr .mut{color:#e3b341}
+  .pyr .pl{color:var(--faint);font-family:var(--sans);font-size:10px}
+
+  /* obligation summary */
+  .obls{display:flex;flex-direction:column;gap:8px;margin-top:2px}
+  .oblrow{display:flex;gap:9px;align-items:flex-start;font-size:11px}
+  .oblrow .b{font-family:var(--mono);font-weight:700;font-size:10px;white-space:nowrap;padding-top:1px;min-width:78px}
+  .oblrow.req .b{color:var(--req)} .oblrow.opt .b{color:var(--opt)} .oblrow.none .b{color:var(--none)}
+  .oblrow .x{color:var(--dim);line-height:1.45}
+  .oblrow .x b{color:var(--ink)}
+
+  /* glossary */
+  .gloss-h{font-size:11px;letter-spacing:1.3px;text-transform:uppercase;color:var(--faint);font-weight:700;margin:26px 0 12px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+  .gloss{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:9px}
+  .gi{background:#151b23;border:1px solid var(--line);border-radius:7px;padding:9px 11px}
+  .gi .term{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--ink);margin-bottom:4px}
+  .gi .term .en{color:var(--faint);font-weight:400;font-size:10px}
+  .gi .term .pct{color:var(--prod);font-weight:600;font-size:10px}
+  .gi .def{font-size:11px;color:var(--dim);line-height:1.5}
+  .gi .def b{color:var(--ink);font-weight:600} .gi .def code{font-family:var(--mono);color:var(--obs);font-size:10.5px}
+  .gi .where{display:block;margin-top:4px;font-size:10px;color:var(--faint)} .gi .where b{color:var(--pc)}
+
+  /* human/AI test cards */
+  .gi.human{border-color:#d2a8ff;background:linear-gradient(rgba(210,168,255,.06),rgba(210,168,255,.06)),#151b23}
+  .gi.human .term{color:#d2a8ff}
+  .gi .htag{font-size:9px;font-weight:600;color:#d2a8ff;letter-spacing:.3px}
+
+  /* weight split card */
+  .wsplit{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:2px 0 8px}
+  .wcol{border-radius:7px;padding:9px 11px}
+  .wcol.stg{background:rgba(95,211,141,.08);border:1px solid rgba(95,211,141,.4)}
+  .wcol.prd{background:rgba(255,107,129,.08);border:1px solid rgba(255,107,129,.4)}
+  .wcol .wh{font-family:var(--mono);font-size:11px;font-weight:700;margin-bottom:5px}
+  .wcol.stg .wh{color:var(--prod)} .wcol.prd .wh{color:var(--req)}
+  .wcol .wt{font-size:10.5px;color:var(--dim);line-height:1.5}
+  .wcol .wt b{font-family:var(--mono);font-size:10px}
+  .wcol.stg .wt b{color:var(--obs)} .wcol.prd .wt b{color:var(--obs)}
+
+  /* techniques section */
+  .tech{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:9px}
+  .ti{background:#151b23;border:1px solid var(--line);border-left:3px solid var(--bridge);border-radius:7px;padding:10px 12px}
+  .ti.world{border-left-color:var(--prod)}
+  .ti .tn{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--ink);margin-bottom:5px;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .ti .badge{font-size:8.5px;font-weight:700;padding:1px 6px;border-radius:4px;background:var(--bridge-bg);color:var(--bridge);letter-spacing:.4px;text-transform:uppercase}
+  .ti.world .badge{background:rgba(95,211,141,.12);color:var(--prod)}
+  .ti .td{font-size:11px;color:var(--dim);line-height:1.5}
+  .ti .td b{color:var(--ink)} .ti .td code{font-family:var(--mono);color:var(--obs);font-size:10.5px}
+  .ti .solo{display:block;margin-top:5px;font-size:9.5px;color:var(--faint)} .ti .solo b{color:var(--opt)}
+
+  @media (max-width:720px){.machines{grid-template-columns:1fr}.conn{flex-direction:row;padding:8px 0;min-width:0}.conn .ar{transform:rotate(90deg)}.cards{grid-template-columns:1fr}.gloss{grid-template-columns:1fr}.title{font-size:18px}.wsplit{grid-template-columns:1fr}.tech{grid-template-columns:1fr}}
+  @media print{
+    body{background:#fff;color:#111;padding:0}
+    .tablewrap,.card,.gi,.mbox{border-color:#ccc}
+    thead th{background:#f3f3f3;color:#555}
+    .ev-name,td.c-ver,.card code,.gi .term,.gi .def b{color:#111}
+    .ev-when,td.c-why,.sub,.card p,.gi .def{color:#444}
+    .card,.gi{background:#fff}
+    .principle{background:#fdf6f0}
+    tbody tr.row:hover td{background:none} tr.mute td{opacity:.6}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <div class="title">мастер-карта конвейера <span class="arr">·</span> миры · обязательность · верификаторы</div>
+    <p class="sub">Три вещи разом: <b style="color:var(--pc)">где какая машина</b> (события не там, где ты думаешь), <b style="color:var(--req)">где проверка обязательна</b>, а где можно ничего не проверять, и <b style="color:var(--obs)">какой верификатор</b> (юнит / интеграция / контракт / мутации / E2E) ставить на каждой точке.</p>
+  </header>
+
+  <!-- THREE MACHINES -->
+  <div class="machines">
+    <div class="mbox pc"><div class="mt">💻 ТВОЙ ПК</div><div class="mev"><b>события ЗДЕСЬ:</b> git-хуки<br><code>pre-commit, pre-push, commit-msg</code><br>пишешь код, локальные проверки</div></div>
+    <div class="conn"><div class="lbl">git&nbsp;push</div><div class="ar">→</div><div class="dir">ты отправляешь</div></div>
+    <div class="mbox gh"><div class="mt">☁️ СЕРВЕРА GITHUB</div><div class="mev"><b>события ЗДЕСЬ:</b> <code>on:push, on:PR…</code><br>CI бежит здесь (на их раннере<br>или на твоём self-hosted)</div></div>
+    <div class="conn"><div class="lbl">деплой&nbsp;/&nbsp;pull</div><div class="ar">→</div><div class="dir">прод сам тянет</div></div>
+    <div class="mbox prod"><div class="mt">🚀 ПРОД</div><div class="mev"><b>событий НЕТ.</b><br>только ПРИНИМАЕТ деплой<br>и крутит продукт</div></div>
+  </div>
+  <div class="mnote"><b>Вот почему «GitHub-события на моём проде» не бывает:</b> событие <code>on:push</code> фиксируется на <b>серверах GitHub</b> (куда прилетел push), а не на твоём ПК и не на проде. <span class="pcw">💻 ПК</span> и <span style="color:var(--gh)">☁️ GitHub</span> — единственные места, где рождаются события. <span class="prw">🚀 Прод</span> событий не имеет — он лишь получатель в конце, который сам забирает проверенный код (<code>git pull</code>) или принимает деплой. Даже если прод и дев на одной коробке — события всё равно «случаются» на GitHub, а машина общается с ними через push (туда) и pull (обратно).</div>
+
+  <div class="principle"><b>И главное про проверки:</b> они <b>не встроены</b> в точки. Точка = <span class="socket">розетка</span> (момент), проверка = <span class="socket">прибор</span>, который ставишь <b>ты</b>. Колонка «обязательность» ниже — это не «git так требует», а индустриальное «что стоит сделать гейтом, а что можно пропустить». В колонке верификаторов: <span style="color:var(--prod)">(готовый: …)</span> — берёшь готовый инструмент, <span style="color:var(--opt)">(свой)</span> — пишешь сам.</div>
+
+  <div class="principle" style="border-color:rgba(108,182,255,.5)"><b style="color:var(--pc)">Инструменты в карте показаны на Rust.</b> Для Python-проекта (наш bmad-orchestrator) подставляй эквиваленты — роли и места ТЕ ЖЕ, меняется только прибор: <code>rustfmt → ruff format</code> · <code>clippy → ruff check</code> · <code>компилятор (типы) → mypy</code> · <code>cargo test → pytest</code> · <code>cargo-llvm-cov → pytest-cov</code> · <code>cargo-audit → pip-audit</code> · <code>cargo-deny (лицензии) → pip-licenses</code> · <code>cargo-mutants → mutmut</code> · <code>cargo-fuzz / property → hypothesis</code>.</div>
+
+  <div class="legend">
+    <span class="lg gateL"><span class="mk">◆</span><b>гейт</b> блокирует</span>
+    <span class="lg obsL"><span class="mk">◇</span><b>обсервер</b></span>
+    <span class="lg pcL">💻<b>ПК</b></span>
+    <span class="lg ghL">☁️<b>GitHub</b></span>
+    <span class="lg prodL">🚀<b>прод</b></span>
+    <span class="lg reqL">🔴<b>обязательно</b></span>
+    <span class="lg optL">🟡<b>опционально</b></span>
+    <span class="lg noneL">⚪<b>нечего проверять</b></span>
+    <span class="lg"><span class="wbar"><span class="f">▰</span><span class="e">▱▱▱</span></span> сек → <span class="wbar"><span class="f">▰▰▰▰</span></span> часы</span>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Событие</th>
+        <th>Где событие</th>
+        <th>Обязательность</th>
+        <th>Какие верификаторы ставить</th>
+        <th>Зачем тут</th>
+      </tr>
+    </thead>
+    <tbody>
+
+      <!-- ПК -->
+      <tr class="zone zone-pc"><th colspan="5">💻 Твой ПК<span class="tag">события git-хуков · бегут на твоей машине · обходимы</span></th></tr>
+
+      <tr class="phase"><td colspan="5">① ветка / worktree</td></tr>
+      <tr class="row o mute"><td class="c-ev"><div class="ev-name">post-checkout</div><div class="ev-when">после switch / worktree</div></td><td class="c-mach"><span class="chip-pc">💻 ПК</span></td><td class="c-obl"><span class="obl-none">⚪ нечего</span></td><td class="c-ver none">— настройка окружения, не проверка</td><td class="c-why">готовое окружение под ветку</td></tr>
+
+      <tr class="phase"><td colspan="5">② коммит</td></tr>
+      <tr class="row g"><td class="c-ev"><div class="ev-name">pre-commit</div><div class="ev-when">перед рождением коммита</div><div class="ev-desc">git-хук (скрипт), ставишь сам. Падает (<code>exit≠0</code> = ошибка) → коммит не создаётся.</div></td><td class="c-mach"><span class="chip-pc">💻 ПК</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">желательно, но обходим</span></td><td class="c-ver"><span class="vrow"><b>форматтер</b> авто-отступы/пробелы <span style="color:var(--prod)">(готовый: <code>rustfmt</code>)</span></span><span class="vrow"><b>линтер</b> ищет подозрительный код <span style="color:var(--prod)">(готовый: <code>clippy</code>)</span></span><span class="vrow"><b>секрет-скан</b> не вписал ли пароль/токен <span style="color:var(--prod)">(готовый: <code>gitleaks</code>)</span></span><span class="vrow"><b>юнит изменённого</b> тесты правленых файлов <span style="color:var(--opt)">(тесты пишешь сам, гоняет <code>cargo test</code>)</span></span><span class="vrow"><b>тайпчек</b> типы сходятся <span style="color:var(--prod)">(готовый: компилятор Rust)</span></span><span class="wbar"><span class="f">▰</span><span class="e">▱▱▱</span></span> <span style="font-size:9.5px;color:var(--faint)">сек</span></td><td class="c-why">мгновенный фидбэк до коммита. <span class="stop">Дёргается на КАЖДЫЙ коммит → только быстрое.</span> Тяжёлое повесишь — задолбаешься ждать и начнёшь обходить (<code>git commit --no-verify</code> пропускает хуки), поэтому его уводят в pre-push / CI.</td></tr>
+      <tr class="row o mute"><td class="c-ev"><div class="ev-name">prepare-commit-msg</div><div class="ev-when">перед редактором</div></td><td class="c-mach"><span class="chip-pc">💻 ПК</span></td><td class="c-obl"><span class="obl-none">⚪ нечего</span></td><td class="c-ver none">— шаблон сообщения, не проверка</td><td class="c-why">подставить префикс / тикет</td></tr>
+      <tr class="row g"><td class="c-ev"><div class="ev-name">commit-msg</div><div class="ev-when">перед запечатыванием</div><div class="ev-desc">git-хук. Срабатывает после написания текста, до создания коммита. Плохой формат (<code>exit≠0</code>) → коммит не создаётся, переписываешь.</div></td><td class="c-mach"><span class="chip-pc">💻 ПК</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">соглашение команды</span></td><td class="c-ver"><span class="vrow"><b>формат сообщения</b> — проверяет, что текст начинается со слова-типа: <code>feat:</code> (новая функция) / <code>fix:</code> (баг) / <code>docs:</code> (доки)<br><span style="color:var(--prod)">(готовый: <code>commitlint</code> — сам не пишешь)</span></span><span class="vrow">✅ <code>feat: add login</code>&nbsp;&nbsp;❌ <code>asdf</code></span><span class="wbar"><span class="f">▰</span><span class="e">▱▱▱</span></span> <span style="font-size:9.5px;color:var(--faint)">мгновенно</span></td><td class="c-why">сам commit-msg <b>только проверяет формат</b> и пускает / не пускает коммит. А <b>changelog</b> (список изменений) и <b>semver</b> (номер версии <code>1.4.2</code>) делает <b>другой</b> инструмент <span style="color:var(--prod)">(готовый: <code>semantic-release</code>)</span> ПОТОМ, при релизе — читая эти префиксы. commit-msg лишь готовит почву.</td></tr>
+      <tr class="row o mute"><td class="c-ev"><div class="ev-name">post-commit</div><div class="ev-when">коммит создан</div></td><td class="c-mach"><span class="chip-pc">💻 ПК</span></td><td class="c-obl"><span class="obl-none">⚪ нечего</span></td><td class="c-ver none">— уведомление, не проверка</td><td class="c-why">лог, нотификация</td></tr>
+
+      <tr class="phase"><td colspan="5">③ локальный merge <span class="opt">если мерджишь на машине</span></td></tr>
+      <tr class="row g"><td class="c-ev"><div class="ev-name">pre-merge-commit</div><div class="ev-when">перед merge-коммитом</div><div class="ev-desc">git-хук. Срабатывает ТОЛЬКО когда <code>git merge</code> создаёт merge-коммит. При fast-forward (частый случай: main не ушёл вперёд, git просто передвигает указатель — коммита нет) хук молча НЕ запускается; заставить: <code>git merge --no-ff</code>. При конфликте коммит-резолв проверяет pre-commit, не этот хук. Падает (<code>exit≠0</code>) → merge отменяется.</div></td><td class="c-mach"><span class="chip-pc">💻 ПК</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">если мерджишь локально</span></td><td class="c-ver"><span class="vrow"><b>юнит на смерженном результате</b> — тесты на коде ПОСЛЕ слияния <span style="color:var(--opt)">(тесты пишешь сам, гоняет <code>cargo test</code>)</span></span><span class="vrow">ловит «по отдельности зелёные, вместе ломаются»</span><span class="wbar"><span class="f">▰▰</span><span class="e">▱▱</span></span> <span style="font-size:9.5px;color:var(--faint)">сек–мин</span></td><td class="c-why">две ветки могут быть зелёными <b>по отдельности</b>, но вместе сломаться по логике (не текст-конфликт, а поведение). Ловит это до запечатывания merge. Реже pre-commit — только при локальном merge (через PR на GitHub эту роль играет CI).</td></tr>
+      <tr class="row o mute"><td class="c-ev"><div class="ev-name">post-merge</div><div class="ev-when">merge завершён</div></td><td class="c-mach"><span class="chip-pc">💻 ПК</span></td><td class="c-obl"><span class="obl-none">⚪ нечего</span></td><td class="c-ver none">— пересборка, не проверка</td><td class="c-why">обновить зависимости</td></tr>
+
+      <tr class="phase"><td colspan="5">④ push</td></tr>
+      <tr class="row g"><td class="c-ev"><div class="ev-name">pre-push</div><div class="ev-when">перед отправкой</div><div class="ev-desc">git-хук. Срабатывает при <code>git push</code>, перед отправкой на удалёнку. Падает (<code>exit≠0</code>) → push не уходит.</div></td><td class="c-mach"><span class="chip-pc">💻 ПК</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">обходим --no-verify</span></td><td class="c-ver"><span class="vrow"><b>полный юнит-сьют</b> — ВСЕ тесты проекта, не только изменённого <span style="color:var(--opt)">(тесты пишешь сам, гоняет <code>cargo test</code>)</span></span><span class="vrow"><b>тайпчек</b> типы сходятся <span style="color:var(--prod)">(готовый: компилятор Rust)</span></span><span class="vrow"><b>сборка</b> собирается ли проект целиком <span style="color:var(--prod)">(готовый: <code>cargo build</code>)</span></span><span class="vrow"><b>ключевые интеграционные</b> <span style="color:var(--opt)">(тесты пишешь сам, <code>cargo test</code>)</span></span><span class="wbar"><span class="f">▰▰</span><span class="e">▱▱</span></span> <span style="font-size:9.5px;color:var(--faint)">минуты</span></td><td class="c-why">последний локальный рубеж перед тем, как код уйдёт на GitHub и станет общим. Тяжелее pre-commit (весь проект, не только изменённое), но push реже коммита — можно позволить. Быстрее, чем гонять CI на битом коде. <span class="stop">Обходим (--no-verify) → удобство, не гарантия</span> (гарантию даёт CI на сервере).</td></tr>
+
+      <!-- bridge -->
+      <tr class="bridge"><td colspan="5"><div class="bridge-in"><span class="bcode">git push  💻 → ☁️</span><span class="bnote">код уходит на сервера GitHub · дальше события и проверки уже ТАМ, на чистой машине, обойти нельзя</span></div></td></tr>
+
+      <tr class="phase"><td colspan="5">⑤ свой git-сервер <span class="opt">опц. · push-to-deploy вместо GitHub · 💻 твоя машина · ⚠️ серверные хуки НЕ обходятся --no-verify — ярлык «обходимы» выше касается только локальных ①–④</span></td></tr>
+      <tr class="row g"><td class="c-ev"><div class="ev-name">pre-receive / update</div><div class="ev-when">сервер принял push</div><div class="ev-desc">Серверные git-хуки на ТВОЁМ git-сервере (не на GitHub). Срабатывают когда сервер получил push, но ещё не записал в refs. Падает (<code>exit≠0</code>) → push отклонён. <code>pre-receive</code> — раз на весь push; <code>update</code> — на каждый реф (ветку ИЛИ тег: пример <code>v*.*.*</code> ниже — это теги).</div></td><td class="c-mach"><span class="chip-pc">💻 свой сервер</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">только push-to-deploy</span></td><td class="c-ver"><span class="vrow"><b>защита ветки</b> — запретить прямой push в main <span style="color:var(--opt)">(свой скрипт; на GitHub = branch protection)</span></span><span class="vrow"><b>формат рефов</b> — имена по правилу: <code>feature/*</code>, <code>v*.*.*</code> <span style="color:var(--opt)">(свой скрипт)</span></span><span class="vrow"><b>подпись коммитов</b> — пускать только подписанные <span style="color:var(--opt)">(свой скрипт)</span></span><span class="wbar"><span class="f">▰</span><span class="e">▱▱▱</span></span> <span style="font-size:9.5px;color:var(--faint)">мгновенно</span></td><td class="c-why">твой аналог <b>branch protection</b>, но на СВОЁМ сервере (если push-to-deploy на свой bare-репо вместо GitHub). Решает на приёме: впустить push в историю сервера или отклонить. На GitHub этих хуков нет — там сервер не твой, роль играет branch protection.</td></tr>
+      <tr class="row o mute"><td class="c-ev"><div class="ev-name">post-receive</div><div class="ev-when">push принят</div></td><td class="c-mach"><span class="chip-pc">💻 свой сервер</span></td><td class="c-obl"><span class="obl-none">⚪ нечего</span></td><td class="c-ver none">— деплой, не проверка</td><td class="c-why">собрать + рестарт (выкатка)</td></tr>
+
+      <!-- GITHUB -->
+      <tr class="zone zone-gh"><th colspan="5">☁️ Сервера GitHub<span class="tag">события on:* фиксируются здесь · чистая машина · гарантию даёт не сам прогон, а required check + branch protection</span></th></tr>
+
+      <tr class="phase"><td colspan="5">⑥ после push — ядро проверок</td></tr>
+      <tr class="row o"><td class="c-ev"><div class="ev-name">on: push</div><div class="ev-when">push дошёл до GitHub</div><div class="ev-desc">НЕ git-хук — триггер в <code>.yml</code> (workflow), пишешь сам. Срабатывает на серверах GitHub: оркестратор читает <code>.yml</code> → раннер (чистая машина) выполняет. <b>Обсервер</b> — сам не блокирует.</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span></td><td class="c-obl"><span class="obl-req">🔴 ОБЯЗ.</span><span class="sub2">минимум для любого проекта</span></td><td class="c-ver"><span class="vrow"><b>полный юнит</b> — ВСЕ тесты проекта <span style="color:var(--opt)">(тесты пишешь сам, <code>cargo test</code>)</span></span><span class="vrow"><b>интеграционные</b> — части вместе, реальные БД <span style="color:var(--opt)">(тесты сам + готовый <code>Testcontainers</code>)</span></span><span class="vrow"><b>SAST</b> — код на дыры статикой <span style="color:var(--prod)">(готовый: <code>Semgrep</code> / <code>CodeQL</code>)</span></span><span class="vrow"><b>SCA</b> — библиотеки на CVE <span style="color:var(--prod)">(готовый: <code>cargo-audit</code>)</span></span><span class="vrow"><b>тайпчек + сборка</b> <span style="color:var(--prod)">(готовый: компилятор / <code>cargo build</code>)</span></span><span class="vrow"><b>порог покрытия</b> — % кода под тестами <span style="color:var(--prod)">(готовый: <code>cargo-llvm-cov</code>)</span></span><span class="wbar"><span class="f">▰▰▰</span><span class="e">▱</span></span> <span style="font-size:9.5px;color:var(--faint)">минуты (&lt;10)</span></td><td class="c-why">первая проверка на ЧИСТОЙ машине (раннер с нуля) — ловит «работает только у меня из-за локального хлама», чего pre-push не может. <span class="stop">Но сам прогон обходим:</span> ① <code>[skip ci]</code> в сообщении коммита официально пропускает workflow; ② сам <code>.yml</code> лежит В РЕПО — кто пушит (в т.ч. твой LLM-агент!), может его ослабить или удалить. Гарантию даёт связка required check + branch protection: исчезнувший workflow вечно «Pending» → merge заблокирован. Ослабленный ИЗНУТРИ ловится только ревью правок <code>.github/**</code> — root of trust: кто пишет файл-правило, тот и победил.</td></tr>
+      <tr class="row o"><td class="c-ev"><div class="ev-name">on: pull_request</div><div class="ev-when">PR открыт / обновлён</div><div class="ev-desc">Триггер в <code>.yml</code> (как on:push), но на событие PR: открыт или обновлён новым пушем. Тоже обсервер, на чистой машине. Контекст — <b>предлагаемое слияние ветки в main</b>.</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span></td><td class="c-obl"><span class="obl-req">🔴 ОБЯЗ.</span></td><td class="c-ver"><span class="vrow"><b>всё из on:push</b> — полный юнит + интеграционные + SAST + SCA + сборка</span><span class="vrow"><b>контрактные</b> — границы сервисов/API <span style="color:var(--opt)">(тесты сам + готовый <code>Pact</code>)</span></span><span class="vrow"><b>компонентные</b> — UI-компоненты <span style="color:var(--opt)">(тесты пишешь сам)</span></span><span class="vrow"><b>дифф покрытия</b> — покрытие именно изменённых строк <span style="color:var(--prod)">(<code>cargo-llvm-cov</code> лишь генерит отчёт; сам дифф считает надстройка: Codecov patch / <code>diff-cover</code>)</span></span><span class="vrow"><b>smoke E2E</b> — быстрый прогон критичных флоу <span style="color:var(--opt)">(тесты пишешь сам)</span></span><span class="vrow"><b>ревью</b> — <span style="color:var(--opt)">человек (место в PR)</span> / <span style="color:var(--prod)">Claude (готовая интеграция Action)</span></span><span class="wbar"><span class="f">▰▰▰</span><span class="e">▱</span></span> <span style="font-size:9.5px;color:var(--faint)">минуты</span></td><td class="c-why">PR — это предложение влить ветку в main, и здесь стоит merge-гейт. on:pull_request гоняет проверки на ЭТОТ предполагаемый merge + добавляет то, чего нет на push: <b>ревью</b> (человек/Claude) и <b>дифф покрытия</b>. Последний автоматический рубеж перед слиянием в общую ветку.</td></tr>
+
+      <tr class="phase"><td colspan="5">⑦ ревью и merge-гейт</td></tr>
+      <tr class="row o mute"><td class="c-ev"><div class="ev-name">on: issue_comment</div><div class="ev-when">коммент в PR</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span></td><td class="c-obl"><span class="obl-none">⚪ нечего</span></td><td class="c-ver none">— триггер <span class="tool">@claude</span>, не проверка</td><td class="c-why">запуск ревью / правки по запросу</td></tr>
+      <tr class="row o"><td class="c-ev"><div class="ev-name">on: pull_request_review</div><div class="ev-when">ревью отправлено</div><div class="ev-desc">Триггер в <code>.yml</code>. Срабатывает, когда ревьюер ОТПРАВИЛ ревью (approve / request-changes / comment). Реагирует на факт ревью — это не проверка, а зацепка для скрипта.</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">ревью обяз. для критич. кода</span></td><td class="c-ver"><span class="vrow"><b>само ревью</b> — суждение: дизайн, логика, читаемость <span style="color:var(--opt)">(человек / Claude — происходит на on:pull_request)</span></span><span class="vrow"><b>реакция на ивент</b> — при аппруве авто-метка, при request-changes оповещение <span style="color:var(--opt)">(свой скрипт)</span></span></td><td class="c-why">ревью ловит то, где тесты бессильны: удачен ли дизайн, читаем ли код, верна ли логика — это <b>человеческое / LLM суждение</b>, не сверка с эталоном. Сам ивент лишь реагирует на отправку ревью (например, метка «одобрено»). Не путать: ревью = ценность, ивент = триггер на его отправку.</td></tr>
+      <tr class="row g"><td class="c-ev"><div class="ev-name">branch protection</div><div class="ev-when">Merge ИЛИ прямой push в main</div><div class="ev-desc">НЕ событие и НЕ скрипт — это <b>НАСТРОЙКА</b> репозитория (правило на ветку main). Включаешь галочками в настройках GitHub, не пишешь <code>.yml</code>. Держит ДВЕ двери: кнопку Merge и прямой push мимо PR. Современный вариант той же настройки — <b>rulesets</b> (та же роль, гибче; classic тоже ок).</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span></td><td class="c-obl"><span class="obl-req">🔴 ОБЯЗ.</span><span class="sub2">это и есть принуждение</span></td><td class="c-ver"><span class="vrow"><b>не гонит проверки — ТРЕБУЕТ их.</b> Включаешь галочками <span style="color:var(--bridge)">(настройка GitHub, не код)</span></span><span class="vrow"><b>зелёные status checks</b> — результаты CI из on:push/PR должны пройти</span><span class="vrow"><b>N аппрувов</b> — нужно ≥N одобрений ревью (соло → 0)</span><span class="vrow"><b>+ опц. галочки:</b> линейная история, подписанные коммиты</span><span class="vrow"><b>порог покрытия — НЕ галочка:</b> приходит как сторонний required check (Codecov / свой CI-job, падающий ниже порога)</span><span class="wbar"><span class="f">▰</span><span class="e">▱▱▱</span></span> <span style="font-size:9.5px;color:var(--faint)">мгновенно (гейтит)</span></td><td class="c-why"><span class="stop">ЕДИНСТВЕННОЕ, что делает проверки обязательными.</span> Без него зелёный/красный CI — просто информация: можно слить и красное. Блокирует кнопку Merge, пока условия не сошлись — превращает совет в стену. На своём сервере та же роль у <code>pre-receive</code>/<code>update</code>.</td></tr>
+      <tr class="row o"><td class="c-ev"><div class="ev-name">on: merge_group</div><div class="ev-when">элемент в merge queue</div><div class="ev-desc">Триггер в <code>.yml</code>. Срабатывает для каждого элемента очереди слияния. Очередь выстраивает много PR в линию и тестирует каждый в КОМБИНАЦИИ со стоящими впереди, ДО слияния.</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">только при большом потоке PR</span></td><td class="c-ver"><span class="vrow"><b>финальный прогон сьюта</b> — те же тесты (юнит/интеграция), но на комбинации «этот PR + стоящие впереди» <span style="color:var(--opt)">(тесты пишешь сам, те же что в CI)</span></span><span class="wbar"><span class="f">▰▰▰</span><span class="e">▱</span></span> <span style="font-size:9.5px;color:var(--faint)">минуты</span></td><td class="c-why">ловит «по отдельности зелёные, вместе ломаются» на уровне НЕСКОЛЬКИХ PR: каждый PR зелёный против СТАРОГО main, но против main+другие-PR его не гоняли. Очередь проверяет эту комбинацию перед автомерджем. (То же, что pre-merge-commit, но на уровне очереди PR.) Соло мерджишь по одному — комбинации нет, не нужно.</td></tr>
+
+      <tr class="phase"><td colspan="5">⑧ после merge → CD → 🚀 прод</td></tr>
+      <tr class="row o"><td class="c-ev"><div class="ev-name">on: push (main)</div><div class="ev-when">merge влил → build</div><div class="ev-desc">Тот же триггер <code>on:push</code>, но отфильтрован на ветку main. Merge в main — это push в main, поэтому срабатывает тут. <b>Начало CD</b>: собрать продукт + просканировать.</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span></td><td class="c-obl"><span class="obl-req">🔴 ОБЯЗ.</span><span class="sub2">сборка + скан</span></td><td class="c-ver"><span class="vrow"><b>сборка артефакта</b> — собрать готовый продукт (контейнер/бинарь) ОДИН раз + SBOM (список всех компонентов) <span style="color:var(--prod)">(готовый: <code>docker build</code>, SBOM: <code>syft</code>)</span></span><span class="vrow"><b>скан образа</b> — собранный артефакт на CVE <span style="color:var(--prod)">(готовый: <code>Trivy</code>)</span></span><span class="vrow"><b>скан лицензий</b> — лицензии зависимостей ок? <span style="color:var(--prod)">(готовый: <code>cargo-deny</code>)</span></span><span class="wbar"><span class="f">▰▰▰</span><span class="e">▱</span></span> <span style="font-size:9.5px;color:var(--faint)">минуты</span></td><td class="c-why">merge влил в main → теперь main поедет в прод. Собираешь артефакт ОДИН раз и сканируешь сам собранный продукт на CVE ДО выката. Принцип <b>«build once, deploy many»</b>: тот же артефакт катишь на staging и прод (не пересобираешь на каждом — иначе можешь получить разное).</td></tr>
+      <tr class="row o"><td class="c-ev"><div class="ev-name">on: release → staging</div><div class="ev-when">выкатка на двойник</div><div class="ev-desc">Триггер в <code>.yml</code> на событие release (опубликован тег/версия). Берёт готовый артефакт из build, выкатывает на staging. ⚠️ Раскладка «release→staging, кнопка→прод» — ОДИН из вариантов; чаще наоборот: каждый merge в main авто-едет на staging (<code>on:push main</code>), а release/тег — на ПРОД (+ approve через environment).</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span><span class="land">→ 🚀 staging</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">staging ИЛИ эквивалент (ephemeral / canary)</span></td><td class="c-ver"><span class="vrow"><b>полные интеграционные + контрактные</b> — на прод-подобной среде <span style="color:var(--opt)">(тесты пишешь сам + <code>Pact</code>)</span></span><span class="vrow"><b>E2E критичные</b> — весь путь пользователя через запущенный апп <span style="color:var(--opt)">(тесты сам + готовый <code>Playwright</code>)</span></span><span class="vrow"><b>DAST</b> — атаки по запущенному приложению <span style="color:var(--prod)">(готовый: <code>ZAP</code>, бывш. OWASP ZAP, ныне ZAP by Checkmarx)</span></span><span class="vrow"><b>нагрузочные</b> — грузи до отказа <span style="color:var(--prod)">(готовый: <code>k6</code>)</span></span><span class="vrow"><b>chaos</b> — ломай компоненты нарочно <span style="color:var(--prod)">(готовый: <code>Toxiproxy</code>)</span></span><span class="wbar"><span class="f">▰▰▰▰</span></span> <span style="font-size:9.5px;color:var(--faint)">10+ минут</span></td><td class="c-why">staging = двойник по КОНФИГУРАЦИИ и версиям, без клиентов (данные и масштаб всегда беднее прода — PII не копируют, нод меньше; потому и существует shift-right). Тут гоняешь ТЯЖЁЛОЕ и РАЗРУШИТЕЛЬНОЕ (нагрузка до отказа, атаки, chaos) — на живом проде это уронило бы клиентов. Ловит средовые баги (ломается только в прод-среде, не локально) + полносистемные + реал-интеграционные. DAST/нагрузка требуют ЗАПУЩЕННЫЙ апп — потому тут, не в CI. Катишь ТОТ ЖЕ артефакт из build.</td></tr>
+      <tr class="row o mute"><td class="c-ev"><div class="ev-name">on: workflow_dispatch</div><div class="ev-when">кнопка вручную</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span><span class="land">→ 🚀 прод</span></td><td class="c-obl"><span class="obl-none">⚪ нечего</span></td><td class="c-ver none">— ручной запуск деплоя, не проверка</td><td class="c-why">осознанный контроль момента выката</td></tr>
+      <tr class="row g"><td class="c-ev"><div class="ev-name">environment: production</div><div class="ev-when">деплой-job дошёл до прода</div><div class="ev-desc">НЕ событие — <b>НАСТРОЙКА</b> (как branch protection, но на ДЕПЛОЙ): environments в настройках репо. Job с <code>environment: production</code> в <code>.yml</code> встаёт на ПАУЗУ, пока правила environment'а не выполнены.</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span><span class="land">гейтит выкат → 🚀</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">если деплой из Actions</span></td><td class="c-ver"><span class="vrow"><b>required reviewers</b> — кнопка APPROVE: человек одобряет выкат <span style="color:var(--bridge)">(настройка GitHub, не код)</span></span><span class="vrow"><b>wait timer</b> — отлежаться N минут перед выкатом</span><span class="vrow"><b>deployment branch policy</b> — деплоить только из main</span><span class="wbar"><span class="f">▰</span><span class="e">▱▱▱</span></span> <span style="font-size:9.5px;color:var(--faint)">гейтит</span></td><td class="c-why">«branch protection для деплоя»: превращает выкат из авто-события в РЕШЕНИЕ человека (рычаг «спросить», human-in-the-loop). У нас, при pull-деплое руками, роль approve играет сам факт, что pull запускаешь ты.</td></tr>
+      <tr class="row o"><td class="c-ev"><div class="ev-name">on: schedule (cron)</div><div class="ev-when">ночью по таймеру</div><div class="ev-desc">Триггер в <code>.yml</code>, но НЕ на git-событие — по ТАЙМЕРУ. <code>cron</code> = синтаксис расписания (мин час день мес день-недели): <code>0 3 * * *</code> = в 3:00 ежедневно. Единственный, кто срабатывает САМ — без чьего-либо действия вообще (кнопка/коммент/релиз тоже без push, но их жмёт человек). Читается только из main; под нагрузкой GitHub может задержать запуск.</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">желательно для зрелого</span></td><td class="c-ver"><span class="vrow"><b>полный E2E-регресс</b> — ВСЕ E2E, не только критичные <span style="color:var(--opt)">(тесты сам + <code>Playwright</code>)</span></span><span class="vrow"><b>мутационные</b> — качество тестов, критич. модули <span style="color:var(--prod)">(готовый: <code>cargo-mutants</code>)</span></span><span class="vrow"><b>нагрузочные / стресс</b> — долгие прогоны под нагрузкой <span style="color:var(--prod)">(готовый: <code>k6</code>)</span></span><span class="vrow"><b>фаззинг</b> — мусорный ввод, ищет краши <span style="color:var(--prod)">(готовый: <code>cargo-fuzz</code>)</span></span><span class="vrow"><b>полные security-сканы</b> — глубокие SAST/DAST <span style="color:var(--prod)">(готовые)</span></span><span class="wbar"><span class="f">▰▰▰▰</span></span> <span style="font-size:9.5px;color:var(--faint)">часы</span></td><td class="c-why">самое медленное (часы), что не влезает в дневной цикл: повесь на push — CI станет часовым и его начнут обходить. Уводишь в ночь по таймеру, когда никто не ждёт. Не привязано к коду — ловит накопившееся: новые CVE в зависимостях, регрессии, редкие баги от фаззинга.</td></tr>
+      <tr class="row o"><td class="c-ev"><div class="ev-name">on: deployment_status</div><div class="ev-when">после выкатки, 24/7</div><div class="ev-desc">Триггер в <code>.yml</code>. Срабатывает когда статус деплоя меняется (начат / успех / провал). Событие — на серверах GitHub, прод лишь ЦЕЛЬ проверок (диаграмма сверху права: на проде событий нет). ⚠️ Ловушка: деплой из самих Actions ставит статус через <code>GITHUB_TOKEN</code> → событие НЕ рождается (защита от рекурсии). Smoke после СВОЕГО деплоя — следующий шаг того же workflow (<code>needs: deploy</code>); этот триггер — для внешних деплой-систем (Vercel / Argo). Зона <b>shift-RIGHT</b> — проверки бьют по ЖИВОМУ проду.</div></td><td class="c-mach"><span class="chip-gh">☁️ GitHub</span><span class="land">→ проверяет 🚀 прод</span></td><td class="c-obl"><span class="obl-req">🔴 ОБЯЗ.</span><span class="sub2">если есть клиенты</span></td><td class="c-ver"><span class="vrow"><b>smoke-тесты</b> — быстрая проверка живости после выката <span style="color:var(--opt)">(тесты пишешь сам)</span></span><span class="vrow"><b>health-checks</b> — <code>/health</code> отвечает ОК, БД жива <span style="color:var(--opt)">(эндпоинт твой)</span></span><span class="vrow"><b>синтетический мониторинг</b> — боты из разных регионов бьют по проду, ловят DNS/TLS/сеть <span style="color:var(--prod)">(готовый: <code>Checkly</code>)</span></span><span class="vrow"><b>canary-анализ</b> — выкат на % трафика, метрики; растут ошибки → авто-откат <span style="color:var(--prod)">(готовый: <code>Argo Rollouts</code> — ТОЛЬКО Kubernetes; на одной машине роль играют feature-флаги / weighted routing в nginx)</span></span><span class="wbar"><span class="f">▰▰▰▰</span></span> <span style="font-size:9.5px;color:var(--faint)">непрерывно</span></td><td class="c-why">shift-RIGHT: часть багов видна ТОЛЬКО на живом проде — реальный трафик, данные, нагрузка, регионы/сеть. Двойник не воспроизведёт всё. Тут только БЕЗОПАСНОЕ (наблюдение, лёгкие проверки) — стресс/атаки по живым клиентам нельзя. При росте ошибок — авто-откат на прошлую версию.</td></tr>
+
+    </tbody>
+  </table>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h4>пирамида верификаторов — что где гонять</h4>
+      <div class="pyr">
+        <span class="lvl"><span class="e2e">▲ E2E</span> <span class="pl">5–10% · критичные флоу · smoke на PR, полные на staging+nightly</span></span>
+        <span class="lvl"><span class="ctr">│ Контракт + Компонент</span> <span class="pl">границы сервисов/API, UI-логика · CI на PR</span></span>
+        <span class="lvl"><span class="intg">│ Интеграция</span> <span class="pl">20–30% · реальные БД/очереди (контейнеры) · CI на merge</span></span>
+        <span class="lvl"><span class="unit">└ Юнит</span> <span class="pl">60–70% · чистая логика, изолированно · каждый коммит</span></span>
+        <span class="lvl"><span class="mut">⟂ Мутации</span> <span class="pl">вбок · качество тестов, критич. модули · nightly</span></span>
+      </div>
+      <p>Логика: <span class="n">дёшево-быстро-много внизу</span> (гоняешь часто, мгновенный фидбэк), <span class="n">дорого-медленно-мало вверху</span> (редко, на staging/ночью). Цель — держать CI <code>&lt; 10 минут</code>. Если большинство уверенности из E2E — пирамида перевёрнута.</p>
+    </div>
+    <div class="card">
+      <h4>обязательность — что гейтить, что пропустить</h4>
+      <div class="obls">
+        <div class="oblrow req"><span class="b">🔴 ОБЯЗ.</span><span class="x"><b>CI на push/PR</b> (юнит+интеграция+SAST/SCA как required check), <b>branch protection</b>, <b>build+скан</b>, а с клиентами — <b>smoke/health на проде</b>. «Безопасность, что зависит от памяти человека — это не безопасность, а надежда».</span></div>
+        <div class="oblrow opt"><span class="b">🟡 ОПЦ.</span><span class="x">pre-commit, commit-msg, pre-push (удобно, но обходимо); контрактные (если есть сервисы); мутации (критич. модули); merge_group (большой поток PR); nightly (зрелый проект); ревью (обяз. для критич. кода).</span></div>
+        <div class="oblrow none"><span class="b">⚪ НЕЧЕГО</span><span class="x">хозяйственные обсерверы: post-checkout, prepare-commit-msg, post-commit, post-merge, триггеры. Тут нечего проверять — только реакция.</span></div>
+      </div>
+      <p style="margin-top:9px"><span class="n">Минимум для соло (твой случай):</span> <code>on:push/PR</code> с юнит-тестами как required check + <code>branch protection</code>. Остальное добавляешь по мере роста — staging/E2E/canary имеют смысл, когда появятся клиенты. <span class="n">⚠️ Две ловушки:</span> branch protection на ПРИВАТНОМ репо доступна только с Pro-плана (на Free — только публичный репо); и включи «Do not allow bypass» — по умолчанию админ правила ОБХОДИТ, а соло-админ = ты сам и твой LLM-агент.</p>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h4>тяжесть тестов — staging vs прод (зеркальная логика)</h4>
+    <div class="wsplit">
+      <div class="wcol stg">
+        <div class="wh">🟢 STAGING — двойник без клиентов</div>
+        <div class="wt">ТЯЖЁЛОЕ и РАЗРУШИТЕЛЬНОЕ: <b>полный E2E</b>, <b>нагрузочные / стресс</b> (грузи до отказа), <b>DAST</b> (атаки по запущенному), <b>chaos</b> (ломай компоненты нарочно). Можно — клиентов нет, ронять не страшно.</div>
+      </div>
+      <div class="wcol prd">
+        <div class="wh">🔴 ПРОД — живой трафик</div>
+        <div class="wt">только ЛЁГКОЕ и БЕЗОПАСНОЕ: <b>smoke</b>, <b>health-checks</b>, <b>синтетический мониторинг</b>, <b>canary-анализ</b>. Стресс / атаки / chaos по живым клиентам — нельзя.</div>
+      </div>
+    </div>
+    <p>Это <span class="n">не одинаковые тесты</span>, а зеркало: на двойнике гоняешь то, что на проде уронило бы клиентов; на проде — только наблюдение и лёгкая проверка живости. Staging — это не «полу-прод», а <span class="n">копия по конфигурации и версиям</span>, изолированная от живых пользователей, чтобы было где гонять разрушительное без риска. Но данные и масштаб у него всегда беднее прода (PII не копируют, машин меньше) — потому часть багов ловится только на живом проде (shift-right).</p>
+  </div>
+
+  <div class="gloss-h">верификаторы — что это за тесты (твой список)</div>
+  <div class="gloss">
+    <div class="gi"><div class="term">Юнит <span class="en">unit</span> <span class="pct">60–70%</span></div><div class="def">тестирует <b>одну функцию/метод ИЗОЛИРОВАННО</b> (без БД, без сети). Быстро (мс), много. «Работают ли кусочки сами по себе».<span class="where">где: <b>каждый коммит</b> — pre-commit, pre-push, CI</span></div></div>
+    <div class="gi"><div class="term">Интеграционные <span class="en">integration</span> <span class="pct">20–30%</span></div><div class="def">проверяют, что <b>разные части работают ВМЕСТЕ</b> — реальная БД, очередь, API (через контейнеры, Testcontainers). Медленнее юнита. «Кусочки стыкуются».<span class="where">где: <b>CI на PR / merge</b></span></div></div>
+    <div class="gi"><div class="term">Контрактные <span class="en">contract / Pact</span></div><div class="def">фиксируют <b>границу между сервисами</b>: потребитель публикует ожидания (что шлёт/ждёт от API), поставщик их выполняет. Для микросервисов/API — ловят «тихие» поломки интерфейса без E2E.<span class="where">где: <b>CI на PR</b>, для каждого нового эндпоинта</span></div></div>
+    <div class="gi"><div class="term">Компонентные <span class="en">component</span></div><div class="def"><b>один компонент ЦЕЛИКОМ в изоляции</b>: UI-компонент с шаблоном и событиями без сети — ИЛИ один сервис с замоканными соседями. Быстрее E2E, реалистичнее юнита.<span class="where">где: <b>CI на PR</b></span></div></div>
+    <div class="gi"><div class="term">E2E <span class="en">end-to-end</span> <span class="pct">5–10%</span></div><div class="def">проходит <b>ВЕСЬ путь пользователя</b> через запущенное приложение (логин → заказ → подтверждение). Медленно, хрупко, дорого → только критичные флоу. «Пользователь реально может сделать то, что ты построил».<span class="where">где: smoke на PR, <b>полные на staging + nightly</b></span></div></div>
+    <div class="gi"><div class="term">Smoke <span class="en">дымовые</span></div><div class="def">быстрое <b>подмножество E2E после деплоя</b> — «дым пошёл?»: базовая проверка, что выкаченное вообще живо (главные страницы открываются, API отвечает).<span class="where">где: <b>CI на PR</b> (короткий прогон критичных флоу) и <b>после деплоя</b> на staging/прод</span></div></div>
+    <div class="gi"><div class="term">Мутационные <span class="en">mutation / Stryker</span></div><div class="def">проверяют <b>качество твоих ТЕСТОВ</b>, а не код: намеренно ломают код (мутируют — меняют + на −) и смотрят, <b>заметят ли это тесты</b>. Тест прошёл на сломанном коде → тест бесполезный. Медленно и дорого.<span class="where">где: <b>nightly</b>, на критичных модулях</span></div></div>
+    <div class="gi"><div class="term">SAST / DAST <span class="en">security</span></div><div class="def"><b>SAST</b> — статика: сканирует <b>исходный код</b> (не запуская) на дыры (инъекции, XSS). <b>DAST</b> — динамика: бьёт по <b>запущенному</b> приложению снаружи (ZAP by Checkmarx, бывш. OWASP ZAP).<span class="where">где: SAST — <b>CI</b>; DAST — <b>staging</b></span></div></div>
+    <div class="gi"><div class="term">SCA <span class="en">скан зависимостей</span></div><div class="def">сканирует <b>сторонние библиотеки</b> на известные дыры (CVE): «используешь lib X v4.2 → у неё CVE → флаг». Rust → <code>cargo-audit</code>.<span class="where">где: <b>CI + build</b> (на коде и на образе)</span></div></div>
+    <div class="gi"><div class="term">Нагрузочные / перф <span class="en">load / performance</span></div><div class="def">держит ли система <b>нагрузку</b> — много одновременных запросов, не деградирует ли latency под трафиком.<span class="where">где: <b>staging + nightly</b></span></div></div>
+    <div class="gi"><div class="term">Фаззинг / property <span class="en">fuzz</span></div><div class="def"><b>фаззинг</b> — кормит <b>случайный/мусорный ввод</b>, ища падения и краши. <b>property-based</b> — проверяет <b>свойства</b> на множестве сгенерированных входов (а не на конкретных примерах).<span class="where">где: <b>nightly</b> / CI для критичного</span></div></div>
+    <div class="gi"><div class="term">Canary-анализ <span class="en">shift-right</span></div><div class="def">выкат новой версии на <b>малый % реального трафика</b> с отслеживанием метрик (error-rate, latency); растут ошибки → <b>авто-откат</b>. Ловит то, что видно только на живых пользователях.<span class="where">где: <b>прод</b>, при выкатке</span></div></div>
+    <div class="gi human"><div class="term">Exploratory <span class="htag">человек</span></div><div class="def">человек <b>пользуется как пользователь БЕЗ скрипта</b>, пробует странные сценарии, ищет <b>НЕИЗВЕСТНОЕ</b> — то, что никто не догадался автоматизировать. Автотест ловит заданные ожидания; exploratory — неожиданное.<span class="where">где: <b>staging</b>, человеком до релиза</span></div></div>
+    <div class="gi human"><div class="term">UAT <span class="en">user acceptance</span> <span class="htag">человек</span></div><div class="def">заказчик / реальный пользователь судит «<b>ГОДИТСЯ ли для реальной работы</b>» перед запуском. Не «работает ли технически» (это CI), а «то ли это вообще, что нужно».<span class="where">где: <b>staging</b> перед выкатом на прод</span></div></div>
+    <div class="gi human"><div class="term">Бета <span class="en">beta</span> <span class="htag">человек</span></div><div class="def"><b>реальные клиенты раньше всех</b> пользуются продуктом в жизни и шлют обратную связь <b>словами</b> («неудобно», «запутался»). Рядом с canary, но canary — авто-метрики, бета — человеческий фидбэк.<span class="where">где: <b>прод</b>, ограниченному кругу</span></div></div>
+    <div class="gi human"><div class="term">AI-агентное <span class="en">autonomous</span> <span class="htag">ИИ</span></div><div class="def">ДВА разных класса, не путать: ① <b>агентное UI-тестирование</b> — LLM-агент имитирует пользователя, сам исследует пути (exploratory, но автомат); ② <b>детерминированная симуляция</b> (Antithesis) — вся система в детерминированном гипервизоре + fault-injection + фаззинг, быстрее реального времени; пользователя НЕ имитирует, ищет редкие СИСТЕМНЫЕ баги. Оба <b>дополняют</b>, не заменяют человеческое «удобно / то ли это».<span class="where">где: дополнительно к автотестам</span></div></div>
+  </div>
+
+  <div class="gloss-h">ещё миры и техники — что перенять для качества</div>
+  <div class="tech">
+    <div class="ti world"><div class="tn">Ephemeral / Preview <span class="badge">мир</span></div><div class="td"><b>временный полный мир на КАЖДЫЙ PR</b> со своим URL: поднимается при открытии PR, сносится при merge. Ревьюер тыкает живую сборку, а не скриншоты. Тренд 2026 — <b>заменяет общий staging для ревью и QA</b>; тяжёлое (нагрузка / DAST / chaos) всё равно требует прод-двойника.<span class="solo"><b>соло:</b> избыточно — это лекарство от очередей в командах</span></div></div>
+    <div class="ti"><div class="tn">Feature flags <span class="badge">техника</span></div><div class="td"><b>разделяет деплой и релиз</b>: код физически в проде, но выключен; включаешь по сегментам в рантайме <b>без передеплоя</b>. Kill-switch — мгновенно вырубить сломанное. <code>Unleash, Flagsmith</code><span class="solo"><b>соло: ДА</b> — kill-switch + катишь незаконченное безопасно</span></div></div>
+    <div class="ti"><div class="tn">Progressive delivery <span class="badge">зонтик</span></div><div class="td"><b>постепенный выкат</b> с мониторингом на каждом шаге: 1% → 5% → 100%, откат при росте ошибок. Объединяет canary + blue-green + флаги. Превращает релиз из события в управляемый процесс.</div></div>
+    <div class="ti"><div class="tn">Blue-green <span class="badge">техника</span></div><div class="td"><b>два одинаковых прода</b> (синий / зелёный): новая версия на «зелёном», переключаешь трафик мгновенно, при проблеме — назад на «синий». Ноль простоя, мгновенный откат.<span class="solo"><b>соло: можно</b> — ради нулевого даунтайма</span></div></div>
+    <div class="ti"><div class="tn">Dark launch <span class="badge">техника</span></div><div class="td"><b>выкат кода в прод ДО того, как его увидят</b> пользователи (за выключенным флагом). Прогреваешь, тестируешь на реальных данных, потом включаешь.</div></div>
+    <div class="ti"><div class="tn">Testing in production <span class="badge">техника</span></div><div class="td">включаешь фичу <b>только для внутренних / QA-аккаунтов в проде</b> — с реальными данными и трафиком, под флагом. То, что staging-двойник не воспроизведёт.</div></div>
+    <div class="ti"><div class="tn">GitOps <span class="badge">техника</span></div><div class="td"><b>git — единственный источник правды</b> для состояния инфры / деплоя: меняешь yaml в репо → агент (<code>ArgoCD</code>) приводит прод к описанному. Откат = <code>git revert</code>.<span class="solo"><b>соло:</b> тяжеловато, но идея ценная</span></div></div>
+    <div class="ti"><div class="tn">IaC <span class="badge">техника</span></div><div class="td"><b>инфраструктура как код</b>: серверы / окружения описаны в коде (<code>Terraform / OpenTofu</code>), воспроизводимы, под версией. Никаких «настроил руками и забыл».<span class="solo"><b>соло:</b> по вкусу, но дисциплинирует</span></div></div>
+    <div class="ti"><div class="tn">Observability <span class="badge">техника</span></div><div class="td"><b>3 столпа: метрики + логи + трейсы</b> с первого дня (<code>OpenTelemetry</code>), не как заплатка после первого инцидента. «Систему, которую не видишь, не можешь чинить».<span class="solo"><b>соло: ДА</b> — с самого начала</span></div></div>
+    <div class="ti"><div class="tn">Chaos engineering <span class="badge">техника</span></div><div class="td"><b>намеренно ломаешь</b> компоненты и вносишь задержки (<code>Toxiproxy</code>), чтобы проверить, выживает ли система. «Работает на моём оптоволокне» ≠ «работает в реальных условиях».<span class="solo"><b>соло:</b> позже, когда есть что ронять</span></div></div>
+    <div class="ti world"><div class="tn">AI сдвигает CI/CD: скорость → риск <span class="badge">принцип</span></div><div class="td">когда <b>код пишет агент</b>, медленный пайплайн больше не блокирует человека (агент не переключает контекст). Приоритет смещается с «сэкономить 10 минут» на <b>снизить риск, что агент выкатит баг</b> — значит можно гонять <b>больше тестов и медленнее</b>, но тщательнее.<span class="solo"><b>прямо твой случай</b> с 888 / агентами</span></div></div>
+  </div>
+
+  <div class="gloss-h">варианты: где хранить git — куда пушить</div>
+  <div class="tech">
+    <div class="ti world"><div class="tn">Обычный локальный репо <span class="badge">у тебя сейчас</span></div><div class="td"><code>git init</code> на твоём ПК — папка с <code>.git</code> + файлы. <b>НЕ сервер</b>: просто история на диске, извне сюда не пушат.<span class="solo">CI/PR/веб: нет · это база, где работаешь</span></div></div>
+    <div class="ti world"><div class="tn">Свой git-сервер (bare) <span class="badge">своё</span></div><div class="td"><code>git init --bare</code> на машине с SSH. Голая история без файлов — склад для приёма push. Хуки <code>pre-receive</code>/<code>post-receive</code> → push-to-deploy.<span class="solo">ставится: <b>git init --bare + SSH</b>, отдельный софт не нужен · у тебя белый IP — можешь</span></div></div>
+    <div class="ti"><div class="tn">GitHub <span class="badge">облако</span></div><div class="td">github.com, чужие сервера. Actions (CI), PR, branch protection, ревью — всё <b>готовое</b>.<span class="solo">ставится: ничего, регистрируешься · дефолт ради готовой инфры</span></div></div>
+    <div class="ti"><div class="tn">Gitea / GitLab <span class="badge">self-hosted</span></div><div class="td">GitHub-подобная платформа на ТВОЁМ сервере: веб-морда, PR, CI. <b>Отдельный софт поверх git</b>.<span class="solo">ставится: развернуть софт (Docker / пакет) · когда хочешь GitHub-удобства, но всё своё</span></div></div>
+    <div class="ti"><div class="tn">GitHub Enterprise Server <span class="badge">облако на своём</span></div><div class="td">Сам GitHub на своём железе (для компаний) — «локальный GitHub» в точном смысле. Всё как у GitHub.<span class="solo">когда: крупные компании с требованием on-premise</span></div></div>
+  </div>
+
+</div>
+</body>
+</html>
