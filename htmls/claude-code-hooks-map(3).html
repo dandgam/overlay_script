@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Хуки Claude Code — карта по осям, ситам и узлам</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Russo+One&family=PT+Sans:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#EEF1F0;        /* чертёжная бумага */
+  --ink:#1C2B33;          /* тушь */
+  --blue:#2B5F8A;         /* синька чертежа */
+  --green:#1E7A46;        /* пропуск / впрыск */
+  --red:#B3362B;          /* блок */
+  --amber:#C8862A;        /* дырка / наблюдение */
+  --line:#C6CFCC;
+  --card:#FFFFFF;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+  --body:'PT Sans',system-ui,sans-serif;
+  --disp:'Russo One',var(--body);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{
+  margin:0;color:var(--ink);font-family:var(--body);font-size:15.5px;line-height:1.5;
+  background:
+    repeating-linear-gradient(0deg,transparent 0 23px,rgba(43,95,138,.07) 23px 24px),
+    repeating-linear-gradient(90deg,transparent 0 23px,rgba(43,95,138,.07) 23px 24px),
+    var(--paper);
+}
+a{color:var(--blue)}
+main{max-width:1180px;margin:0 auto;padding:0 20px 80px}
+h1,h2,h3{font-family:var(--disp);font-weight:400;letter-spacing:.02em;line-height:1.15}
+h1{font-size:clamp(26px,4vw,40px);margin:.2em 0 .1em}
+h2{font-size:clamp(20px,2.6vw,27px);margin:2.2em 0 .5em;color:var(--blue)}
+h3{font-size:17px;margin:1.4em 0 .4em}
+p{margin:.5em 0}
+code,.mono{font-family:var(--mono);font-size:.86em;background:rgba(43,95,138,.09);padding:.08em .35em;border-radius:4px;white-space:nowrap}
+small{color:#4c5b62}
+
+/* шапка */
+header.hero{padding:44px 0 10px;border-bottom:3px solid var(--ink)}
+.hero .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--blue)}
+.hero p.sub{max-width:72ch;font-size:16.5px}
+
+/* навигация */
+nav.toc{position:sticky;top:0;z-index:50;background:var(--paper);border-bottom:1px solid var(--line);
+  display:flex;flex-wrap:wrap;gap:4px;padding:8px 0;margin-bottom:6px}
+nav.toc a{font-family:var(--mono);font-size:12px;text-decoration:none;color:var(--ink);
+  border:1px solid var(--line);border-radius:99px;padding:4px 11px;background:var(--card)}
+nav.toc a:hover,nav.toc a:focus-visible{border-color:var(--blue);color:var(--blue);outline:none}
+
+/* легенда и бейджи */
+.badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.03em;
+  padding:2px 8px;border-radius:4px;color:#fff;white-space:nowrap;vertical-align:middle}
+.b-red{background:var(--red)}       /* двойка блокирует */
+.b-amber{background:var(--amber)}   /* двойка = фидбек модели, не отменяет */
+.b-gray{background:#5b6a70}         /* двойка = заметка тебе, не блокирует */
+.b-mute{background:#8b979b}         /* код/вывод игнорируется */
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;vertical-align:baseline;margin-right:4px}
+.d-green{background:var(--green)}
+.legend{display:flex;flex-wrap:wrap;gap:10px 22px;background:var(--card);border:1px solid var(--line);
+  border-left:5px solid var(--blue);padding:12px 16px;border-radius:8px;margin:14px 0;font-size:14px}
+
+/* карточки-маршруты */
+.routes{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:10px;margin:14px 0}
+.routes .r{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:11px 13px;font-size:14px}
+.routes .r b{display:block;font-family:var(--disp);font-weight:400;font-size:13.5px;margin-bottom:4px}
+.routes .r .ln{display:block;margin-top:6px;line-height:1.45}
+.routes .r .tag{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--blue);margin-right:4px}
+.shopfloor{background:var(--card);border:1px dashed var(--blue);border-radius:8px;padding:10px 14px;margin:4px 0 14px;font-size:13.5px;color:#33424b}
+.r.rr b{color:var(--red)} .r.rg b{color:var(--green)} .r.ra b{color:var(--amber)} .r.rb b{color:var(--blue)}
+
+/* модель: оси × сита × узел */
+.model{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin:16px 0}
+@media(max-width:880px){.model{grid-template-columns:1fr}}
+.model .m{background:var(--card);border:1px solid var(--line);border-top:5px solid var(--blue);border-radius:8px;padding:13px 15px;font-size:14px}
+.model .m h3{margin-top:0}
+.model .m ol{margin:.4em 0 .2em 1.2em;padding:0}
+.model .m li{margin:.25em 0}
+.nest{margin:8px 0 2px}
+.nest .n{border:1.5px solid var(--blue);border-radius:7px;padding:6px 8px 7px;background:rgba(43,95,138,.05)}
+.nest .n .n{margin-top:6px;border-color:var(--green);background:rgba(30,122,70,.06)}
+.nest .n .n .n{border-color:var(--amber);background:rgba(200,134,42,.08)}
+.nest .nh{display:flex;justify-content:space-between;gap:8px;align-items:baseline;font-family:var(--mono);font-size:10.5px;line-height:1.35}
+.nest .nh b{font-size:11.5px;letter-spacing:.04em}
+.camps{margin:8px 0 2px}
+.camps .c{border:1.5px solid var(--green);border-radius:7px;padding:6px 8px 7px;background:rgba(30,122,70,.06)}
+.camps .c+.c{margin-top:6px;border-color:var(--amber);background:rgba(200,134,42,.08)}
+.camps .ch{display:block;font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.05em;margin-bottom:3px}
+.camps .ci{display:block;font-size:12.5px;line-height:1.4;margin-top:2px}
+.camps .ci code{font-size:.84em}
+
+/* ===== фирменный элемент: конвейер жизненного цикла ===== */
+.belt{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 16px 8px;margin:16px 0;
+  box-shadow:0 1px 0 var(--line)}
+.lane{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;margin:10px 0 16px;position:relative;padding-left:120px}
+.lane .lab{position:absolute;left:0;top:50%;transform:translateY(-50%);width:108px;
+  font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--blue);line-height:1.3}
+@media(max-width:700px){.lane{padding-left:0}.lane .lab{position:static;transform:none;width:100%;margin-bottom:2px}}
+.st{border:1.5px solid var(--ink);border-radius:7px;background:var(--paper);min-width:118px;flex:1 1 118px;max-width:190px;
+  padding:6px 9px 7px;position:relative;font-size:12.5px;line-height:1.3}
+.st b{display:block;font-family:var(--mono);font-size:12px;font-weight:700}
+.st::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;border-radius:6px 0 0 6px}
+.st.red::before{background:var(--red)} .st.amber::before{background:var(--amber)}
+.st.gray::before{background:#5b6a70} .st.mute::before{background:#8b979b}
+.st .inj{position:absolute;top:5px;right:6px;width:9px;height:9px;border-radius:50%;background:var(--green)}
+.arrow{align-self:center;font-family:var(--mono);color:var(--blue);font-weight:700}
+.beltnote{font-size:13px;color:#41505a;margin-top:2px}
+
+/* таблицы */
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);font-size:13.5px;margin:12px 0}
+th,td{border:1px solid var(--line);padding:7px 9px;vertical-align:top;text-align:left}
+th{background:var(--ink);color:#fff;font-family:var(--mono);font-size:11.5px;font-weight:700;letter-spacing:.05em;
+  position:sticky;top:44px;z-index:5}
+tbody tr:hover{background:rgba(43,95,138,.06)}
+tr.grp td{background:var(--blue);color:#fff;font-family:var(--disp);font-size:13px;letter-spacing:.04em;padding:5px 10px}
+td.ev{font-family:var(--mono);font-weight:700;font-size:12.5px;white-space:nowrap}
+td .why{display:block;font-size:12px;color:#41505a;font-weight:400;font-family:var(--body);white-space:normal;margin-top:2px}
+.wrap-note{font-size:13px;color:#41505a}
+
+/* карточки-рецепты и камни */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin:14px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:13px 15px;font-size:14px;border-top:4px solid var(--green)}
+.card.warn{border-top-color:var(--red)}
+.card h3{margin:0 0 6px;font-size:15px}
+.card .meta{font-family:var(--mono);font-size:11.5px;color:var(--blue);margin:6px 0 4px;line-height:1.5}
+.callout{background:#FBF3E7;border:1px solid var(--amber);border-left:6px solid var(--amber);border-radius:8px;
+  padding:12px 15px;margin:14px 0;font-size:14.5px}
+.callout.red{background:#F9ECEA;border-color:var(--red);border-left-color:var(--red)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:820px){.two{grid-template-columns:1fr}}
+dl.gloss{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font-size:14px}
+dl.gloss dt{font-family:var(--mono);font-weight:700;margin-top:8px}
+dl.gloss dd{margin:2px 0 6px 0}
+footer{margin-top:40px;border-top:3px solid var(--ink);padding-top:12px;font-size:13px;color:#41505a}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+@media print{nav.toc{display:none}th{position:static}body{background:#fff}}
+</style>
+</head>
+<body>
+<main>
+
+<header class="hero">
+  <div class="kicker">Claude Code · хуки · шпаргалка-карта · сверено с официальным справочником 13.07.2026</div>
+  <h1>Хуки: две оси, три сита, один узел исходов</h1>
+  <p class="sub">Хук — это <b>не</b> событие в нейросети. Это точка в коде обвязки (харнесса), к которой ты прикрепляешь исполнителя.
+  Модель пишет просьбы текстом; руки, цикл и все контрольные точки — у обвязки. Ниже — вся карта этих точек и правила игры на них.</p>
+</header>
+
+<nav class="toc" aria-label="Разделы">
+  <a href="#model">Модель</a>
+  <a href="#belt">Конвейер</a>
+  <a href="#events">30 точек</a>
+  <a href="#exec">Исполнители</a>
+  <a href="#sieves">Сита</a>
+  <a href="#exit">Узел исходов</a>
+  <a href="#json">JSON-рычаги</a>
+  <a href="#recipes">Рецепты</a>
+  <a href="#traps">Камни</a>
+  <a href="#three-systems">4 системы</a>
+  <a href="#gloss">Словарь</a>
+</nav>
+
+<div class="legend" role="note">
+  <span><span class="badge b-red">2 = БЛОК</span> двойка реально останавливает действие</span>
+  <span><span class="badge b-amber">2 = ФИДБЕК</span> отменить нельзя (уже случилось) — stderr уходит модели как «акт о браке»: прочитала и чинит следующим шагом</span>
+  <span><span class="badge b-gray">2 = ТЕБЕ</span> не блокирует; stderr показывается только тебе</span>
+  <span><span class="badge b-mute">ИГНОР</span> код и вывод игнорируются</span>
+  <span><span class="dot d-green"></span>зелёная точка = обычный stdout при нуле попадает в контекст модели</span>
+</div>
+
+<h2 id="routes-h">Куда смотреть — четыре маршрута</h2>
+<div class="routes">
+  <div class="r rr"><b>Запретить действие</b>
+    <span class="ln"><span class="tag">Суть</span>Точка стоит <b>до</b> действия — исполнения ещё не было, поэтому двойка (или deny) — настоящий блок: действие просто не произойдёт. Единственный маршрут с гарантией.</span>
+    <span class="ln"><span class="tag">Пример</span>Модель просит редактирование, а спеки на диске нет → отказ с причиной «сначала создай спеку через скилл». Хоть сто просьб подряд — сто отказов: проверяет скрипт, а не настроение.</span>
+    <span class="ln"><span class="tag">Смотри</span><span class="badge b-red">2 = БЛОК</span>-точки до действия: PreToolUse, PermissionRequest, UserPromptSubmit · рецепт 1.</span>
+  </div>
+  <div class="r rg"><b>Подсказать знание</b>
+    <span class="ln"><span class="tag">Суть</span>Ничего не запрещаем — добавляем модели справку в контекст (впрыск), чтобы она сама пошла правильной дорогой. Уровень промптовый: срабатывает почти всегда, но это не гарантия.</span>
+    <span class="ln"><span class="tag">Пример</span>В сообщении мелькнуло «добавим фичу» → скрипт довесил: «по правилам проекта фича начинается со спеки, скилл такой-то». Или после сжатия контекста впрыснуть ветку и текущую задачу.</span>
+    <span class="ln"><span class="tag">Смотри</span>Зелёные точки <span class="dot d-green"></span>(stdout → контекст): UserPromptSubmit, UserPromptExpansion, SessionStart; на остальных — довесок additionalContext · рецепты 2–3.</span>
+  </div>
+  <div class="r ra"><b>Отреагировать на результат</b>
+    <span class="ln"><span class="tag">Суть</span>Точка стоит <b>после</b> действия — файл уже изменён, команда уже выполнена, отменять нечего. Двойка тут не стоп-кран, а записка с претензией: текст из потока ошибок подкладывается модели как замечание к результату, и она чинит следующим шагом.</span>
+    <span class="ln"><span class="tag">Пример</span>Правка прошла → линтер нашёл ошибки → фидбек со списком → модель сама исправляет и проверяет заново. Ты не участвуешь.</span>
+    <span class="ln"><span class="tag">Смотри</span><span class="badge b-amber">2 = ФИДБЕК</span>: PostToolUse, PostToolUseFailure (а PostToolBatch — исключение: умеет остановить весь цикл) · рецепт 4.</span>
+  </div>
+  <div class="r rb"><b>Заставить продолжать</b>
+    <span class="ln"><span class="tag">Суть</span>Модель говорит «я всё» — а скрипт сверяет условие готовности. Не готово → остановка блокируется с причиной «рано, вот что доделать», и модель продолжает работать вместо завершения.</span>
+    <span class="ln"><span class="tag">Пример</span>Конец хода → тесты красные → «не заканчивай, чини» с логом падений. Или задачу закрывают без артефакта на диске → закрытие не пускается.</span>
+    <span class="ln"><span class="tag">Смотри</span>Границы: Stop, SubagentStop, TaskCompleted, TeammateIdle · рецепт 6. Обязательная страховка от вечной петли — проверка флага stop_hook_active.</span>
+  </div>
+</div>
+<p class="shopfloor">Одна картинка на все четыре маршрута — цех: <b>вахтёр до станка</b> может не пустить (запретить) · <b>памятка на стене у входа</b> подсказывает порядок работы (подсказать) · <b>приёмщик после станка</b> брак уже не предотвратит — лишь кладёт рабочему акт, и тот переделывает (отреагировать) · <b>мастер в конце смены</b> не подписывает уход, пока наряд не закрыт (заставить продолжать).</p>
+
+<h2 id="model">Модель целиком: 2 оси × 3 сита × 1 узел</h2>
+<div class="model">
+  <div class="m">
+    <h3>Ось 1 — Событие (где)</h3>
+    <p>Точка цикла обвязки, к которой прикреплён хук. Точки различаются <b>ритмом</b> — как часто через них идёт поток. Три вложенных масштаба времени, матрёшка (цифры — типичный вечер):</p>
+    <div class="nest">
+      <div class="n"><span class="nh"><b>СЕССИЯ</b><span>запуск → закрытие · ×1</span></span>
+        <div class="n"><span class="nh"><b>ХОД</b><span>твоё сообщение → конец ответа · ×30</span></span>
+          <div class="n"><span class="nh"><b>ВЫЗОВ</b><span>одна заявка на инструмент · ×300</span></span></div>
+        </div>
+      </div>
+    </div>
+    <p style="font-size:13px">Границы матрёшек — и есть точки трёх ритмов: сессию открывает и закрывает SessionStart / SessionEnd (старт повторяется на resume и после сжатия); ход — UserPromptSubmit на входе, Stop на выходе; каждый вызов — PreToolUse / PostToolUse вокруг инструмента.</p>
+    <p style="font-size:13px"><b>Правило цены:</b> выбор точки = выбор частоты. Тяжёлые проверки — на редкие границы (старт), на частых точках скрипт обязан быть мгновенным: на инструментальной он выполнится сотни раз, и каждый раз заявка ждёт вердикта.</p>
+    <p>Остальные точки — «по происшествию», без расписания: сжатие, смена папки, жизнь субагента. Всего 30 точек — карта ниже.</p>
+  </div>
+  <div class="m">
+    <h3>Ось 2 — Исполнитель (кто)</h3>
+    <p>Кто придёт работать, когда точка сработала. Оси независимы: точка = «когда», исполнитель = «кто», комбинируются почти свободно — жёсткое исключение одно: SessionStart и Setup принимают только <code>command</code> и <code>mcp_tool</code> (модели на старте ещё нет). Детали по точкам — колонка «Исполнители» в большой таблице.</p>
+    <p style="font-size:13px">Разводи два момента: <b>срабатывание</b> (позовут ли) — детерминировано у всех пяти, точка зашита в код обвязки. <b>Вердикт</b> (что скажет) — делит пятёрку на два лагеря:</p>
+    <div class="camps">
+      <div class="c"><span class="ch">ВЕРДИКТ ВЫЧИСЛЯЕТ КОД — «калибр»: одинаковый вход → одинаковый ответ</span>
+        <span class="ci"><code>command</code> — локальный скрипт; рабочая лошадка, все шлагбаумы</span>
+        <span class="ci"><code>http</code> — веб-запрос центральному сервису политики; обрыв канала = пропуск (fail-open)</span>
+        <span class="ci"><code>mcp_tool</code> — инструмент подключённого MCP-сервера; «не подключён» = пропуск</span>
+      </div>
+      <div class="c"><span class="ch">ВЕРДИКТ ВЫНОСИТ МОДЕЛЬ — «мастер на глаз»: судит по смыслу, может ошибиться</span>
+        <span class="ci"><code>prompt</code> — одноразовый вопрос модели, ответ да/нет («похоже на утечку данных?»)</span>
+        <span class="ci"><code>agent</code> — мини-агент: сам читает файлы перед ответом; экспериментальный</span>
+      </div>
+    </div>
+    <p style="font-size:13px"><b>Правило выбора:</b> начинай с командного; вероятностные — только когда условие невыразимо кодом (смысл, не форма); жёсткую безопасность на них не строить — их ошибка и их отказ открывают дверь, а не запирают.</p>
+  </div>
+  <div class="m">
+    <h3>Сита и узел (когда именно и чем кончилось)</h3>
+    <ol>
+      <li><b>Сито 1</b> — выбор события (есть всегда);</li>
+      <li><b>Сито 2</b> — матчер в настройке (есть не везде);</li>
+      <li><b>Сито 2.5</b> — поле <code>if</code> (только 5 инструментных точек, best-effort);</li>
+      <li><b>Сито 3</b> — условие в самом скрипте (есть всегда).</li>
+    </ol>
+    <p><b>Узел исходов</b>: 0 молча · 0 + вывод · 0 + JSON-резолюция · 2 (блок) · прочее (дырка).</p>
+  </div>
+</div>
+
+<h2 id="belt">Конвейер: где сидят точки в жизненном цикле</h2>
+<div class="belt">
+  <div class="lane">
+    <span class="lab">Сессия: старт</span>
+    <div class="st mute"><b>Setup</b>только по флагам init / maintenance<span class="inj" title="контекст через JSON"></span></div>
+    <span class="arrow">→</span>
+    <div class="st gray"><b>SessionStart</b>startup · resume · clear · compact<span class="inj"></span></div>
+    <span class="arrow">→</span>
+    <div class="st mute"><b>InstructionsLoaded</b>загрузился CLAUDE.md / правило</div>
+  </div>
+  <div class="lane">
+    <span class="lab">Ход: вход</span>
+    <div class="st red"><b>UserPromptSubmit</b>твоё сообщение, до модели<span class="inj"></span></div>
+    <span class="arrow">→</span>
+    <div class="st red"><b>UserPromptExpansion</b>/команда разворачивается в промпт<span class="inj"></span></div>
+    <span class="arrow">→</span>
+    <div class="st mute"><b>MessageDisplay</b>текст ответа стримится на экран</div>
+  </div>
+  <div class="lane">
+    <span class="lab">Агентный цикл: инструменты</span>
+    <div class="st red"><b>PreToolUse</b>до исполнения инструмента</div>
+    <span class="arrow">→</span>
+    <div class="st red"><b>PermissionRequest</b>всплыл диалог разрешения</div>
+    <span class="arrow">→</span>
+    <div class="st amber"><b>PostToolUse</b>инструмент успешно отработал</div>
+    <span class="arrow">→</span>
+    <div class="st amber"><b>PostToolUseFailure</b>инструмент упал</div>
+    <span class="arrow">→</span>
+    <div class="st red"><b>PostToolBatch</b>вся пачка параллельных завершена</div>
+  </div>
+  <div class="lane">
+    <span class="lab">Субагенты и задачи</span>
+    <div class="st gray"><b>SubagentStart</b>породили субагента<span class="inj"></span></div>
+    <span class="arrow">→</span>
+    <div class="st red"><b>SubagentStop</b>субагент хочет закончить</div>
+    <span class="arrow">·</span>
+    <div class="st red"><b>TaskCreated</b>создаётся задача</div>
+    <span class="arrow">→</span>
+    <div class="st red"><b>TaskCompleted</b>задачу закрывают</div>
+    <span class="arrow">·</span>
+    <div class="st red"><b>TeammateIdle</b>участник команды простаивает</div>
+  </div>
+  <div class="lane">
+    <span class="lab">Ход: граница</span>
+    <div class="st red"><b>Stop</b>модель закончила отвечать</div>
+    <span class="arrow">·</span>
+    <div class="st mute"><b>StopFailure</b>ход оборвала ошибка API</div>
+  </div>
+  <div class="lane">
+    <span class="lab">Сжатие и финал</span>
+    <div class="st red"><b>PreCompact</b>перед сжатием контекста</div>
+    <span class="arrow">→</span>
+    <div class="st gray"><b>PostCompact</b>после сжатия</div>
+    <span class="arrow">·</span>
+    <div class="st gray"><b>SessionEnd</b>сессия завершается</div>
+  </div>
+  <div class="lane">
+    <span class="lab">Фоновые наблюдатели</span>
+    <div class="st gray"><b>Notification</b>уведомление</div>
+    <div class="st red"><b>ConfigChange</b>меняется конфиг</div>
+    <div class="st gray"><b>CwdChanged</b>сменилась папка</div>
+    <div class="st gray"><b>FileChanged</b>изменился наблюдаемый файл</div>
+    <div class="st red"><b>Worktree Create/Remove</b>копии-worktree</div>
+    <div class="st red"><b>Elicitation / Result</b>MCP-сервер просит ввод</div>
+  </div>
+  <p class="beltnote">Цветная полоса слева — судьба двойки (легенда сверху). Зелёная точка в углу — обычный stdout при нуле идёт в контекст. Схема — маршрут, точные свойства — в таблице ниже.</p>
+</div>
+
+<h2 id="events">Ось 1 подробно: все 30 точек</h2>
+<p class="wrap-note">Колонка «Сито 2» — по какому полю фильтрует матчер; «нет» значит: срабатывает на каждое вхождение, фильтруй ситом 3. «Бланк» — главные графы входного JSON сверх общих (общие: <code>session_id</code>, <code>transcript_path</code>, <code>cwd</code>, <code>hook_event_name</code>, часто <code>permission_mode</code>; в субагентах ещё <code>agent_id</code>, <code>agent_type</code>). Колонка «Сито 2» — с каким <b>одним</b> полем бланка сверяется матчер на этой точке: слово до двоеточия называет поле («инструмент», «источник», «тип агента»), дальше — словарь допустимых значений; «нет» = точка матчер не поддерживает, хук зовётся на каждое срабатывание, а написанный матчер молча игнорируется. Колонка «Исполнители» — какие типы обработчиков точка принимает и кого ставить (сокращения: <code>cmd</code> = command, <code>mcp</code> = mcp_tool; «все» = все пять; стрелка → = разумный выбор по умолчанию). Колонка «Рычаги при нуле» — ручки ответного JSON, торчащие из этой точки, с кратким «что делает»; плюс на любой точке всегда доступен универсальный конверт: <code>continue:false</code> — тормоз всего · <code>systemMessage</code> — предупреждение тебе · <code>suppressOutput</code> — спрятать вывод · <code>terminalSequence</code> — системный пинг (тонкости — в разделе «JSON-рычаги»). Колонка «Реальное применение рычагов» — как эти ручки и двойку реально дёргают в живых проектах; звёзды = распространённость: <b style="color:var(--amber)">★★★</b> стандарт индустрии, ставят почти все · <b style="color:var(--amber)">★★</b> часто · <b style="color:var(--amber)">★</b> нишевое.</p>
+
+<table>
+<thead><tr>
+  <th style="width:9%">Точка</th>
+  <th style="width:10%">Сито 2 (матчер по…)</th>
+  <th style="width:11%">Бланк: ключевые графы</th>
+  <th style="width:8%">Двойка</th>
+  <th style="width:10%">Исполнители</th>
+  <th style="width:19%">Рычаги при нуле</th>
+  <th style="width:13%">Типовое применение</th>
+  <th>Реальное применение рычагов</th>
+</tr></thead>
+<tbody>
+
+<tr class="grp"><td colspan="8">Сессия и подготовка</td></tr>
+<tr>
+  <td class="ev">SessionStart <span class="dot d-green"></span><span class="why">старт или возобновление сессии</span></td>
+  <td>источник: <code>startup</code> <code>resume</code> <code>clear</code> <code>compact</code></td>
+  <td><code>source</code>, иногда <code>model</code>, <code>session_title</code>; есть <code>CLAUDE_ENV_FILE</code></td>
+  <td><span class="badge b-gray">2 = ТЕБЕ</span></td>
+  <td><b>только</b> <code>cmd</code> · <code>mcp</code><span class="why">mcp-сервер может не успеть подключиться</span></td>
+  <td><code>additionalContext</code> — впрыск знания<br><code>sessionTitle</code> — имя сессии<br><code>watchPaths</code> — слежка для FileChanged<br><code>initialUserMessage</code> — первый ход (headless)<br><code>reloadSkills</code> — перескан скиллов</td>
+  <td>Впрыск памяти/ветки/правил; напоминание после сжатия (матчер <code>compact</code>). Только command и mcp_tool.</td>
+  <td><b style="color:var(--amber)">★★★</b> additionalContext — ветка, незакоммиченное, задачи из трекера при пробуждении; sessionTitle — автоимя по ветке; watchPaths — подписка на .env; reloadSkills — после синка скиллов.</td>
+</tr>
+<tr>
+  <td class="ev">Setup<span class="why">только флаги <code>--init-only</code>, <code>-p --init</code>, <code>-p --maintenance</code></span></td>
+  <td><code>init</code> · <code>maintenance</code></td>
+  <td><code>trigger</code>; есть <code>CLAUDE_ENV_FILE</code></td>
+  <td><span class="badge b-gray">2 = ТЕБЕ</span></td>
+  <td><b>только</b> <code>cmd</code> · <code>mcp</code></td>
+  <td><code>additionalContext</code> — впрыск знания</td>
+  <td>Разовая установка зависимостей в CI, плановая уборка. На обычном старте не срабатывает.</td>
+  <td><b style="color:var(--amber)">★</b> additionalContext — отчёт «зависимости установлены» в контекст CI-прогона.</td>
+</tr>
+<tr>
+  <td class="ev">InstructionsLoaded<span class="why">в контекст загрузился CLAUDE.md или файл правил</span></td>
+  <td>причина: <code>session_start</code> <code>nested_traversal</code> <code>path_glob_match</code> <code>include</code> <code>compact</code></td>
+  <td><code>file_path</code>, <code>memory_type</code>, <code>load_reason</code>, <code>globs</code></td>
+  <td><span class="badge b-mute">ИГНОР</span></td>
+  <td>все → <code>cmd</code>/<code>http</code> (аудит)</td>
+  <td>— только конверт (наблюдение)</td>
+  <td>Аудит: какие правила реально в контексте и почему. Асинхронный.</td>
+  <td><b style="color:var(--amber)">★</b> Рычагов нет — точка для аудита: журнал, какие правила реально загрузились и когда.</td>
+</tr>
+<tr>
+  <td class="ev">SessionEnd<span class="why">сессия завершается</span></td>
+  <td>причина: <code>clear</code> <code>resume</code> <code>logout</code> <code>prompt_input_exit</code> …</td>
+  <td>причина завершения</td>
+  <td><span class="badge b-gray">2 = ТЕБЕ</span></td>
+  <td>все → <code>cmd</code> (уборка, логи)</td>
+  <td>— только конверт (уборка)</td>
+  <td>Логи, статистика, уборка временных файлов.</td>
+  <td><b style="color:var(--amber)">★★</b> Рычагов нет — побочное действие: отчёт о сессии, чистка временных файлов, бэкап расшифровки.</td>
+</tr>
+
+<tr class="grp"><td colspan="8">Ход: вход</td></tr>
+<tr>
+  <td class="ev">UserPromptSubmit <span class="dot d-green"></span><span class="why">ты отправил сообщение; модель его ещё не видела</span></td>
+  <td><b>нет</b> — каждый твой месседж</td>
+  <td><code>prompt</code> — полный текст сообщения</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">промпт стирается; причина — тебе</span></td>
+  <td>все → <code>cmd</code><span class="why">лимит 30 с — тяжёлым не место</span></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — стереть промпт<br><code>additionalContext</code> — довесок к промпту<br><code>sessionTitle</code><br><code>suppressOriginalPrompt</code> — скрыть текст при блоке</td>
+  <td>Детектор триггеров по ключевым словам → впрыск «запусти скилл X»; стоп-лист (секреты, опасные просьбы). Таймаут понижен до 30 с; при таймауте довесок отбрасывается.</td>
+  <td><b style="color:var(--amber)">★★★</b> block+reason — стоп-лист секретов (промпт стирается); additionalContext — автодовесок правил по ключевому слову.</td>
+</tr>
+<tr>
+  <td class="ev">UserPromptExpansion <span class="dot d-green"></span><span class="why">/команда или /скилл разворачивается в промпт</span></td>
+  <td>имя команды</td>
+  <td><code>expansion_type</code>, <code>command_name</code>, <code>command_args</code>, <code>prompt</code></td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">разворот запрещён</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — не разворачивать команду<br><code>additionalContext</code></td>
+  <td>Запрет <code>/deploy</code> без файла-одобрения; довесок чек-листа к скиллу ревью. Закрывает дыру: прямой <code>/скилл</code> минует PreToolUse.</td>
+  <td><b style="color:var(--amber)">★</b> block — <code>/deploy</code> без файла-одобрения не разворачивается; лог реально используемых команд.</td>
+</tr>
+<tr>
+  <td class="ev">MessageDisplay<span class="why">пока текст ответа стримится на экран, порциями</span></td>
+  <td><b>нет</b></td>
+  <td><code>turn_id</code>, <code>message_id</code>, <code>index</code>, <code>final</code>, <code>delta</code></td>
+  <td><span class="badge b-mute">ИГНОР</span><span class="why">покажут оригинал</span></td>
+  <td>все, но лимит 10 с → реально <code>cmd</code></td>
+  <td><code>displayContent</code> — подменить текст на экране (только витрина)</td>
+  <td>Маскирование ключей и внутренних хостов на экране; текст без разметки. Таймаут 10 с.</td>
+  <td><b style="color:var(--amber)">★</b> displayContent — маскирование ключей на экране; plain-text-витрина для SDK-приложений.</td>
+</tr>
+
+<tr class="grp"><td colspan="8">Агентный цикл: инструменты · у всех пяти есть сито 2 (имя инструмента) и сито 2.5 (<code>if</code>)</td></tr>
+<tr>
+  <td class="ev">PreToolUse<span class="why">модель попросила инструмент; исполнения ещё не было</span></td>
+  <td>инструмент: <code>Bash</code> <code>Edit</code> <code>Write</code> <code>Read</code> <code>Glob</code> <code>Grep</code> <code>Agent</code> <code>WebFetch</code> <code>WebSearch</code>, <code>mcp__сервер__.*</code> …</td>
+  <td><code>tool_name</code>, <code>tool_input</code> (команда, путь, замена…)</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">stderr — модели как причина</span></td>
+  <td>все → <code>cmd</code><span class="why">частая точка; <code>prompt</code> — только точечно через if</span></td>
+  <td><code>permissionDecision</code> — allow/deny/ask/defer: судьба заявки<br><code>permissionDecisionReason</code> — причина модели<br><code>updatedInput</code> — подменить аргументы<br><code>additionalContext</code></td>
+  <td><b>Шлагбаум block_until</b>: блок Edit/Write, пока нет спеки; запрет <code>rm -rf</code>; редактирование исходящих данных. Не видит файлы, втянутые через <code>@</code>.</td>
+  <td><b style="color:var(--amber)">★★★</b> deny — <code>rm -rf</code>, force-push, чтение .env; allow — тихо пропустить безопасное; updatedInput — <code>npm install</code> → <code>npm ci</code>, подстановка --dry-run.</td>
+</tr>
+<tr>
+  <td class="ev">PermissionRequest<span class="why">всплыл диалог разрешения</span></td>
+  <td>инструмент</td>
+  <td><code>tool_name</code>, <code>tool_input</code></td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">= отказ</span></td>
+  <td>все → <code>cmd</code>; «безопасно ли?» — <code>prompt</code></td>
+  <td><code>decision.behavior</code> — allow/deny за тебя<br><code>updatedInput</code> — правка ввода при allow</td>
+  <td>Авто-одобрение заведомо безопасного. В headless (<code>-p</code>) не срабатывает — там решает PreToolUse.</td>
+  <td><b style="color:var(--amber)">★★</b> behavior:allow — автоодобрение read-only git и <code>npm test</code> (минус клики «approve»); updatedInput — подправить команду при одобрении.</td>
+</tr>
+<tr>
+  <td class="ev">PermissionDenied<span class="why">авто-режим уже отклонил вызов</span></td>
+  <td>инструмент</td>
+  <td>что и почему отклонено</td>
+  <td><span class="badge b-mute">ИГНОР</span><span class="why">отказ уже случился</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>retry:true</code> — «можно повторить»</td>
+  <td>Умный повтор после ложного срабатывания классификатора.</td>
+  <td><b style="color:var(--amber)">★</b> retry:true — мягкий отказ: модель переформулирует команду вместо тупика.</td>
+</tr>
+<tr>
+  <td class="ev">PostToolUse<span class="why">инструмент успешно отработал</span></td>
+  <td>инструмент</td>
+  <td><code>tool_name</code>, <code>tool_input</code>, <code>tool_response</code></td>
+  <td><span class="badge b-amber">2 = ФИДБЕК</span><span class="why">уже выполнен; stderr — модели</span></td>
+  <td>все → <code>cmd</code>; готовые сканеры — <code>mcp</code></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — фидбек «переделай»<br><code>updatedToolOutput</code> — подменить результат<br><code>additionalContext</code></td>
+  <td>Автолинт после правки: вернуть ошибки — модель чинит; «файл сгенерирован, правь исходник».</td>
+  <td><b style="color:var(--amber)">★★★</b> Главный кейс точки — вовсе без рычагов (автоформат, побочное действие). Из рычагов: block+reason — линт-фидбек «переделай»; updatedToolOutput — маскирование PII и ключей в выводе.</td>
+</tr>
+<tr>
+  <td class="ev">PostToolUseFailure<span class="why">инструмент упал</span></td>
+  <td>инструмент</td>
+  <td>+ <code>tool_error</code></td>
+  <td><span class="badge b-amber">2 = ФИДБЕК</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — фидбек к падению<br><code>additionalContext</code></td>
+  <td>Подсказки по типовым падениям («порт занят → команда такая-то»).</td>
+  <td><b style="color:var(--amber)">★★</b> reason и additionalContext — подсказка к падению: «этот тест требует докер — подними compose».</td>
+</tr>
+<tr>
+  <td class="ev">PostToolBatch<span class="why">пачка параллельных вызовов завершена, перед следующим обращением к модели</span></td>
+  <td><b>нет</b></td>
+  <td><code>batch_results</code> — массив итогов</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">стоп цикла до следующего вызова модели</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — стоп цикла до модели<br><code>additionalContext</code></td>
+  <td>Реакция на весь веер сразу; аварийный тормоз агентного цикла.</td>
+  <td><b style="color:var(--amber)">★★</b> block — предохранитель: бюджет вызовов исчерпан или пачка подозрительна — стоп до следующего запроса к модели.</td>
+</tr>
+
+<tr class="grp"><td colspan="8">Субагенты, задачи, команда</td></tr>
+<tr>
+  <td class="ev">SubagentStart<span class="why">породили субагента</span></td>
+  <td>тип агента: <code>Explore</code> <code>Plan</code> <code>general-purpose</code>, свои имена</td>
+  <td>тип, id субагента</td>
+  <td><span class="badge b-gray">2 = ТЕБЕ</span><span class="why">заметка в его расшифровке</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>additionalContext</code> — впрыск правил агенту</td>
+  <td>Довесок правил конкретной персоне (ревьюеру — чек-лист).</td>
+  <td><b style="color:var(--amber)">★</b> additionalContext — чек-лист конкретному типу агента (ревьюеру — правила команды).</td>
+</tr>
+<tr>
+  <td class="ev">SubagentStop<span class="why">субагент хочет закончить</span></td>
+  <td>тип агента</td>
+  <td>итоги субагента</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">не даёт закончить</span></td>
+  <td>все → <code>cmd</code>; готовность по смыслу — <code>prompt</code>/<code>agent</code></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — не отпускать агента<br><code>additionalContext</code> — фидбек без блока</td>
+  <td>«Ревью неполное — пройди ещё раз». Во фронтматтере агентов Stop автоматически превращается в SubagentStop.</td>
+  <td><b style="color:var(--amber)">★★</b> block — не отпускать разведчика, пока отчёт неполон (часто prompt-хуком «реально всё проверил?»).</td>
+</tr>
+<tr>
+  <td class="ev">TaskCreated<span class="why">создаётся задача</span></td>
+  <td><b>нет</b></td>
+  <td>описание задачи</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">создание откатывается</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>continue:false</code>+<code>stopReason</code> — остановить всё (или двойка)</td>
+  <td>Валидация формата задач в конвейере.</td>
+  <td><b style="color:var(--amber)">★</b> Двойка — не заводить задачу без спеки и критериев готовности.</td>
+</tr>
+<tr>
+  <td class="ev">TaskCompleted<span class="why">задачу помечают выполненной</span></td>
+  <td><b>нет</b></td>
+  <td>задача и итог</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">не даёт закрыть</span></td>
+  <td>все → <code>cmd</code>; гейт по смыслу — <code>prompt</code>/<code>agent</code></td>
+  <td><code>continue:false</code>+<code>stopReason</code> — остановить всё (или двойка)</td>
+  <td>Гейт «не закрывать без зелёных тестов / артефакта».</td>
+  <td><b style="color:var(--amber)">★★</b> Двойка / continue:false — не закрывать задачу без зелёных тестов и артефакта на диске.</td>
+</tr>
+<tr>
+  <td class="ev">TeammateIdle<span class="why">участник агент-команды собирается простаивать</span></td>
+  <td><b>нет</b></td>
+  <td>кто простаивает</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">продолжает работать</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>continue:false</code>+<code>stopReason</code> — остановить всё (или двойка)</td>
+  <td>«Очередь не пуста — бери следующую».</td>
+  <td><b style="color:var(--amber)">★</b> Двойка — «очередь не пуста — бери следующую», воркеры не простаивают.</td>
+</tr>
+
+<tr class="grp"><td colspan="8">Ход: граница</td></tr>
+<tr>
+  <td class="ev">Stop<span class="why">модель закончила отвечать (каждый конец хода; на твоё прерывание не срабатывает)</span></td>
+  <td><b>нет</b></td>
+  <td><code>stop_hook_active</code> — защита от петли</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">не даёт закончить; stderr — модели как указание</span></td>
+  <td>все → <code>cmd</code>; «реально готово?» — <code>prompt</code>/<code>agent</code></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — заставить продолжать<br><code>additionalContext</code> — фидбек без блока</td>
+  <td>«Не заканчивай, пока тесты красные». Всегда проверяй <code>stop_hook_active</code> — иначе вечная петля.</td>
+  <td><b style="color:var(--amber)">★★★</b> block+reason — мини-CI с самопочинкой: тесты красные → «не заканчивай, чини»; additionalContext — замечание без блока; terminalSequence — пинг «готово».</td>
+</tr>
+<tr>
+  <td class="ev">StopFailure<span class="why">ход оборвала ошибка API</span></td>
+  <td>тип ошибки: <code>rate_limit</code> <code>overloaded</code> <code>server_error</code> …</td>
+  <td>тип ошибки</td>
+  <td><span class="badge b-mute">ИГНОР</span></td>
+  <td>все → <code>cmd</code>/<code>http</code> (телеметрия)</td>
+  <td>— вывод и код игнорируются</td>
+  <td>Телеметрия, оповещение «упёрлись в лимит».</td>
+  <td><b style="color:var(--amber)">★★</b> Всё игнорируется — побочное действие: алерт в мессенджер «упёрлись в rate limit / API лёг».</td>
+</tr>
+
+<tr class="grp"><td colspan="8">Сжатие контекста</td></tr>
+<tr>
+  <td class="ev">PreCompact<span class="why">перед сжатием</span></td>
+  <td><code>manual</code> · <code>auto</code></td>
+  <td>что запустило сжатие</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">сжатие отменяется</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — не сжимать</td>
+  <td>Бэкап расшифровки до сжатия; запрет сжатия в критический момент.</td>
+  <td><b style="color:var(--amber)">★★</b> block — редко; чаще побочное действие: бэкап полной расшифровки перед сжатием.</td>
+</tr>
+<tr>
+  <td class="ev">PostCompact<span class="why">после сжатия</span></td>
+  <td><code>manual</code> · <code>auto</code></td>
+  <td>итог сжатия</td>
+  <td><span class="badge b-gray">2 = ТЕБЕ</span></td>
+  <td>все → <code>cmd</code> (лог)</td>
+  <td>— только конверт</td>
+  <td>Лог факта сжатия. Впрыск правил после сжатия удобнее через SessionStart с матчером <code>compact</code>.</td>
+  <td><b style="color:var(--amber)">★</b> Рычагов нет — лог сжатий как метрика; впрыск после сжатия — через SessionStart с матчером compact.</td>
+</tr>
+
+<tr class="grp"><td colspan="8">Наблюдатели среды и внешние диалоги</td></tr>
+<tr>
+  <td class="ev">Notification<span class="why">Claude Code шлёт уведомление</span></td>
+  <td>тип: <code>permission_prompt</code> <code>idle_prompt</code> <code>agent_completed</code> …</td>
+  <td>текст уведомления</td>
+  <td><span class="badge b-gray">2 = ТЕБЕ</span></td>
+  <td>все → <code>cmd</code>/<code>http</code></td>
+  <td>— только конверт (<code>terminalSequence</code> — пинг)</td>
+  <td>Пинг на десктоп «ждёт твоего решения».</td>
+  <td><b style="color:var(--amber)">★★★</b> terminalSequence (конверт и есть рычаг) — пинг на десктоп/телефон «агент ждёт решения»; у энтузиастов — TTS.</td>
+</tr>
+<tr>
+  <td class="ev">ConfigChange<span class="why">конфиг изменился по ходу сессии</span></td>
+  <td>источник: <code>user_settings</code> <code>project_settings</code> <code>local_settings</code> <code>policy_settings</code> <code>skills</code></td>
+  <td>что изменилось</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">кроме policy_settings</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>decision:"block"</code>+<code>reason</code> — откатить изменение (кроме policy)</td>
+  <td>Защита от подмены настроек по ходу работы.</td>
+  <td><b style="color:var(--amber)">★★</b> block — антисаботаж: откат подмены настроек и скиллов по ходу сессии.</td>
+</tr>
+<tr>
+  <td class="ev">CwdChanged<span class="why">сменилась рабочая папка (напр. <code>cd</code>)</span></td>
+  <td><b>нет</b></td>
+  <td>новая папка; есть <code>CLAUDE_ENV_FILE</code></td>
+  <td><span class="badge b-gray">2 = ТЕБЕ</span></td>
+  <td>все → <code>cmd</code> (env-файл)</td>
+  <td>— рычагов нет; env-файл</td>
+  <td>Реактивная среда: подхват direnv-переменных.</td>
+  <td><b style="color:var(--amber)">★</b> Env-файл вместо рычагов: подхват direnv/.envrc при <code>cd</code>.</td>
+</tr>
+<tr>
+  <td class="ev">FileChanged<span class="why">изменился наблюдаемый файл</span></td>
+  <td>буквальные имена файлов (список наблюдения)</td>
+  <td>какой файл; есть <code>CLAUDE_ENV_FILE</code></td>
+  <td><span class="badge b-gray">2 = ТЕБЕ</span></td>
+  <td>все → <code>cmd</code> (env-файл)</td>
+  <td>— рычагов нет; env-файл</td>
+  <td>Перечитать окружение при правке <code>.env</code>-подобных файлов.</td>
+  <td><b style="color:var(--amber)">★</b> Env-файл вместо рычагов: перечитать окружение при правке .env (слежку задал watchPaths).</td>
+</tr>
+<tr>
+  <td class="ev">WorktreeCreate<span class="why">создаётся worktree-копия (<code>--worktree</code>, изоляция субагента)</span></td>
+  <td><b>нет</b></td>
+  <td>параметры создания</td>
+  <td><span class="badge b-red">ЛЮБОЙ ≠ 0 = СРЫВ</span><span class="why">исключение из правила про единицу!</span></td>
+  <td><code>cmd</code> (путь в stdout) · <code>http</code> (worktreePath); вероятностные путь не отдают</td>
+  <td>путь: command → stdout, http → <code>worktreePath</code></td>
+  <td>Своя логика создания рабочих копий — точка стыковки с твоим оркестратором воркеров.</td>
+  <td><b style="color:var(--amber)">★</b> Путь из хука — своя раскладка параллельных воркеров по worktree.</td>
+</tr>
+<tr>
+  <td class="ev">WorktreeRemove<span class="why">worktree удаляется</span></td>
+  <td><b>нет</b></td>
+  <td>какая копия</td>
+  <td><span class="badge b-mute">ИГНОР</span><span class="why">ошибки — только в дебаг</span></td>
+  <td>все → <code>cmd</code></td>
+  <td>— только конверт</td>
+  <td>Уборка, сбор артефактов перед удалением.</td>
+  <td><b style="color:var(--amber)">★</b> Побочное действие: собрать логи и отчёты копии перед её удалением.</td>
+</tr>
+<tr>
+  <td class="ev">Elicitation<span class="why">MCP-сервер просит ввод пользователя во время вызова</span></td>
+  <td>имя MCP-сервера</td>
+  <td>анкета сервера</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">= отказ серверу</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>action</code> — accept/decline/cancel<br><code>content</code> — заполнить поля анкеты</td>
+  <td>Автоответы на анкеты серверов в конвейере без человека.</td>
+  <td><b style="color:var(--amber)">★</b> action+content — автоанкеты MCP-серверов в ночных безлюдных прогонах.</td>
+</tr>
+<tr>
+  <td class="ev">ElicitationResult<span class="why">ты ответил серверу; ответ ещё не ушёл</span></td>
+  <td>имя MCP-сервера</td>
+  <td>твой ответ</td>
+  <td><span class="badge b-red">2 = БЛОК</span><span class="why">ответ превращается в отказ</span></td>
+  <td>все → <code>cmd</code></td>
+  <td><code>action</code>, <code>content</code> — переписать ответ перед отправкой</td>
+  <td>Ревизия/маскирование того, что уходит наружу.</td>
+  <td><b style="color:var(--amber)">★</b> content — DLP: замаскировать данные, уходящие внешнему MCP-серверу.</td>
+</tr>
+</tbody>
+</table>
+
+<h2 id="exec">Ось 2 подробно: пять исполнителей</h2>
+<table>
+<thead><tr><th>Тип</th><th>Что запускается</th><th>Вердикт</th><th>Таймаут по умолч.</th><th>Где работает</th><th>Когда выбирать</th></tr></thead>
+<tbody>
+<tr><td class="ev">command</td><td>Локальный скрипт; бланк на stdin, ответ кодом выхода / stdout</td><td><b>детерминирован</b></td><td>600 с (на UserPromptSubmit — 30 с)</td><td>Везде — единственный тип без ограничений</td><td>По умолчанию. Все шлагбаумы и гейты — здесь.</td></tr>
+<tr><td class="ev">http</td><td>POST с бланком на URL; ответ телом (тот же JSON)</td><td>детерминирован, <b>но</b>: не-2xx, обрыв и таймаут = неблокирующая ошибка — блокировать можно только JSON-ом в 2xx</td><td>600 с</td><td>Везде, кроме SessionStart и Setup</td><td>Центральный сервис политики на команду; телеметрия.</td></tr>
+<tr><td class="ev">mcp_tool</td><td>Инструмент уже подключённого MCP-сервера; текст ответа = как stdout</td><td>детерминирован (если сервер жив; «не подключён» = неблокирующая)</td><td>600 с</td><td>Везде; на SessionStart/Setup сервер обычно ещё не подключён</td><td>Готовая логика уже живёт в MCP. На SessionStart/Setup сервер может не успеть подключиться.</td></tr>
+<tr><td class="ev">prompt</td><td>Одноразовый вопрос модели с твоим текстом; вернёт да/нет-решение</td><td><b>вероятностный</b></td><td>30 с</td><td>Везде, кроме SessionStart и Setup; на частых точках — только через <code>if</code></td><td>Проверка по смыслу, где скриптом не выразить («это похоже на утечку данных?»).</td></tr>
+<tr><td class="ev">agent</td><td>Мини-агент с Read/Grep/Glob, сам проверит условия</td><td><b>вероятностный</b>; экспериментальный</td><td>60 с</td><td>Везде, кроме SessionStart и Setup; тяжёлый — только редкие границы</td><td>Проверка, требующая заглянуть в файлы перед вердиктом.</td></tr>
+</tbody>
+</table>
+<p class="wrap-note">Все совпавшие обработчики стартуют параллельно; одинаковые — дедуплицируются. Где объявлять: пользовательские / проектные / локальные настройки, управляемая политика, плагин, а также фронтматтер скилла или агента — тогда хук живёт только пока компонент активен (флаг <code>once</code> — раз за сессию, работает только в скиллах).</p>
+
+<div class="callout">
+<b>Как выбрать исполнителя — цепочка вопросов (иди сверху вниз, первый «да» решает):</b>
+<ol style="margin:.5em 0 .3em 1.2em;padding:0">
+  <li><b>Точка — SessionStart или Setup?</b> → <code>command</code>. Формально можно и <code>mcp_tool</code>, но сервер на старте обычно ещё не подключён — жди ошибку «not connected» на первом запуске.</li>
+  <li><b>Нужно вернуть путь (WorktreeCreate)?</b> → <code>command</code> (путь в stdout) или <code>http</code> (worktreePath). Вероятностные путь отдать не умеют.</li>
+  <li><b>Это шлагбаум безопасности, который обязан сработать всегда?</b> → <code>command</code>. Он единственный блокирует детерминированно и без сети. <code>http</code> и <code>mcp_tool</code> при обрыве, таймауте или «не подключён» <b>пропускают</b> действие (fail-open); <code>prompt</code>/<code>agent</code> могут ошибиться в обе стороны.</li>
+  <li><b>Условие выразимо кодом</b> (имя инструмента, путь, регэксп, наличие файла, код выхода теста)? → <code>command</code>. Быстро, бесплатно, воспроизводимо.</li>
+  <li><b>Условие смысловое</b> («похоже на утечку секрета?», «задача реально доделана?») → <code>prompt</code>; если для вердикта надо самому заглянуть в файлы → <code>agent</code>. Обоим место на редких границах (Stop, SubagentStop, TaskCompleted, PermissionRequest), а не на частых точках: медленно, платно и вероятностно.</li>
+  <li><b>Единая политика на команду / телеметрия в центр?</b> → <code>http</code>. <b>Логика уже живёт в MCP-сервере?</b> → <code>mcp_tool</code>.</li>
+</ol>
+<p style="font-size:13px;margin:8px 0 0">Помни: на одну точку можно повесить несколько исполнителей разных типов — совпавшие стартуют параллельно (например, командный шлагбаум + http-телеметрия на одном PreToolUse). Командные хуки дополнительно умеют <code>async: true</code> — фоновый запуск, не задерживающий цикл (логи, бэкапы, уведомления), и <code>asyncRewake</code> — фон, который при двойке будит модель системным напоминанием. И за пределами настроек: в Agent SDK те же события ловятся колбэками прямо в коде приложения (TypeScript/Python) — шестой «исполнитель», но живёт он в SDK-приложении, а не в settings.json.</p>
+</div>
+
+<h2 id="sieves">Три сита: воронка «когда именно вмешиваться»</h2>
+<div class="two">
+  <div>
+    <h3>Сито 1 — событие</h3>
+    <p>Есть всегда: хук существует только на своей точке. Выбор точки = выбор момента и полномочий (см. цвет двойки).</p>
+    <h3>Сито 2 — матчер</h3>
+    <p>Есть не везде. <b>Без матчера</b> (срабатывают на каждое вхождение): UserPromptSubmit, PostToolBatch, Stop, TeammateIdle, TaskCreated, TaskCompleted, WorktreeCreate, WorktreeRemove, MessageDisplay, CwdChanged — поле матчера там молча игнорируется.</p>
+    <p>Синтаксис: пусто / <code>*</code> = все; только буквы-цифры-дефис-подчёркивание с разделителями <code>|</code> или запятой = точное имя или список (<code>Edit|Write</code>); любой другой символ = <b>JS-регулярка без якорей</b> — <code>Edit.*</code> ловит и <code>NotebookEdit</code>, якори как <code>^Edit$</code>. Регистрозависимо: <code>bash</code> ≠ <code>Bash</code>. MCP-инструменты: <code>mcp__сервер__инструмент</code>, весь сервер — <code>mcp__сервер__.*</code> (хвост <code>.*</code> обязателен).</p>
+  </div>
+  <div>
+    <h3>Сито 2.5 — поле <code>if</code></h3>
+    <p>Только у пяти инструментных точек. Одно правило в синтаксисе разрешений: <code>Bash(git *)</code>, <code>Edit(*.ts)</code> — сверяет имя <b>вместе с аргументами</b>, экономит запуск процесса. Комбинировать условия нельзя — на каждое своё обработчик. Осторожно: на любой <b>не</b>-инструментной точке хук с полем <code>if</code> вообще никогда не запускается. <b>Best-effort и fail-open</b>: составные команды, цепочки и подстановки <code>$( )</code> могут <b>не совпасть</b> с правилом — тогда скрипт вообще не позовут и заявка пройдёт без проверки. Поэтому «если» — оптимизация запусков, а жёсткий allow/deny — только системой разрешений.</p>
+    <h3>Сито 3 — логика скрипта</h3>
+    <p>Есть всегда. Скрипту доступны: весь текст сообщения (<code>prompt</code>) или параметры инструмента (<code>tool_input</code>), диск, история диалога по <code>transcript_path</code>, режим разрешений, окружение. Не совпало — молчаливый ноль за миллисекунды. Правило: <b>срабатывание сужают сита 1–2, вмешательство решает сито 3.</b></p>
+  </div>
+</div>
+
+<h2 id="exit">Узел исходов: коды выхода</h2>
+<table>
+<thead><tr><th style="width:18%">Исход</th><th style="width:42%">Что происходит</th><th>Куда идут потоки</th></tr></thead>
+<tbody>
+<tr><td class="ev">exit 0, тихо</td><td>«Мнения нет». Действие идёт своим ходом (для PreToolUse — в обычный поток разрешений; тихий ноль ≠ allow).</td><td>—</td></tr>
+<tr><td class="ev">exit 0 + текст в stdout</td><td>Только на трёх зелёных точках (UserPromptSubmit, UserPromptExpansion, SessionStart) текст попадает в контекст модели. На остальных — уходит в дебаг-лог.</td><td>stdout → контекст / дебаг</td></tr>
+<tr><td class="ev">exit 0 + JSON</td><td>Структурная резолюция: блок/allow/deny/довесок и пр. (раздел ниже). Лишний текст рядом с JSON ломает разбор.</td><td>stdout → парсер резолюций</td></tr>
+<tr><td class="ev">exit 2</td><td>Блокирующая ошибка. <b>stdout и JSON игнорируются.</b> Эффект — по карте события (красные блокируют; янтарные — фидбек; серые — заметка тебе).</td><td>stderr → модели (красные/янтарные) или тебе (серые)</td></tr>
+<tr><td class="ev">exit 1 и прочие ≠ 0,2</td><td><b>Дырка.</b> Неблокирующая ошибка: пометка «hook error», действие идёт дальше. Исключение — WorktreeCreate: там любой ненулевой срывает создание.</td><td>stderr → тебе + дебаг</td></tr>
+</tbody>
+</table>
+<div class="callout red"><b>Мнемоника узла:</b> впрыск = ноль плюс текст · блок = только двойка · единица = дырка. Один хук — один язык: либо коды, либо ноль+JSON; двойка выбрасывает любой JSON.</div>
+
+<h2 id="json">JSON-рычаги: универсальный конверт и правила довеска</h2>
+<p class="wrap-note">Рычаги каждой точки слиты в большую таблицу (колонка «Рычаги при нуле» + их живые сценарии в «Реальном применении рычагов»). Здесь — только то, что общее для всех точек.</p>
+<div class="two">
+  <div class="card" style="border-top-color:var(--blue)">
+    <h3>Универсальный конверт (любая точка)</h3>
+    <p><code>continue:false</code> + <code>stopReason</code> — заглушить всё немедленно (сильнее любых decision; stopReason видишь только ты); <code>systemMessage</code> — предупреждение тебе на экран; <code>suppressOutput</code> — спрятать stdout хука из ленты; <code>terminalSequence</code> — системное уведомление / заголовок окна / звонок (замена недоступному /dev/tty).</p>
+    <p style="font-size:13px">Оговорки: у StopFailure игнорируется вообще всё; у TaskCreated / TaskCompleted / TeammateIdle конверт — единственный JSON-способ остановки (остальное — двойкой).</p>
+  </div>
+  <div class="card" style="border-top-color:var(--blue)">
+    <h3>Довесок <code>additionalContext</code></h3>
+    <p>Строка впрыскивается как системное напоминание в месте срабатывания (у старт-точек — перед первым промптом; у инструментных — рядом с результатом; у Stop — в конец хода). Лимит 10&nbsp;000 знаков (сверх — уходит в файл). Формулируй <b>фактами</b>, не приказами «свыше»: командный тон ловит защита от инъекций и выносит текст тебе на обозрение. При <code>--resume</code> сохранённые довески проигрываются заново — таймстампы устаревают; SessionStart на резюме перезапускается и может освежить.</p>
+  </div>
+</div>
+<p class="wrap-note">Переписывание вместо запрета: исходящее к инструментам правь через <code>updatedInput</code> (PreToolUse), входящее от них — через <code>updatedToolOutput</code> (PostToolUse). Текст твоего промпта переписать нельзя — только довесить. И два языка на хук: выбрал двойку — весь напечатанный JSON выбрасывается.</p>
+
+<h2 id="recipes">Рецепты: точка · сито · исполнитель · исход</h2>
+<div class="cards">
+  <div class="card">
+    <h3>1 · Шлагбаум «сначала спека» (block_until)</h3>
+    <div class="meta">PreToolUse · матчер Edit|Write · command · deny / exit 2</div>
+    <p>Скрипт: спека на диске есть? Нет → deny с причиной «создай спеку через скилл X». Модель может упрямиться сколько угодно — проверка выполняется на каждую просьбу. Уровень по манифесту: physical-hook.</p>
+  </div>
+  <div class="card">
+    <h3>2 · Детектор триггеров на входе</h3>
+    <div class="meta">UserPromptSubmit · сито 3: ключевые слова · command · 0 + довесок</div>
+    <p>Regex по закрытому списку («хочу внедрить», «добавим фичу») → проверил диск → впрыск «по правилам проекта начни со спеки, скилл такой-то». Промптовый уровень — работает почти всегда; гарантию даёт пара с рецептом 1.</p>
+  </div>
+  <div class="card">
+    <h3>3 · Память, пережившая сжатие</h3>
+    <div class="meta">SessionStart · матчер compact · command · 0 + stdout</div>
+    <p>После каждой компакции печатает выжимку контекста (ветка, задача, запреты) — она входит в свежий контекст первой.</p>
+  </div>
+  <div class="card">
+    <h3>4 · Автолинт с возвратом ошибок</h3>
+    <div class="meta">PostToolUse · матчер Edit|Write · command · decision:block</div>
+    <p>Прогнал линтер по правленому файлу; есть ошибки → block с их списком — модель читает и чинит сама, без твоего участия.</p>
+  </div>
+  <div class="card">
+    <h3>5 · Секреты под замком</h3>
+    <div class="meta">Permissions (deny-правила) + PreToolUse как второй эшелон</div>
+    <p>Жёсткий запрет чтения секрет-файлов — правилами разрешений: <code>if</code> у хуков best-effort и fails open, а файлы через <code>@</code> вообще минуют PreToolUse. Хук — дополнительная сетка, не единственная.</p>
+  </div>
+  <div class="card">
+    <h3>6 · Не останавливаться до зелёных тестов</h3>
+    <div class="meta">Stop · command · decision:block + reason</div>
+    <p>На конце хода гоняет тесты; красные → block с логом падений. Обязательно: если <code>stop_hook_active</code> уже истина — выйти нулём, иначе вечная петля.</p>
+  </div>
+  <div class="card">
+    <h3>7 · Свои worktree для воркеров</h3>
+    <div class="meta">WorktreeCreate · command · stdout = путь</div>
+    <p>Заменяет штатное создание копий своей логикой (нейминг, диск, квоты) — точка стыковки с оркестратором параллельных воркеров. Помни: тут любой ненулевой код срывает создание.</p>
+  </div>
+</div>
+
+<h2 id="traps">Подводные камни</h2>
+<div class="cards">
+  <div class="card warn"><h3>Единица не блокирует</h3><p>Полисный хук обязан выходить двойкой. Единица = «hook error», действие проходит. Единственное исключение — WorktreeCreate.</p></div>
+  <div class="card warn"><h3>Двойка глотает JSON</h3><p>Резолюции разбираются только при нуле. Напечатал <code>decision:block</code> и вышел двойкой — JSON выброшен. Один хук — один язык.</p></div>
+  <div class="card warn"><h3>Мусор в stdout ломает JSON</h3><p>Приветствия шелл-профиля и echo-отладка попадают в stdout и рушат разбор резолюции. Отладку — в stderr или файл.</p></div>
+  <div class="card warn"><h3>Матчер: регистр и якоря</h3><p><code>bash</code> ≠ <code>Bash</code>; регулярки без якорей (<code>Edit.*</code> ловит NotebookEdit). Точное имя — точными символами или <code>^…$</code>.</p></div>
+  <div class="card warn"><h3>Таймауты входной таможни</h3><p>UserPromptSubmit ждут максимум 30 с; по таймауту хук снимается, довесок отбрасывается, промпт уходит «голым». MessageDisplay — 10 с.</p></div>
+  <div class="card warn"><h3>if — best-effort</h3><p>Сито 2.5 экономит запуски, но fails open на подкомандах и <code>$( )</code>. Жёсткий allow/deny — только системой разрешений.</p></div>
+  <div class="card warn"><h3>Дыры вокруг PreToolUse</h3><p>Файлы через <code>@</code> в промпте читаются без вызова инструмента; прямой <code>/скилл</code> минует инструмент Skill (лови на UserPromptExpansion); PermissionRequest не срабатывает в headless.</p></div>
+  <div class="card warn"><h3>Петля на границе хода</h3><p>Stop-хук, который всегда блокирует, зацикливает разговор. Проверяй <code>stop_hook_active</code> и давай выходное условие.</p></div>
+  <div class="card warn"><h3>Параллельные переписчики</h3><p>Несколько PreToolUse одновременно правят <code>updatedInput</code> одного вызова — победит закончивший последним. Один переписчик на инструмент.</p></div>
+  <div class="card warn"><h3>Довесок — фактами</h3><p>Текст «системным приказом» триггерит защиту от инъекций: его вынесут тебе на экран вместо исполнения. Пиши справочно: «цель деплоя — прод».</p></div>
+  <div class="card warn"><h3>Резюме проигрывает старое</h3><p>При <code>--resume</code> сохранённые довески повторяются, хуки за прошлые ходы не перезапускаются — таймстампы и SHA устаревают. Освежай в SessionStart (source=resume).</p></div>
+  <div class="card warn"><h3>Версии плывут</h3><p>API хуков заметно меняется в линейке 2.1.x (новые точки, поля, семантика матчеров). Сверяй на своей версии: команда <code>/hooks</code> и официальный справочник.</p></div>
+</div>
+
+<h2 id="layers">Пять слоёв хука — анатомия целиком</h2>
+<p>Всё, что разобрано выше, складывается в одну конструкцию. Читается сверху вниз: каждая заявка агента проходит слои по порядку, и на любом может остановиться.</p>
+<pre>
+① КОНФИГ            .claude/settings.json — список хуков
+                    + ИЕРАРХИЯ: user → project → local, с precedence при конфликте
+                      (у git такого файла НЕТ вообще, у GitHub Actions иерархии нет)
+
+② ТОЧКА СОБЫТИЯ     сито 1 — КОГДА
+                    PreToolUse · PostToolUse · UserPromptSubmit · Stop
+                    · SessionStart · SubagentStop · PreCompact · SessionEnd …
+
+③ MATCHER           сито 2 — НА ЧТО.  "Write|Edit" · "Bash" · "*"
+                    БЕСПЛАТНОЕ: не совпало — хук даже не запускается
+                    (важно для дорогих исполнителей: LLM-судья = секунды + подписка)
+
+④ ИСПОЛНИТЕЛЬ       ось «кто судит» — ПЯТЬ типов
+                    command · prompt · agent · http · mcp_tool
+                    └─ внутри него сито 3: своя проверка по полям заявки
+                       (case по file_path, grep по content — видит ЛЮБОЕ поле бланка)
+
+⑤ РЫЧАГ             язык ответа — ЧТО СДЕЛАТЬ
+                    exit 0 / exit 2  ·  permissionDecision: deny|allow|ask|defer
+                    ·  updatedInput (тихая подмена)  ·  additionalContext
+</pre>
+<div class="callout"><b>Сита сужают поток, рычаг — язык вердикта.</b> Сита 1-2 живут в <code>settings.json</code> и ничего не стоят: не совпало — процесс не запущен. Сито 3 живёт в коде стража, стоит запуска, зато видит любое поле заявки. Путать сито с рычагом — частая ошибка: первое отвечает «кого судить», второй — «что сказать тому, кого судим».</div>
+
+<h2 id="three-systems">Четыре системы рядом: git · GitHub Actions · ruleset · харнесс</h2>
+<p>Одна и та же конструкция «событие → фильтр → исполнитель → ответ» реализована в четырёх местах с разной зрелостью. Модель одна — понял одну, читаешь все четыре. Четвёртая, <b>ruleset</b>, выпадает из ряда дважды: её рецепт единственный <b>не лежит в репозитории</b>, и она единственная <b>реально запрещает операцию</b>.</p>
+<table>
+<thead><tr><th>Слой</th><th>git hook</th><th>GitHub Actions</th><th>Ruleset</th><th>Claude Code hook</th></tr></thead>
+<tbody>
+<tr><td>конфиг-файл «что делать»</td><td><b>❌ нет</b></td><td><code>.github/workflows/*.yml</code></td><td><b>❌ на серверах GitHub</b></td><td><code>.claude/settings.json</code></td></tr>
+<tr><td><b>рецепт едет в git?</b></td><td>🟡 конфиг фреймворка да, крючок нет</td><td>✅ да</td><td><b>❌ нет — не виден в диффе</b></td><td>🟡 project да, user нет</td></tr>
+<tr><td>иерархия конфигов</td><td>❌</td><td>❌</td><td>🟡 складываются: строгая версия побеждает</td><td><b>✅ user → project → local</b></td></tr>
+<tr><td>событие (сито 1)</td><td><code>pre-commit</code>…</td><td><code>on: push</code>…</td><td>попытка <b>merge / push</b></td><td><code>PreToolUse</code>…</td></tr>
+<tr><td>фильтр (сито 2)</td><td><code>files:</code>/<code>types:</code> — во фреймворке</td><td><code>paths:</code>, <code>branches:</code></td><td>target branches (fnmatch)</td><td>✅ <code>matcher</code></td></tr>
+<tr><td><b>типов исполнителя</b></td><td><b>1</b> — «запусти файл»</td><td>1 — шаги на раннере</td><td><b>0</b> — ничего не запускает</td><td><b>5</b> — command/prompt/agent/http/mcp</td></tr>
+<tr><td>вход</td><td>argv, иногда stdin</td><td>контекст <code>github.*</code></td><td><b>имя job + его статус</b></td><td>✅ <b>JSON на stdin</b>: tool_input, cwd, session</td></tr>
+<tr><td><b>читает наш рецепт проверок?</b></td><td>✅ через переходник</td><td>✅ через шаг <code>pre-commit run</code></td><td><b>❌ никогда — читает вердикт</b></td><td>— (свой рецепт)</td></tr>
+<tr><td>язык ответа</td><td>только exit-код</td><td>статус-чек ✅/❌ <b>= надпись</b></td><td><b>✅ ЗАПРЕТ операции</b></td><td>✅ exit-код <b>+ JSON-рычаги</b></td></tr>
+<tr><td>таймаут</td><td>❌</td><td>✅</td><td>—</td><td>✅ <code>timeout</code></td></tr>
+<tr><td><b>подмена заявки</b></td><td>🟡 форматтер правит файл на диске</td><td>❌</td><td>❌</td><td>✅ <b><code>updatedInput</code></b></td></tr>
+<tr><td>судья с суждением</td><td>❌</td><td>❌</td><td>🟡 <code>Require review</code> — человек</td><td>✅ <code>prompt</code> / <code>agent</code></td></tr>
+<tr><td><b>чем обходится</b></td><td><b><code>--no-verify</code></b></td><td>«просто не пушить»</td><td>только <b>bypass list</b> (админ там по умолчанию!)</td><td>правкой <code>settings.json</code></td></tr>
+</tbody>
+</table>
+<div class="callout"><b>Форматтер — родня <code>updatedInput</code>, и опаснее его.</b> Он не блокирует, а молча переписывает файл на диске и возвращает не-ноль. Отличие от харнесса: подменённый результат <b>не уезжает</b> в операцию — он лежит в рабочей копии и ждёт <code>git add</code>. Опасность реализуется ровно в тот момент, когда ты добавляешь правки не глядя: приняты изменения, которых ты не читал.</div>
+
+<h3>Путь до конфига: кто как доходит до нашего рецепта</h3>
+<pre>
+① ХАРНЕСС
+модель попросила Write
+   └─► харнесс читает settings.json (user ~/.claude → project .claude; project сильнее)
+          сито 1 = PreToolUse · сито 2 = matcher Write|Edit
+          └─► запускает исполнителя → сито 3 внутри скрипта → вердикт
+
+② ЛОКАЛЬНЫЙ GIT
+git commit
+   └─► git ищет ФАЙЛ с именем события: .git/hooks/pre-commit     ← НЕ в репо
+          git больше ничего не знает — ни про фреймворк, ни про рецепт
+          └─► переходник, 20 строк:
+                 python -m pre_commit hook-impl --config=.pre-commit-config.yaml
+                 └─► pre-commit читает .pre-commit-config.yaml    ← НАШ рецепт
+                        └─► берёт инструменты из склада ~/.cache/pre-commit
+                               └─► гонит по ИЗМЕНЁННЫМ файлам → 0 / не-0
+
+③ GITHUB ACTIONS
+push / открыт PR
+   └─► GitHub читает .github/workflows/ci.yml        ← ЕГО рецепт, сита on:/branches:/paths:
+          ├─ поднимает чистый раннер
+          ├─ checkout           → приехали код + тесты + ОБА рецепта
+          ├─ pip install .[dev] → появился pytest    ← ручной шов language:system
+          ├─ actions/cache      → склад по хешу рецепта
+          └─ шаг: pre-commit run --all-files
+                 └─► pre-commit читает .pre-commit-config.yaml   ← НАШ рецепт, ТОТ ЖЕ
+                        └─► job «lint» стал зелёным / красным  = всего лишь НАДПИСЬ
+
+④ RULESET
+нажата кнопка Merge
+   └─► GitHub смотрит СВОЮ настройку (в репо её нет — читается через REST /rulesets)
+          сито 1 = попытка merge · сито 2 = ветка main
+          └─► сверяет required checks с ИМЕНАМИ job'ов и их статусом
+                 ↑ имя JOB, а НЕ имя workflow — опечатка = проверка «не пришла»
+                 └─► все зелёные → merge разрешён
+                     красный / отсутствует → КНОПКА ЗАБЛОКИРОВАНА
+</pre>
+<div class="callout"><b>Читается одним взглядом:</b> ①②③ читают наш рецепт и выдают <b>вердикт</b> — ④ рецепта не читает вовсе, он читает <b>вердикт ③</b> и превращает надпись в запрет. Отсюда правило лестницы: <b>CI без ruleset краснеет в пустоту</b>. И отсюда же — где настоящая стена: ①②③ снимаются одним движением того, кто их поставил (<code>--no-verify</code>, «не пушить»), ④ стоит там, где решение принимает <b>не твоя машина</b>.</div>
+<div class="callout"><b>Ruleset слеп к содержанию.</b> Ему всё равно, что именно проверял job — он знает имя и цвет. Практические следствия: переименовал job — проверка «исчезла», кнопка встала намертво; и наоборот, job может быть пустышкой из одной строки <code>echo ok</code> — ruleset пропустит с чистой совестью. Смысл проверки сторожит только ревью.</div>
+<pre>
+git (2005)      событие + «запусти файл»                      ПРИМИТИВ
+                └─ фреймворк pre-commit доносит: конфиг · версии · изоляцию
+
+GitHub Actions  событие + конфиг + раннер + marketplace       ФРЕЙМВОРК
+                └─ но исполнитель один, ответ бинарный
+
+Claude Code     событие + конфиг + иерархия + 5 исполнителей
+                + богатый язык ответа + подмена заявки        ФРЕЙМВОРК+
+</pre>
+<div class="callout"><b>Почему у харнесса пять исполнителей, а у остальных один.</b> git и CI решают МЕХАНИЧЕСКИЕ вопросы («линтер чист? тесты зелёные?») — там достаточно скрипта. Харнесс перехватывает ДЕЙСТВИЯ АГЕНТА, где вопрос бывает смысловым: «опасно ли это по смыслу?». Механику судит код (<code>command</code>), смысл — только модель (<code>prompt</code>/<code>agent</code>). Отсюда и разнообразие.</div>
+<div class="callout"><b>Три вещи, которых нет больше нигде:</b> ① пять типов исполнителя · ② <code>updatedInput</code> — тихая подмена заявки: при <code>deny</code> модель знает, что её остановили, при подмене думает, что победила · ③ иерархия настроек с precedence (глобальный конфиг и конфиг папки работают одновременно, папка запуска решает).</div>
+
+<h2 id="gloss">Мини-словарь</h2>
+<dl class="gloss">
+  <dt>точка / событие</dt><dd>фиксированное место в цикле обвязки, где может запуститься хук; ось 1.</dd>
+  <dt>исполнитель</dt><dd>что именно запускается в точке: скрипт, веб-запрос, MCP-инструмент, вопрос модели, мини-агент; ось 2.</dd>
+  <dt>матчер (сито 2)</dt><dd>фильтр в настройке: по имени инструмента, источнику старта, типу агента и т.п.</dd>
+  <dt>бланк</dt><dd>служебный JSON о происшествии, который обвязка подаёт хуку на вход (stdin / тело POST).</dd>
+  <dt>резолюция</dt><dd>структурный JSON-ответ хука при нуле: блок, allow/deny, довесок, переписка аргументов.</dd>
+  <dt>двойка / дырка</dt><dd>код выхода 2 — блокирующий сигнал; любой другой ненулевой — неблокирующая ошибка, действие проходит.</dd>
+  <dt>впрыск / довесок</dt><dd>текст от хука, добавленный в контекст модели: stdout на зелёных точках или additionalContext где угодно.</dd>
+  <dt>шлагбаум (block_until)</dt><dd>блокировка инструментов, пока на диске нет артефакта, который производит только нужный скилл.</dd>
+  <dt>витрина</dt><dd>всегда загруженные шапки скиллов (имя+описание), по которым модель выбирает скилл — вероятностно; хуки к ней не относятся.</dd>
+</dl>
+
+<footer>
+  Составлено по официальному справочнику хуков Claude Code (code.claude.com/docs, получено 07.07.2026) с примечаниями из практики сообщества.
+  Поведение уточняй на своей версии: <code>/hooks</code>. Терминология «оси · сита · узлы · бланк · двойка» — рабочий язык наших разборов, в документации она английская.
+</footer>
+
+</main>
+</body>
+</html>
