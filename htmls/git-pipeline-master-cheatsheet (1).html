@@ -253,7 +253,7 @@
       <!-- bridge -->
       <tr class="bridge"><td colspan="5"><div class="bridge-in"><span class="bcode">git push  💻 → ☁️</span><span class="bnote">код уходит на сервера GitHub · дальше события и проверки уже ТАМ, на чистой машине, обойти нельзя</span></div></td></tr>
 
-      <tr class="phase"><td colspan="5">⑤ свой git-сервер <span class="opt">опц. · push-to-deploy вместо GitHub · 💻 твоя машина · ⚠️ серверные хуки НЕ обходятся --no-verify — ярлык «обходимы» выше касается только локальных ①–④</span></td></tr>
+      <tr class="phase"><td colspan="5">⑤ свой git-сервер <span class="opt">🚫 НЕ НАШ СЛУЧАЙ — для полноты картины. Это голый <code>git init --bare</code> + SSH на своей машине (git ≠ GitHub!): даёт серверные хуки, но НИ PR, НИ Actions, НИ rulesets. У нас remote = github.com ради ворот. · ⚠️ серверные хуки НЕ обходятся --no-verify — ярлык «обходимы» выше касается только локальных ①–④</span></td></tr>
       <tr class="row g"><td class="c-ev"><div class="ev-name">pre-receive / update</div><div class="ev-when">сервер принял push</div><div class="ev-desc">Серверные git-хуки на ТВОЁМ git-сервере (не на GitHub). Срабатывают когда сервер получил push, но ещё не записал в refs. Падает (<code>exit≠0</code>) → push отклонён. <code>pre-receive</code> — раз на весь push; <code>update</code> — на каждый реф (ветку ИЛИ тег: пример <code>v*.*.*</code> ниже — это теги).</div></td><td class="c-mach"><span class="chip-pc">💻 свой сервер</span></td><td class="c-obl"><span class="obl-opt">🟡 опц.</span><span class="sub2">только push-to-deploy</span></td><td class="c-ver"><span class="vrow"><b>защита ветки</b> — запретить прямой push в main <span style="color:var(--opt)">(свой скрипт; на GitHub = branch protection)</span></span><span class="vrow"><b>формат рефов</b> — имена по правилу: <code>feature/*</code>, <code>v*.*.*</code> <span style="color:var(--opt)">(свой скрипт)</span></span><span class="vrow"><b>подпись коммитов</b> — пускать только подписанные <span style="color:var(--opt)">(свой скрипт)</span></span><span class="wbar"><span class="f">▰</span><span class="e">▱▱▱</span></span> <span style="font-size:9.5px;color:var(--faint)">мгновенно</span></td><td class="c-why">твой аналог <b>branch protection</b>, но на СВОЁМ сервере (если push-to-deploy на свой bare-репо вместо GitHub). Решает на приёме: впустить push в историю сервера или отклонить. На GitHub этих хуков нет — там сервер не твой, роль играет branch protection.</td></tr>
       <tr class="row o mute"><td class="c-ev"><div class="ev-name">post-receive</div><div class="ev-when">push принят</div></td><td class="c-mach"><span class="chip-pc">💻 свой сервер</span></td><td class="c-obl"><span class="obl-none">⚪ нечего</span></td><td class="c-ver none">— деплой, не проверка</td><td class="c-why">собрать + рестарт (выкатка)</td></tr>
 
@@ -301,7 +301,7 @@
         <div class="oblrow opt"><span class="b">🟡 ОПЦ.</span><span class="x">pre-commit, commit-msg, pre-push (удобно, но обходимо); контрактные (если есть сервисы); мутации (критич. модули); merge_group (большой поток PR); nightly (зрелый проект); ревью (обяз. для критич. кода).</span></div>
         <div class="oblrow none"><span class="b">⚪ НЕЧЕГО</span><span class="x">хозяйственные обсерверы: post-checkout, prepare-commit-msg, post-commit, post-merge, триггеры. Тут нечего проверять — только реакция.</span></div>
       </div>
-      <p style="margin-top:9px"><span class="n">Минимум для соло (твой случай):</span> <code>on:push/PR</code> с юнит-тестами как required check + <code>branch protection</code>. Остальное добавляешь по мере роста — staging/E2E/canary имеют смысл, когда появятся клиенты. <span class="n">⚠️ Две ловушки:</span> branch protection на ПРИВАТНОМ репо доступна только с Pro-плана (на Free — только публичный репо); и включи «Do not allow bypass» — по умолчанию админ правила ОБХОДИТ, а соло-админ = ты сам и твой LLM-агент.</p>
+      <p style="margin-top:9px"><span class="n">Минимум для соло (твой случай):</span> <code>on:push/PR</code> с юнит-тестами как required check + <code>branch protection</code>. Остальное добавляешь по мере роста — staging/E2E/canary имеют смысл, когда появятся клиенты. <span class="n">⚠️ Две ловушки:</span> branch protection на ПРИВАТНОМ репо доступна только с Pro-плана (на Free — только публичный репо; <b>наш overlay_script публичный → доступна, см. «блокер снят» ниже</b>); и включи «Do not allow bypass» — по умолчанию админ правила ОБХОДИТ, а соло-админ = ты сам и твой LLM-агент.</p>
     </div>
   </div>
 
@@ -318,6 +318,232 @@
       </div>
     </div>
     <p>Это <span class="n">не одинаковые тесты</span>, а зеркало: на двойнике гоняешь то, что на проде уронило бы клиентов; на проде — только наблюдение и лёгкая проверка живости. Staging — это не «полу-прод», а <span class="n">копия по конфигурации и версиям</span>, изолированная от живых пользователей, чтобы было где гонять разрушительное без риска. Но данные и масштаб у него всегда беднее прода (PII не копируют, машин меньше) — потому часть багов ловится только на живом проде (shift-right).</p>
+  </div>
+
+  <div class="gloss-h">ЛОКАЛЬНЫЕ ХУКИ — чем управлять и почему фреймворк</div>
+
+  <div class="card">
+    <h4>у git НЕТ конфига для хуков — вот и вся причина</h4>
+<pre>
+git умеет РОВНО ОДНО:
+   git commit → есть исполняемый файл .git/hooks/pre-commit?
+                └ есть → запусти. exit 0 = коммит, exit ≠0 = стоп.
+   Больше git не знает НИЧЕГО: ни что внутри, ни какие инструменты нужны.
+
+Сравни с системами, где конфиг ВСТРОЕН:
+   Claude Code  события ✅ + конфиг ✅ (.claude/settings.json)  → фреймворк не нужен
+   GitHub       события ✅ + конфиг ✅ (.github/workflows/*.yml) → то же
+   git локально события ✅ + конфиг ❌                          → доносит фреймворк
+</pre>
+    <p><b>Что такое «фреймворк» здесь:</b> программа, которая добавляет git недостающий слой. Ты пишешь <code>.pre-commit-config.yaml</code> (обычный файл в корне, в git), команда <code>pre-commit install</code> один раз генерирует <code>.git/hooks/*</code> со строкой «прочитай конфиг и выполни». <span class="n">Хук есть в обоих случаях, событие то же, проверки те же</span> — меняется только где живёт СПИСОК.</p>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h4>зачем конфиг вместо своего bash-скрипта</h4>
+      <div class="obls">
+        <div class="oblrow req"><span class="b">ВИДИМОСТЬ</span><span class="x">хук в <code>.git/hooks</code> я меняю — <b>в диффе и PR НЕ видно</b>. Конфиг в корне — видно. Это Э3-урок: правило, живущее вне просматриваемой истории, охраняет само себя</span></div>
+        <div class="oblrow req"><span class="b">ВЕРСИИ</span><span class="x"><code>rev: v0.16.0</code> — фреймворк скачает ИМЕННО эту версию в изолированное окружение. Свой скрипт надеется, что «ruff установлен» — какой, неизвестно</span></div>
+        <div class="oblrow opt"><span class="b">ИСТОРИЯ</span><span class="x"><code>.git/</code> не версионируется: сломал хук — откатить нечем; склонировал репо — хуков нет, молча</span></div>
+        <div class="oblrow opt"><span class="b">ФИЛЬТР</span><span class="x"><code>types: [python]</code> одной строкой вместо ручного <code>if [[ $file == *.py ]]</code></span></div>
+        <div class="oblrow none"><span class="b">МИФ</span><span class="x">«хуки не работают в worktree» — <b>неверно</b>: проверено, все 4 worktree делят одну <code>.git/hooks</code> (<code>git rev-parse --git-path hooks</code> одинаков) → <code>pre-commit install</code> делается ОДИН раз</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h4>какой фреймворк брать (ресерч 2026)</h4>
+      <table style="min-width:0">
+        <tr><th>инструмент</th><th>вердикт</th><th>почему</th></tr>
+        <tr><td><b>pre-commit</b> <span class="dim">Python, с 2014</span></td><td><span class="obl-req">✅ БРАТЬ</span></td><td>уже стоит на машине (4.5.1) · вся документация и ответы в сети под него · релизы редкие</td></tr>
+        <tr><td><b>prek</b> <span class="dim">Rust, drop-in</span></td><td><span class="obl-opt">🟡 потом</span></td><td>установка ~10× быстрее, читает ТОТ ЖЕ конфиг. Но pre-1.0, релиз раз в 1-2 недели → доки в сети устаревают. Мигрировали CPython, FastAPI, Airflow, Ruff, Home Assistant — но у них инженеры чинят за час</td></tr>
+        <tr><td>lefthook <span class="dim">Go</span></td><td><span class="obl-none">❌</span></td><td>свой формат конфига → нет общей экосистемы Python-хуков и нет пути отхода</td></tr>
+        <tr><td>husky <span class="dim">Node</span></td><td><span class="obl-none">❌</span></td><td>тянет Node.js в Python-проект ради коммитов</td></tr>
+      </table>
+      <p><span class="n">Выбор НЕ блокирующий:</span> твой актив — <b>файл конфига</b>, а не инструмент. <code>pre-commit</code> и <code>prek</code> читают один и тот же <code>.pre-commit-config.yaml</code>. Переезд: <code>prek install -f</code>, откат: <code>pre-commit install -f</code>.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h4>10 git-событий фреймворка + куда что вешать (замерено на этом проекте)</h4>
+<pre>
+ДО коммита:  pre-commit★★★ · prepare-commit-msg · commit-msg★★ · pre-merge-commit · pre-rebase
+ПОСЛЕ:       post-commit · post-checkout · post-merge · post-rewrite
+ОТПРАВКА:    pre-push★★
+ОСОБОЕ:      manual — НЕ git-хук, сам не срабатывает: `pre-commit run --hook-stage manual &lt;id&gt;`
+             (сюда прячут тяжёлое, что нужно по требованию)
+</pre>
+      <table style="min-width:0">
+        <tr><th>проверка</th><th>замерено</th><th>событие</th></tr>
+        <tr><td><code>ruff check</code></td><td><b>0.07 с</b></td><td>pre-commit</td></tr>
+        <tr><td><code>import overlay_sync</code> — модуль вообще грузится</td><td><b>0.04 с</b></td><td>pre-commit</td></tr>
+        <tr><td>gitleaks — секреты в диффе</td><td>мс</td><td>pre-commit</td></tr>
+        <tr><td><b>37 unit-тестов overlay_sync</b></td><td><b>0.6 с</b></td><td><b>влезает в pre-commit!</b></td></tr>
+        <tr><td><b>28 тестов канарейки</b></td><td><b>0.6 с</b></td><td><b>влезает в pre-commit!</b></td></tr>
+        <tr><td>вся сюита проекта (2000+)</td><td><b>10+ с</b>, растёт</td><td>CI</td></tr>
+        <tr><td>integration / e2e (реальные git-операции)</td><td>десятки секунд</td><td>CI</td></tr>
+        <tr><td>мутационные, фаззинг</td><td>минуты-часы</td><td>ночь / manual</td></tr>
+      </table>
+    <p><b>Правило — не про тип проверки, а про ЦЕНУ:</b> бюджет задаётся частотой события. commit (десятки раз в день) → ~1 сек · push (несколько раз) → ~1 минута · CI на PR (раз на задачу) → ~10 минут · ночь → часы. <span class="n">Общее правило «pytest не в pre-commit» на ЭТИХ числах не нужно</span> — измеряй командой <code>time</code>, а не спорь. И место может меняться: сегодня 65 тестов бегут 0.6 с и живут на коммите, через год их 500 и они переезжают в CI.</p>
+  </div>
+
+  <div class="card">
+    <h4>ОДИН конфиг для локали и CI — защита от single-source-drift</h4>
+<pre>
+.pre-commit-config.yaml   ← обычный файл в репо. Едет с push, как код.
+     ├─ ЛОКАЛЬНО: git commit → сгенерированный хук → читает ЭТОТ файл
+     └─ В CI:     раннер клонировал репо → видит ТОТ ЖЕ файл
+                  workflow (~10 строк, пишется ОДИН раз):
+                      - run: pre-commit run --all-files   ← «выполни список»
+                      + actions/cache на ~/.cache/pre-commit  (бережёт квоту минут)
+
+Добавил проверку → правишь ТОЛЬКО конфиг. Workflow не трогаешь: он не содержит списка.
+</pre>
+    <p><b>Куда девают pytest:</b> ОТДЕЛЬНЫМ job'ом в CI, не через конфиг. Граница проходит по природе проверки: pre-commit = быстрые пофайловые (нужен список изменённых файлов), pytest = поведение кода (нужны все файлы + установленный проект). Дублирования при этом нет — список линтеров всё равно в одном файле.</p>
+    <div class="rule" style="background:rgba(255,107,129,.10);border-left:4px solid var(--req);padding:9px 13px;border-radius:0 7px 7px 0;font-size:12px;margin-top:9px">
+      <b style="color:var(--req)">❌ ГЛАВНЫЙ АНТИПАТТЕРН</b> — самый «очевидный» способ, который стабильно разъезжается:<br>
+      в workflow пишут <code>pip install ruff && ruff check .</code>, при том что ruff уже перечислен в конфиге с <code>rev: v0.16.0</code>. <code>pip</code> притащит САМЫЙ СВЕЖИЙ ruff (релизится почти еженедельно) → локально зелено, в CI красно, причина неочевидна. Это single-source-drift в чистом виде: <b>CI должен ВЫЗЫВАТЬ конфиг, а не повторять его список</b>.
+    </div>
+    <p style="margin-top:9px"><span class="n">Не подходит нам:</span> <code>pre-commit.ci</code> (облачный сервис) — бесплатен только для публичных репо, приватный личный аккаунт $10/мес. Официальный <code>pre-commit/action</code> жив, но в maintenance-only. Берём голую строку + <code>actions/cache</code>.</p>
+    <p><span class="n">⚠️ Ловушка установки:</span> <code>pre-commit install</code> ставит ТОЛЬКО хук <code>pre-commit</code>. Пропишешь <code>stages: [pre-push]</code> — не сработает, пока не выполнишь <code>pre-commit install --hook-type pre-push</code> (или не укажешь <code>default_install_hook_types</code> в конфиге). Тихо, без ошибки.</p>
+  </div>
+
+  <div class="cards">
+  <div class="card">
+    <h4>путь до конфига — кто как доходит до нашего рецепта</h4>
+<pre style="font-family:var(--mono);font-size:10.5px;line-height:1.6;color:var(--dim);margin:2px 0;white-space:pre-wrap">
+① ЛОКАЛЬНЫЙ GIT
+git commit
+  └─► git ищет ФАЙЛ с именем события: .git/hooks/pre-commit   ← НЕ в репо
+        git больше ничего не знает — ни про фреймворк, ни про рецепт
+        └─► переходник, 20 строк:
+              python -m pre_commit hook-impl --config=.pre-commit-config.yaml
+              └─► pre-commit читает .pre-commit-config.yaml   ← НАШ рецепт
+                    └─► инструменты из склада ~/.cache/pre-commit
+                          └─► гонит по ИЗМЕНЁННЫМ файлам → 0 / не-0
+
+② GITHUB ACTIONS
+push / открыт PR
+  └─► GitHub читает .github/workflows/ci.yml    ← ЕГО рецепт (on:/branches:/paths:)
+        ├─ чистый раннер
+        ├─ checkout           → код + тесты + ОБА рецепта
+        ├─ pip install .[dev] → появился pytest   ← ручной шов language:system
+        ├─ actions/cache      → склад по хешу рецепта
+        └─ шаг: pre-commit run --all-files
+              └─► pre-commit читает .pre-commit-config.yaml  ← ТОТ ЖЕ рецепт
+                    └─► job «lint» зелёный / красный = всего лишь НАДПИСЬ
+
+③ RULESET
+нажата кнопка Merge
+  └─► GitHub смотрит СВОЮ настройку (в репо её НЕТ — только REST /rulesets)
+        └─► сверяет required checks с ИМЕНАМИ job'ов и их статусом
+              ↑ имя JOB, а НЕ имя workflow — опечатка = проверка «не пришла»
+              └─► все зелёные → merge разрешён
+                  красный / отсутствует → КНОПКА ЗАБЛОКИРОВАНА
+</pre>
+    <p><span class="n">Склад не возят — его пересоздают.</span> Раннер идёт за инструментами <b>не к тебе, а к первоисточнику</b>, по тем же <code>rev:</code>. <code>actions/cache</code> — это склад <b>самого раннера</b>, отложенный в камеру хранения GitHub; ключ <code>pre-commit|&lt;хеш python&gt;|hashFiles('.pre-commit-config.yaml')</code>. Правишь <code>rev</code> → меняется хеш → ключ другой → склад строится заново. <b>Рецепт определяет склад механически, через хеш</b> — отстать он не может по конструкции.</p>
+  </div>
+
+  <div class="card">
+    <h4>что из этого следует — порядок ступеней не произволен</h4>
+<pre style="font-family:var(--mono);font-size:10.5px;line-height:1.7;color:var(--dim);margin:2px 0;white-space:pre-wrap">
+①②③ читают НАШ рецепт ──► выдают ВЕРДИКТ
+                              │
+        ruleset рецепта НЕ читает ──► читает ВЕРДИКТ ②
+                                      и превращает надпись в ЗАПРЕТ
+</pre>
+    <p><span class="n">1 · Ступень 3 без ступени 2 бессмысленна.</span> CI будет честно краснеть в пустоту: кнопка Merge остаётся живой, пока запрет не выдаст ruleset. Красный чек сам по себе — надпись.</p>
+    <p><span class="n">2 · Ruleset слеп к содержанию.</span> Он знает только <b>имя job и его цвет</b>. Переименовал job — проверка «исчезла», кнопка встала намертво. И наоборот: job из одной строки <code>echo ok</code> он пропустит с чистой совестью. Смысл проверки сторожит только ревью.</p>
+    <p><span class="n">3 · Настоящая стена одна.</span> Локальный хук снимается <code>--no-verify</code>, CI — «просто не пушить», и оба ставил ты сам. Стена там, где решение принимает <b>не твоя машина</b> — то есть ruleset, и то лишь при пустом bypass list.</p>
+    <p><span class="n">4 · Хуками нельзя выстроить всё.</span> Хук — реакция на событие, поэтому он физически не срабатывает, когда события не было. «Тестов не написали вовсе» ловит покрытие как required check (по факту прогона), «прогон вообще не случился» — только <b>dead man's switch</b>: внешний наблюдатель, звонящий на ТИШИНУ.</p>
+    <p style="color:var(--faint);font-size:10.5px">Полная решётка «событие · матчер · <code>if</code> · сито в скрипте · узел исходов» на все четыре системы (включая Claude-харнесс) — в <b>claude-code-hooks-map</b>, раздел «Четыре системы рядом». Здесь намеренно только конвейерные три, чтобы один факт не жил в двух шпаргалках.</p>
+  </div>
+  </div>
+
+  <div class="gloss-h">RULESETS — все рычаги, доступность, когда применять</div>
+
+  <div class="principle" style="border-color:var(--req);background:linear-gradient(rgba(255,107,129,.10),rgba(255,107,129,.10)),#151b23">
+    <b style="color:var(--prod)">✅ БЛОКЕР №1 СНЯТ — 2026-07-29, проверено фактом.</b> Правило плана то же: «Rulesets are available in <b>public repositories with GitHub Free</b>…, and in public and private repositories with GitHub Pro, GitHub Team, and GitHub Enterprise Cloud» — но исходная посылка «наш репо приватный» оказалась <b>неверной</b>. Анонимный запрос <code>api.github.com/repos/dandgam/overlay_script</code> (то есть глазами прохожего, без логина) вернул <code>private: false</code>, <code>visibility: public</code>. Публичный + Free ⇒ <b>rulesets доступны бесплатно, ступени 2-3 разблокированы, платить не нужно.</b><br>
+    <b>Решение owner'а: оставляем публичным.</b> История проверена на секреты — реальных нет (совпадения только в тестовых фикстурах: <code>AKIAIOSFODNN7EXAMPLE</code> — официальная заглушка из доков AWS). Полный скан истории приедет с gitleaks на ступени 1.<br>
+    <span class="n">Урок факт-чека:</span> цитата из доков была верной, а вывод — ложным, потому что <b>непроверенной осталась посылка</b>, а не правило. Проверяй не только источник, но и то, к чему ты его прикладываешь.
+  </div>
+
+  <div class="card">
+    <h4>анатомия одного ruleset — пять частей</h4>
+<pre>
+① Name               имя правила
+② Enforcement        Active (работает) · Disabled (выключен) · <b>Evaluate</b> (только наблюдение)
+                     ⚠️ Evaluate = ТОЛЬКО Enterprise. На Free/Pro/Team выбор Active|Disabled —
+                        «пробного режима» у нас не будет, обкатывать придётся сразу боем
+③ Bypass list        кто обходит. ПУСТ ПО УМОЛЧАНИЮ ← главное отличие от classic
+                     режимы актора: «Always allow» · «For pull requests only»
+④ Target             ветки/теги по fnmatch: `main` · `release/*` · ~DEFAULT_BRANCH · ~ALL
+                     exclude сильнее include; `*` не пересекает слэш (нужен `**`)
+⑤ Rules              сами рычаги — таблицы ниже
+</pre>
+    <p><b>Складываются, а не заменяют:</b> несколько rulesets на одну ветку — правила агрегируются, при конфликте применяется <b>самая строгая</b> версия. С classic protection тоже складываются. Ослабить строгий ruleset мягким невозможно.<br>
+    <b>Лимит:</b> 75 rulesets на репозиторий. <b>История/откат ruleset</b> — Enterprise-only; на Free/Pro/Team храни JSON (REST API) и импортируй обратно.</p>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>правило (точное имя в UI)</th><th>что блокирует</th><th>CI?</th><th>соло+агент</th><th>ловушка</th></tr></thead>
+    <tbody>
+      <tr class="zone zone-gh"><th colspan="5">BRANCH RULESET — ядро</th></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Require a pull request before merging</div><div class="ev-desc">под-опции: Required approvals · Dismiss stale · Code Owners · most recent push · <b>Require conversation resolution</b> · <b>Allowed merge methods</b></div></td><td class="c-why">прямой push в main; «The pull request doesn't necessarily have to be approved, but it must be opened»</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-req">🔴 MUST</span></td><td class="c-why">Главное правило профиля: агент под твоим токеном = admin. <span class="stop">Approvals ставить 0</span> — свой PR одобрить нельзя</td></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Require status checks to pass</div><div class="ev-desc">под-опции: Require branches to be up to date · список чеков · источник · Do not require on creation</div></td><td class="c-why">merge, пока обязательный чек не зелёный (или не отчитался)</td><td class="c-obl"><span class="obl-req">ДА</span></td><td class="c-obl"><span class="obl-req">🔴 MUST</span></td><td class="c-why"><span class="stop">имя JOB, не workflow!</span> Правило само workflow НЕ запускает. Не запустился → «Expected» навсегда</td></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Block force pushes</div><div class="ev-desc">включено по умолчанию</div></td><td class="c-why"><code>git push --force</code> и любое переписывание истории</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-req">🔴 MUST</span></td><td class="c-why">Ловушки нет. Force push стирает работу бесследно — второе по важности после PR</td></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Restrict deletions</div><div class="ev-desc">включено по умолчанию</div></td><td class="c-why">удаление ветки/тега</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-req">🔴 MUST</span></td><td class="c-why">Нулевая цена. Защита от «агент снёс main»</td></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Require branches to be up to date</div><div class="ev-desc">под-опция статус-чеков (strict mode)</div></td><td class="c-why">merge ветки, проверявшейся на старом main</td><td class="c-obl"><span class="obl-req">ДА</span></td><td class="c-obl"><span class="obl-opt">🟡 РЕК.</span></td><td class="c-why">Закрывает «по отдельности зелёные, вместе ломаются». Цена — лишние прогоны при потоке PR (у соло его нет)</td></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Require linear history</div></td><td class="c-why">merge-коммиты (скрепки) в целевой ветке</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">🟡 РЕК.</span></td><td class="c-why">Требует включённого squash/rebase merge в Settings → General, иначе правило не включить</td></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Allowed merge methods</div><div class="ev-desc">Merge / Squash / Rebase</div></td><td class="c-why">запрещённый способ слияния</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">🟡 РЕК.</span></td><td class="c-why">Оставить Squash: задача агента = один коммит в main, откат = один revert. Конфликт с Settings → merge заблокирован</td></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Require conversation resolution</div></td><td class="c-why">merge, пока есть незакрытые комментарии PR</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">🟡 РЕК.</span></td><td class="c-why">Единственная ревью-опция, работающая соло: закрыть СВОЙ комментарий можно (одобрить свой PR — нет)</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Require signed commits</div></td><td class="c-why">неподписанные коммиты</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">опц.</span></td><td class="c-why">Автор один — доказывать некому. Риск: у агента подпись не настроена → отбивается КАЖДЫЙ его коммит</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Restrict updates</div></td><td class="c-why">любой push в ветку без bypass</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">опц.</span></td><td class="c-why">То же даёт PR-правило, но мягче. <span class="stop">UNCERTAIN:</span> доки не уточняют, пропускает ли оно merge PR — не ставить на main без проверки</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Restrict creations</div></td><td class="c-why">создание веток/тегов по маске</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">опц.</span></td><td class="c-why">На маске <code>*</code> агент не создаст рабочую ветку → весь PR-процесс встанет</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Require code scanning results</div></td><td class="c-why">merge при находках сканера выше порога</td><td class="c-obl"><span class="obl-req">ДА</span></td><td class="c-obl"><span class="obl-opt">опц.</span></td><td class="c-why">Идея под наш профиль хороша (замена ревьюера-безопасника), но для приватного платно. Блокирует и когда сканер «not configured» — сломанный сканер = все PR стоят</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Require deployments to succeed</div></td><td class="c-why">merge, пока нет успешного деплоя в GitHub Environment</td><td class="c-obl"><span class="obl-req">ДА</span></td><td class="c-obl"><span class="obl-none">⚪ SKIP</span></td><td class="c-why">Наш pull-деплой GitHub'у не виден (нет Deployment-объекта) → правило заблокирует merge навсегда</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Require merge queue</div></td><td class="c-why">merge мимо очереди</td><td class="c-obl"><span class="obl-req">ДА</span></td><td class="c-obl"><span class="obl-none">⚪ SKIP</span></td><td class="c-why">Только репо организации; решает «толпа вливает одновременно» — проблемы соло нет</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Required approvals ≥ 1 · Code Owners · approval of most recent push · Required reviewers</div></td><td class="c-why">merge без одобрения человека</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-none">⚪ SKIP</span></td><td class="c-why"><span class="stop">ВЕЧНАЯ САМОБЛОКИРОВКА:</span> «Pull request authors cannot approve their own pull requests». Готовые рецепты идут с 2 аппрувами — перед импортом менять на 0</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Require code quality results · Restrict code coverage</div></td><td class="c-why">merge при замечаниях / низком покрытии</td><td class="c-obl"><span class="obl-req">ДА</span></td><td class="c-obl"><span class="obl-none">⚪ SKIP</span></td><td class="c-why">Отдельный платный продукт GitHub Code Quality; coverage — public preview. Блокирует и при исчерпанных минутах Actions</td></tr>
+
+      <tr class="zone zone-gh"><th colspan="5">PUSH RULESET — файловые правила <span class="tag">⚠️ приватный репо: нужен план TEAM (организация). Личному аккаунту недоступно даже на Pro</span></th></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Restrict file paths</div></td><td class="c-why">push, меняющий файлы по маске</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">🟡 хотелось бы</span></td><td class="c-why">ЕДИНСТВЕННОЕ правило, закрывающее «агент правит <code>.github/workflows/**</code>». Нам недоступно → замена: ревью диффов + локальные хуки</td></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Restrict file extensions · file size · file path length</div></td><td class="c-why">push файлов по расширению / размеру / длине пути</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">опц.</span></td><td class="c-why">Расширение ≠ содержимое: секрет в <code>config.txt</code> не поймает. Дублируется gitleaks + .gitignore</td></tr>
+
+      <tr class="zone zone-gh"><th colspan="5">TAG RULESET — защита точек отката</th></tr>
+      <tr class="row"><td class="c-ev"><div class="ev-name">Restrict updates (tag) · Restrict deletions (tag)</div></td><td class="c-why">перенос тега на другой коммит / удаление тега</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-opt">🟡 РЕК.</span></td><td class="c-why">Делает теги неизменяемыми: «точка отката» остаётся тем же кодом и через месяц. Правка = новый тег</td></tr>
+
+      <tr class="zone zone-gh"><th colspan="5">ENTERPRISE-ONLY <span class="tag">метаданные — нам недоступно, но знать полезно</span></th></tr>
+      <tr class="row mute"><td class="c-ev"><div class="ev-name">Commit message pattern · author/committer email pattern · branch/tag name pattern</div></td><td class="c-why">ref-update, если метаданные не по шаблону</td><td class="c-obl"><span class="obl-none">нет</span></td><td class="c-obl"><span class="obl-none">⚪ нет доступа</span></td><td class="c-why">Идеальный намордник для агента (формат <code>feat(scope):</code>) — но Enterprise-организации. <b>Замена бесплатно: локальный commit-msg hook.</b> Ловушка правил email: нужен <code>noreply@github.com</code>, иначе merge через веб отбивается</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h4>минимальный набор для соло+агент (после снятия блокера)</h4>
+      <p>Один branch ruleset, <span class="n">Active</span>, target = <code>~DEFAULT_BRANCH</code>, bypass пуст:</p>
+<pre>
+☑ Require a pull request before merging   approvals = <b>0</b>
+    ☑ Require conversation resolution
+    ☑ Allowed merge methods = только Squash
+☑ Require status checks to pass           + Require branches to be up to date
+    └ вписать имя JOB (напр. «test»), не имя workflow
+☑ Block force pushes        ☑ Restrict deletions        ☑ Require linear history
+</pre>
+      <p>Сходится с независимыми рекомендациями: <span class="n">OpenSSF Scorecard</span> Tier 1 = запрет force-push + запрет удаления ветки, Tier 3 добавляет обязательные status checks.</p>
+    </div>
+    <div class="card">
+      <h4>ловушки, которые стоят дороже всего</h4>
+      <div class="obls">
+        <div class="oblrow req"><span class="b">САМОБЛОК</span><span class="x">approvals ≥ 1 у соло — <b>ни один PR никогда не вольётся</b>. Импортируешь чужой рецепт — сразу правь на 0</span></div>
+        <div class="oblrow req"><span class="b">PENDING</span><span class="x">имя WORKFLOW вместо имени JOB в required checks → чек вечно «Expected», merge заблокирован</span></div>
+        <div class="oblrow req"><span class="b">АГЕНТ=ADMIN</span><span class="x">агент работает твоим токеном. В <b>classic</b> админ обходит правила ПО УМОЛЧАНИЮ — потому и берём rulesets, где дефолт обратный. Но админ может <b>отредактировать сам ruleset</b> — это остаточный риск, закрывается только ревью</span></div>
+        <div class="oblrow opt"><span class="b">НЕТ DRY-RUN</span><span class="x">Evaluate — Enterprise-only. Обкатывать правило придётся сразу в Active: сначала на тестовой ветке, потом на main</span></div>
+        <div class="oblrow opt"><span class="b">НЕТ ОТКАТА</span><span class="x">история ruleset — Enterprise. Сохрани конфиг в JSON через REST API перед правкой</span></div>
+        <div class="oblrow none"><span class="b">ПУСТОЙ TARGET</span><span class="x">Active-ruleset с паттерном, не попавшим ни в одну ветку, не защищает ничего — и никто не предупредит</span></div>
+        <div class="oblrow none"><span class="b">ПРОД МИМО</span><span class="x">rulesets стерегут только GitHub. Локальный worktree тянет main сам — его защищает не ruleset, а required status check, не пустивший брак в main</span></div>
+      </div>
+    </div>
   </div>
 
   <div class="gloss-h">верификаторы — что это за тесты (твой список)</div>
