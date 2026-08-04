@@ -225,6 +225,26 @@ git restore [--source=ОТКУДА] [--staged] [--worktree] файл
 </table>
 <div class="rule">Ветка на GitHub рождается в момент первого <code>push -u</code> — заранее заводить не надо. Имя локальной и серверной может различаться (<code>git push script лок:серв</code>), но одинаковые имена = конвенция, спасающая рассудок.</div>
 
+<h2>2г · Предпросмотр PR — что именно уедет в main / прод</h2>
+<pre>
+Две точки читаются как «РАЗНИЦА»: что есть СПРАВА, но нет СЛЕВА.
+
+  main..dev   →  что есть в dev, но ещё НЕ доехало до main (= до прода)
+  dev..main   →  наоборот: что есть в main, но нет у меня
+</pre>
+<table>
+<tr><th>команда</th><th>что даёт</th></tr>
+<tr><td><code>git log --oneline main..dev</code></td><td>какие <b>коммиты</b> уедут — список хэшей и сообщений</td></tr>
+<tr><td><code>git diff main..dev --stat</code></td><td>какие <b>файлы</b> изменятся + сводка «сколько строк ±»</td></tr>
+<tr><td><code>git diff main..dev</code></td><td>полный дифф: что именно уедет, построчно</td></tr>
+<tr><td><code>git fetch script</code> → <code>git diff script/main..dev --stat</code></td><td>то же, но против <b>реального состояния GitHub</b>, а не локальной копии main</td></tr>
+</table>
+<div class="rule">👁️ <b>Это ровно предпросмотр будущего PR.</b> Тот же список файлов GitHub покажет на вкладке <b>Files changed</b>. Смотреть <b>до</b> открытия PR — дешевле, чем обнаружить лишний файл после ревью.<br>
+<span class="dim">Второй вариант (через <code>script/main</code>) точнее: локальная <code>main</code> могла отстать, если давно не делал fetch.</span></div>
+<div class="rule">🔀 <b>Не путать два вопроса</b> — это разные оси сравнения:<br>
+<code>git diff HEAD</code> · <code>git diff --cached</code> — «что у меня <b>не закоммичено</b>» <span class="dim">(диск ↔ индекс ↔ HEAD, см. 1б)</span><br>
+<code>git diff main..dev</code> — «что <b>закоммичено, но не доехало</b> до main» <span class="dim">(ветка ↔ ветка)</span></div>
+
 <h2>3 · Изменить и закоммитить</h2>
 <pre>
 РАБОЧАЯ ПАПКА ──git add──► STAGING ──git commit──► ИСТОРИЯ ──git push──► GITHUB
