@@ -1,0 +1,60 @@
+# Ступень 1 ворот: локальные проверки перед созданием коммита.
+# Этот файл читают ДВОЕ: локальный крючок .git/hooks/pre-commit и (позже) CI.
+# Список проверок живёт ТОЛЬКО здесь — в workflow его дублировать нельзя.
+#
+# СКОУП НАМЕРЕННО УЗКИЙ: ruff/mypy/тесты видят только 3 файла overlay_sync.
+# Причина (замер 2026-08-04): в остальном репозитории 110 ошибок ruff и
+# 230 неотформатированных файлов — чужой долг проекта Virgil. Без сита
+# каждый PR был бы красным по чужой вине.
+# Долг: новый файл сам в ворота НЕ попадёт, пока не впишешь его в files: ниже.
+
+default_install_hook_types: [pre-commit]
+
+repos:
+  # ── 1 · Линтер + форматтер + безопасность кода ──────────────────────────
+  # ruff-check включает S-правила (bandit) — они уже в pyproject.toml
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.1
+    hooks:
+      - id: ruff-check
+        files: ^(tools/overlay_sync|tests/test_overlay_sync|tests/test_overlay_text_canary)\.py$
+      - id: ruff-format
+        files: ^(tools/overlay_sync|tests/test_overlay_sync|tests/test_overlay_text_canary)\.py$
+
+  # ── 2 · Секреты — БЕЗ сита, смотрит весь дифф ───────────────────────────
+  # Ключ есть ключ, хоть в python, хоть в markdown. Репозиторий публичный.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # ── 3 · Синтаксис не-кода + гигиена репозитория — БЕЗ сита ──────────────
+  # Замер: 22 yaml, 5 json, 29 toml в репозитории — все валидны, долга нет.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml              # страхует ЭТОТ ЖЕ файл от сломанного отступа
+      - id: check-toml              # pyproject.toml — там правила ruff и mypy
+      - id: check-json
+      - id: check-added-large-files # случайный дамп на сотни МБ
+      - id: check-merge-conflict    # маркеры <<<<<<< HEAD, уехавшие в файл
+
+  # ── 4 · Типы и тесты — из .venv проекта ─────────────────────────────────
+  # language: system = окружение НЕ строится, инструмент берётся с диска.
+  # Путь .venv/bin/... работает локально; в CI (ступень 3) их пропустим
+  # через SKIP= или заменим отдельным job'ом — шов известен, записан.
+  - repo: local
+    hooks:
+      - id: mypy-overlay
+        name: mypy (overlay_sync)
+        entry: .venv/bin/mypy
+        language: system
+        types: [python]
+        files: ^(tools/overlay_sync|tests/test_overlay_sync|tests/test_overlay_text_canary)\.py$
+
+      - id: pytest-overlay
+        name: pytest (37 тестов скрипта + 28 канарейки)
+        entry: .venv/bin/pytest -q tests/test_overlay_sync.py tests/test_overlay_text_canary.py
+        language: system
+        pass_filenames: false       # pytest сам знает, какие файлы гонять
+        files: ^(tools/overlay_sync|tests/test_overlay_sync|tests/test_overlay_text_canary)\.py$

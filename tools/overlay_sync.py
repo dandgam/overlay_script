@@ -107,10 +107,10 @@ class MenuEntry:
     """One row of the human-facing catalog printed by `menu`."""
 
     cmd: str
-    title: str          # short RU name
-    writes: bool        # True => mutates a project / vault (needs --apply + confirm)
-    desc: str           # one-line RU "what it does"
-    exits: str          # RU meaning of the exit codes
+    title: str  # short RU name
+    writes: bool  # True => mutates a project / vault (needs --apply + confirm)
+    desc: str  # one-line RU "what it does"
+    exits: str  # RU meaning of the exit codes
     requires: tuple[str, ...] = ()  # required subcommand flags (e.g. ("--target",))
 
 
@@ -119,38 +119,52 @@ class MenuEntry:
 # row fails the suite).
 MENU_ENTRIES: tuple[MenuEntry, ...] = (
     MenuEntry(
-        "check", "Проверить состояние", writes=False,
+        "check",
+        "Проверить состояние",
+        writes=False,
         desc="показать расхождения оверлеев между проектами (read-only)",
         exits="0 ок · 1 предупреждения · 2 ошибки",
     ),
     MenuEntry(
-        "census", "Перепись форков", writes=False,
+        "census",
+        "Перепись форков",
+        writes=False,
         desc="3-сторонний diff: сколько форков step-02a..d (read-only)",
         exits="0",
     ),
     MenuEntry(
-        "propagate", "Разлить канон odyssey → проекты", writes=True,
+        "propagate",
+        "Разлить канон odyssey → проекты",
+        writes=True,
         desc="скопировать недостающие/устаревшие watched-файлы во все проекты",
         exits="0/1/2 · 3 откат после revalidate",
     ),
     MenuEntry(
-        "revalidate", "Перепроверить сходимость", writes=False,
+        "revalidate",
+        "Перепроверить сходимость",
+        writes=False,
         desc="пересобрать манифест с диска после разлива (read-only)",
         exits="0 ок · 3 ошибки",
     ),
     MenuEntry(
-        "capture", "Захватить odyssey → vault", writes=True,
+        "capture",
+        "Захватить odyssey → vault",
+        writes=True,
         desc="снять оверлеи/форки/свой скилл в хранилище и закоммитить",
         exits="0/1/2 · 6 канарейка упала (vault не закоммичен)",
     ),
     MenuEntry(
-        "init-project", "Развернуть vault → новый проект", writes=True,
+        "init-project",
+        "Развернуть vault → новый проект",
+        writes=True,
         desc="поставить оверлеи в свежий проект, never-clobber",
         exits="0/2 · 6 конфликт (проект не тронут)",
         requires=("--target",),
     ),
     MenuEntry(
-        "post-upgrade", "Переналожить форки после апгрейда BMAD", writes=True,
+        "post-upgrade",
+        "Переналожить форки после апгрейда BMAD",
+        writes=True,
         desc="git apply форк-патчей на свежевендоренный upstream",
         exits="0/2 · 6 патч отклонён (дерево не тронуто)",
         requires=("--target",),
@@ -324,11 +338,7 @@ def discover_overlays(project_root: Path) -> dict[str, Path]:
     cdir = project_root / OVERLAY_DIR
     if not cdir.is_dir():
         return {}
-    return {
-        p.name: p
-        for p in sorted(cdir.glob("*.toml"))
-        if p.name not in OVERLAY_EXCLUDE
-    }
+    return {p.name: p for p in sorted(cdir.glob("*.toml")) if p.name not in OVERLAY_EXCLUDE}
 
 
 @dataclass
@@ -338,9 +348,7 @@ class CensusEntry:
     head_relation: str  # uncommitted-fork | committed-fork | vendor-bump | clean | no-upstream
 
 
-def fork_census(
-    canonical_root: Path, upstream_skill_steps: Path
-) -> list[CensusEntry]:
+def fork_census(canonical_root: Path, upstream_skill_steps: Path) -> list[CensusEntry]:
     """Этап 1.5: classify each brainstorming step file by 3-way diff.
 
     A file is a FORK iff its working-tree content differs from the pinned
@@ -504,9 +512,7 @@ def build_manifest(
 # ----------------------------------------------------------------------------
 
 
-def run_invariants(
-    manifest: Manifest, root: Path, exemptions: list[Exemption]
-) -> list[Finding]:
+def run_invariants(manifest: Manifest, root: Path, exemptions: list[Exemption]) -> list[Finding]:
     findings: list[Finding] = []
     canonical = manifest.canonical
 
@@ -522,8 +528,13 @@ def run_invariants(
                 ex = is_exempt(exemptions, name, proj)
                 if ex:
                     findings.append(
-                        Finding("INV-OVERLAY-PRESENT", "warn", name, proj,
-                                f"absent by-design (exempt: {ex.reason or 'no reason'})")
+                        Finding(
+                            "INV-OVERLAY-PRESENT",
+                            "warn",
+                            name,
+                            proj,
+                            f"absent by-design (exempt: {ex.reason or 'no reason'})",
+                        )
                     )
                 else:
                     findings.append(
@@ -598,10 +609,10 @@ def run_invariants(
 class CsvFacts:
     """Ground truth parsed from brain-methods.csv (csv.reader: quote/comma-safe)."""
 
-    columns: tuple[str, ...]          # header columns, e.g. (category, technique_name, description)
-    techniques: int                   # data-row rollup (61 in 6.8.0)
-    categories: int                   # distinct values in the `category` column (10 in 6.8.0)
-    technique_names: frozenset[str]   # exact `technique_name` surface forms
+    columns: tuple[str, ...]  # header columns, e.g. (category, technique_name, description)
+    techniques: int  # data-row rollup (61 in 6.8.0)
+    categories: int  # distinct values in the `category` column (10 in 6.8.0)
+    technique_names: frozenset[str]  # exact `technique_name` surface forms
 
 
 def csv_parse(path: Path) -> CsvFacts:
@@ -616,12 +627,8 @@ def csv_parse(path: Path) -> CsvFacts:
     data = rows[1:]
     cat_idx = header.index("category") if "category" in header else 0
     name_idx = header.index("technique_name") if "technique_name" in header else 1
-    categories = {
-        r[cat_idx].strip() for r in data if len(r) > cat_idx and r[cat_idx].strip()
-    }
-    names = {
-        r[name_idx].strip() for r in data if len(r) > name_idx and r[name_idx].strip()
-    }
+    categories = {r[cat_idx].strip() for r in data if len(r) > cat_idx and r[cat_idx].strip()}
+    names = {r[name_idx].strip() for r in data if len(r) > name_idx and r[name_idx].strip()}
     return CsvFacts(header, len(data), len(categories), frozenset(names))
 
 
@@ -629,10 +636,10 @@ def csv_parse(path: Path) -> CsvFacts:
 class StepFacts:
     """What a step-02*.md claims about the CSV (parsed deterministically)."""
 
-    name: str                              # basename, for findings
-    parse_columns: tuple[str, ...]         # columns the step says it parses
+    name: str  # basename, for findings
+    parse_columns: tuple[str, ...]  # columns the step says it parses
     declared_counts: tuple[tuple[int, int], ...]  # (techniques, categories) declarations
-    called_techniques: tuple[str, ...]     # names listed on `Includes:` lines
+    called_techniques: tuple[str, ...]  # names listed on `Includes:` lines
 
 
 # A column token is a single identifier-shaped word (camelCase / snake / hyphen /
@@ -745,8 +752,15 @@ def inv_brain_cols(step: StepFacts, facts: CsvFacts, project: str) -> list[Findi
     phantom = [c for c in step.parse_columns if c not in facts.columns]
     if not phantom:
         return []
-    return [Finding("INV-BRAIN-COLS", "error", step.name, project,
-                    f"step parses columns absent from brain-methods.csv: {', '.join(phantom)}")]
+    return [
+        Finding(
+            "INV-BRAIN-COLS",
+            "error",
+            step.name,
+            project,
+            f"step parses columns absent from brain-methods.csv: {', '.join(phantom)}",
+        )
+    ]
 
 
 def inv_count_recon(step: StepFacts, facts: CsvFacts, project: str) -> list[Finding]:
@@ -754,9 +768,16 @@ def inv_count_recon(step: StepFacts, facts: CsvFacts, project: str) -> list[Find
     out: list[Finding] = []
     for techs, cats in dict.fromkeys(step.declared_counts):  # dedup, order-stable
         if techs != facts.techniques or cats != facts.categories:
-            out.append(Finding("INV-COUNT-RECON", "error", step.name, project,
-                f"step declares {techs} techniques/{cats} categories; "
-                f"brain-methods.csv has {facts.techniques}/{facts.categories}"))
+            out.append(
+                Finding(
+                    "INV-COUNT-RECON",
+                    "error",
+                    step.name,
+                    project,
+                    f"step declares {techs} techniques/{cats} categories; "
+                    f"brain-methods.csv has {facts.techniques}/{facts.categories}",
+                )
+            )
     return out
 
 
@@ -767,8 +788,15 @@ def inv_phantom_call(step: StepFacts, facts: CsvFacts, project: str) -> list[Fin
     phantom = [n for n in dict.fromkeys(step.called_techniques) if not _call_is_known(n, facts)]
     if not phantom:
         return []
-    return [Finding("INV-PHANTOM-CALL", "error", step.name, project,
-                    f"step references techniques absent from brain-methods.csv: {', '.join(phantom)}")]
+    return [
+        Finding(
+            "INV-PHANTOM-CALL",
+            "error",
+            step.name,
+            project,
+            f"step references techniques absent from brain-methods.csv: {', '.join(phantom)}",
+        )
+    ]
 
 
 # The pinned CSV schema the canary reconciles against. A re-vendor that renames /
@@ -786,8 +814,15 @@ def run_text_invariants(csv_path: Path, step_paths: list[Path], project: str) ->
     if facts.columns != BRAIN_CSV_EXPECTED_COLS:
         # Ground truth drifted: emit ONE loud finding and skip per-step reconciliation
         # (running it on a misread CSV would spray false phantoms / false counts).
-        return [Finding("INV-CSV-SCHEMA", "error", csv_path.name, project,
-                        f"CSV header {list(facts.columns)} != pinned {list(BRAIN_CSV_EXPECTED_COLS)}")]
+        return [
+            Finding(
+                "INV-CSV-SCHEMA",
+                "error",
+                csv_path.name,
+                project,
+                f"CSV header {list(facts.columns)} != pinned {list(BRAIN_CSV_EXPECTED_COLS)}",
+            )
+        ]
     findings: list[Finding] = []
     for sp in step_paths:
         if not sp.exists():
@@ -834,7 +869,10 @@ def golden_gate(version: str, golden_root: Path | None = None) -> tuple[bool, st
     if healthy_findings:
         det = ", ".join(f"{f.inv}@{f.artifact}" for f in healthy_findings)
         return False, f"canary FIRES on healthy golden (false-red): {det}"
-    return True, f"ok ({len(sick_findings)} sick findings across {len(expected)} invariants, 0 healthy)"
+    return (
+        True,
+        f"ok ({len(sick_findings)} sick findings across {len(expected)} invariants, 0 healthy)",
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -867,9 +905,7 @@ def build_plan(manifest: Manifest, root: Path, exemptions: list[Exemption]) -> l
     return plan
 
 
-def apply_plan(
-    plan: list[PlanItem], root: Path, backup_dir: Path
-) -> list[RollbackEntry]:
+def apply_plan(plan: list[PlanItem], root: Path, backup_dir: Path) -> list[RollbackEntry]:
     """Apply with per-file backup, atomic write, md5 verify. Returns rollback log."""
     rollback: list[RollbackEntry] = []
     by_project: dict[str, list[PlanItem]] = {}
@@ -881,9 +917,7 @@ def apply_plan(
         rels = [str(it.dst.relative_to(proj_root)) for it in items]
         guard = git_guard(proj_root, rels)
         if not guard.ok:
-            raise RuntimeError(
-                f"git-guard refused {proj}: {guard.reason} {guard.dirty_paths}"
-            )
+            raise RuntimeError(f"git-guard refused {proj}: {guard.reason} {guard.dirty_paths}")
         with project_lock(proj_root):
             for it in items:
                 rel = str(it.dst.relative_to(proj_root))
@@ -951,9 +985,7 @@ def make_patch(base: bytes, fork: bytes, name: str) -> str:
     base_lines = base.decode("utf-8").splitlines(keepends=True)
     fork_lines = fork.decode("utf-8").splitlines(keepends=True)
     return "".join(
-        difflib.unified_diff(
-            base_lines, fork_lines, fromfile=f"a/{name}", tofile=f"b/{name}"
-        )
+        difflib.unified_diff(base_lines, fork_lines, fromfile=f"a/{name}", tofile=f"b/{name}")
     )
 
 
@@ -1026,18 +1058,14 @@ def plan_capture(
     for name, p in overlays.items():
         rel = str(p.relative_to(canon_root))
         if rel in dirty and not allow_dirty:
-            items.append(
-                CaptureItem(CAT_OVERLAY, name, rel, "skip-dirty", "uncommitted in canon")
-            )
+            items.append(CaptureItem(CAT_OVERLAY, name, rel, "skip-dirty", "uncommitted in canon"))
         else:
             items.append(CaptureItem(CAT_OVERLAY, name, rel, "capture"))
 
     for e in forks:
         name = Path(e.rel).name
         if e.rel in dirty and not allow_dirty:
-            items.append(
-                CaptureItem(CAT_FORK, name, e.rel, "skip-dirty", "uncommitted in canon")
-            )
+            items.append(CaptureItem(CAT_FORK, name, e.rel, "skip-dirty", "uncommitted in canon"))
         else:
             items.append(CaptureItem(CAT_FORK, name, e.rel, "capture"))
 
@@ -1049,13 +1077,23 @@ def plan_capture(
         items.append(CaptureItem(CAT_SKILL, "bmad-auto-dev", "", "defer", "skill absent in canon"))
     elif any(r in dirty for r in skill_rels) and not allow_dirty:
         items.append(
-            CaptureItem(CAT_SKILL, "bmad-auto-dev", str(OWN_SKILL_DIR), "skip-dirty",
-                        "uncommitted skill files in canon")
+            CaptureItem(
+                CAT_SKILL,
+                "bmad-auto-dev",
+                str(OWN_SKILL_DIR),
+                "skip-dirty",
+                "uncommitted skill files in canon",
+            )
         )
     else:
         items.append(
-            CaptureItem(CAT_SKILL, "bmad-auto-dev", str(OWN_SKILL_DIR), "capture",
-                        f"{len(skill_rels)} canon file(s)")
+            CaptureItem(
+                CAT_SKILL,
+                "bmad-auto-dev",
+                str(OWN_SKILL_DIR),
+                "capture",
+                f"{len(skill_rels)} canon file(s)",
+            )
         )
     return items
 
@@ -1104,9 +1142,7 @@ def apply_capture(
             (forks_dir / f"{it.artifact}.upstream").write_bytes(base_bytes)
 
             note = ""
-            density = (
-                patch_density(base_bytes, fork_bytes, it.artifact) if base_bytes else 1.0
-            )
+            density = patch_density(base_bytes, fork_bytes, it.artifact) if base_bytes else 1.0
             if not base_bytes:
                 note = "no-upstream-base"
             storage = "snapshot" if density >= DENSITY_SNAPSHOT_THRESHOLD else "patch"
@@ -1114,9 +1150,7 @@ def apply_capture(
             if storage == "patch":
                 patch_text = make_patch(base_bytes, fork_bytes, it.artifact)
                 if verify_patch(base_bytes, patch_text, fork_bytes, it.artifact):
-                    (forks_dir / f"{it.artifact}.patch").write_text(
-                        patch_text, encoding="utf-8"
-                    )
+                    (forks_dir / f"{it.artifact}.patch").write_text(patch_text, encoding="utf-8")
                     (forks_dir / f"{it.artifact}.snapshot").unlink(missing_ok=True)
                 else:  # patch did not round-trip -> safe fallback to snapshot
                     storage = "snapshot"
@@ -1132,8 +1166,13 @@ def apply_capture(
 
             captured_forks.append(
                 CapturedFork(
-                    it.artifact, it.rel, base_md5_val, fork_md5_val, storage,
-                    round(density, 3), note,
+                    it.artifact,
+                    it.rel,
+                    base_md5_val,
+                    fork_md5_val,
+                    storage,
+                    round(density, 3),
+                    note,
                 )
             )
         elif it.category == CAT_SKILL:
@@ -1346,7 +1385,9 @@ def plan_install(
                 continue
             src = vault / "overlays" / name
             if not src.exists():
-                items.append(InstallItem(CAT_OVERLAY, name, rel, "conflict", "vault missing overlay file"))
+                items.append(
+                    InstallItem(CAT_OVERLAY, name, rel, "conflict", "vault missing overlay file")
+                )
                 continue
             content = src.read_bytes()
             if not dst.exists():
@@ -1355,7 +1396,13 @@ def plan_install(
                 items.append(InstallItem(CAT_OVERLAY, name, rel, "skip-present", "identical"))
             else:
                 items.append(
-                    InstallItem(CAT_OVERLAY, name, rel, "conflict", "present and differs — refusing to clobber")
+                    InstallItem(
+                        CAT_OVERLAY,
+                        name,
+                        rel,
+                        "conflict",
+                        "present and differs — refusing to clobber",
+                    )
                 )
 
         # Own skill bmad-auto-dev: install the vault canon tree (bootstrap a project).
@@ -1369,13 +1416,20 @@ def plan_install(
                 dst = target_root / rel
                 content = src.read_bytes()
                 if not dst.exists():
-                    items.append(InstallItem(CAT_SKILL, str(sub), rel, "install", "create", content))
+                    items.append(
+                        InstallItem(CAT_SKILL, str(sub), rel, "install", "create", content)
+                    )
                 elif md5_bytes(content) == md5(dst):
                     items.append(InstallItem(CAT_SKILL, str(sub), rel, "skip-present", "identical"))
                 else:
                     items.append(
-                        InstallItem(CAT_SKILL, str(sub), rel, "conflict",
-                                    "present and differs — refusing to clobber")
+                        InstallItem(
+                            CAT_SKILL,
+                            str(sub),
+                            rel,
+                            "conflict",
+                            "present and differs — refusing to clobber",
+                        )
                     )
 
     for fk in manifest["forks"]:
@@ -1398,37 +1452,73 @@ def plan_install(
             continue
         if md5_bytes(fork_bytes) != fork_md5:
             items.append(
-                InstallItem(CAT_FORK, name, rel, "conflict", "vault integrity: reconstructed fork md5 mismatch")
+                InstallItem(
+                    CAT_FORK,
+                    name,
+                    rel,
+                    "conflict",
+                    "vault integrity: reconstructed fork md5 mismatch",
+                )
             )
             continue
 
         if mode == "init":
             if cur_md5 is None:
-                items.append(InstallItem(CAT_FORK, name, rel, "install", "create (step file absent)", fork_bytes))
+                items.append(
+                    InstallItem(
+                        CAT_FORK, name, rel, "install", "create (step file absent)", fork_bytes
+                    )
+                )
             elif cur_md5 == base_md5:
                 items.append(
-                    InstallItem(CAT_FORK, name, rel, "install", "apply fork onto pinned 6.8.0 base", fork_bytes)
+                    InstallItem(
+                        CAT_FORK,
+                        name,
+                        rel,
+                        "install",
+                        "apply fork onto pinned 6.8.0 base",
+                        fork_bytes,
+                    )
                 )
             else:
                 items.append(
-                    InstallItem(CAT_FORK, name, rel, "conflict",
-                                f"target is neither base nor fork ({cur_md5[:8]}) — manual review")
+                    InstallItem(
+                        CAT_FORK,
+                        name,
+                        rel,
+                        "conflict",
+                        f"target is neither base nor fork ({cur_md5[:8]}) — manual review",
+                    )
                 )
             continue
 
         # mode == "post-upgrade": re-apply onto current (possibly new) upstream.
         if cur_md5 is None:
-            items.append(InstallItem(CAT_FORK, name, rel, "conflict", "step file absent after upgrade"))
+            items.append(
+                InstallItem(CAT_FORK, name, rel, "conflict", "step file absent after upgrade")
+            )
             continue
         if storage == "snapshot":
             if cur_md5 == base_md5:
                 items.append(
-                    InstallItem(CAT_FORK, name, rel, "install", "snapshot onto unchanged upstream", fork_bytes)
+                    InstallItem(
+                        CAT_FORK,
+                        name,
+                        rel,
+                        "install",
+                        "snapshot onto unchanged upstream",
+                        fork_bytes,
+                    )
                 )
             else:
                 items.append(
-                    InstallItem(CAT_FORK, name, rel, "conflict",
-                                "snapshot fork cannot merge onto changed upstream — re-author")
+                    InstallItem(
+                        CAT_FORK,
+                        name,
+                        rel,
+                        "conflict",
+                        "snapshot fork cannot merge onto changed upstream — re-author",
+                    )
                 )
             continue
         patch_text = (vault / "forks" / f"{name}.patch").read_text(encoding="utf-8")
@@ -1438,8 +1528,13 @@ def plan_install(
             items.append(InstallItem(CAT_FORK, name, rel, "install", note, merged))
         else:
             items.append(
-                InstallItem(CAT_FORK, name, rel, "conflict",
-                            "patch rejected onto new upstream — hunks need manual rebase")
+                InstallItem(
+                    CAT_FORK,
+                    name,
+                    rel,
+                    "conflict",
+                    "patch rejected onto new upstream — hunks need manual rebase",
+                )
             )
 
     return items
@@ -1453,7 +1548,9 @@ def apply_install(
     writes = [it for it in items if it.action == "install"]
     guard = git_guard(target_root, [it.rel for it in writes])
     if not guard.ok:
-        raise RuntimeError(f"git-guard refused {target_root.name}: {guard.reason} {guard.dirty_paths}")
+        raise RuntimeError(
+            f"git-guard refused {target_root.name}: {guard.reason} {guard.dirty_paths}"
+        )
     rollback: list[RollbackEntry] = []
     with project_lock(target_root):
         for it in writes:
@@ -1529,7 +1626,10 @@ def _text_canary_enabled(args: argparse.Namespace) -> bool:
     if getattr(args, "text_canary", False):
         return True
     return os.environ.get("BMAD_OVERLAY_TEXT_CANARY", "").strip().lower() in {
-        "1", "on", "true", "yes",
+        "1",
+        "on",
+        "true",
+        "yes",
     }
 
 
@@ -1538,8 +1638,15 @@ def _text_canary_findings(args: argparse.Namespace) -> list[Finding]:
     if not ok:
         # Fail-open: a broken/stale golden must NOT block the byte core. Emit a
         # visible warn and skip the text invariants (never a false error).
-        return [Finding("INV-GOLDEN-GATE", "warn", "brain-canary", args.canonical,
-                        f"text canary disabled: {reason}")]
+        return [
+            Finding(
+                "INV-GOLDEN-GATE",
+                "warn",
+                "brain-canary",
+                args.canonical,
+                f"text canary disabled: {reason}",
+            )
+        ]
     canon_root = args.root / args.canonical
     csv_path = canon_root / WATCHED_CSVS[0]
     step_paths = sorted((canon_root / FORK_SKILL_STEPS).glob("step-02*.md"))
@@ -1603,8 +1710,11 @@ def cmd_propagate(args: argparse.Namespace) -> int:
     manifest2 = build_manifest(
         args.root, args.canonical, args.projects, args.upstream_steps, exemptions
     )
-    findings2 = [f for f in run_invariants(manifest2, args.root, exemptions)
-                 if f.severity == "error" and f.inv != "INV-PERSIST"]
+    findings2 = [
+        f
+        for f in run_invariants(manifest2, args.root, exemptions)
+        if f.severity == "error" and f.inv != "INV-PERSIST"
+    ]
     if findings2:
         print("revalidate FAILED — rolling back.", file=sys.stderr)
         rollback_plan(rollback, args.root)
@@ -1670,8 +1780,13 @@ def cmd_capture(args: argparse.Namespace) -> int:
                 return EXIT_CONFLICT
             overlay_md5s = {n: md5(vault / "overlays" / n) for n in result.overlays}
             write_manifest(
-                vault, result.overlays, result.forks, canon_head, stamp,
-                overlay_md5s, result.skill_files,
+                vault,
+                result.overlays,
+                result.forks,
+                canon_head,
+                stamp,
+                overlay_md5s,
+                result.skill_files,
             )
             for f in result.forks:
                 extra = f"  ({f.note})" if f.note else ""
@@ -1825,13 +1940,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--canonical", default=DEFAULT_CANONICAL)
     p.add_argument("--projects", default=",".join(DEFAULT_PROJECTS))
-    p.add_argument("--upstream", type=Path, default=DEFAULT_UPSTREAM,
-                   help="BMAD core-skills upstream tree (fork census baseline)")
+    p.add_argument(
+        "--upstream",
+        type=Path,
+        default=DEFAULT_UPSTREAM,
+        help="BMAD core-skills upstream tree (fork census baseline)",
+    )
     p.add_argument("--exempt", type=Path, default=None, help="path to exempt.yaml")
     p.add_argument("--vault", type=Path, default=DEFAULT_VAULT, help="vault repo path (capture)")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--text-canary", action="store_true",
-                   help="run the brain-methods text canary behind the golden gate (default: off)")
+    p.add_argument(
+        "--text-canary",
+        action="store_true",
+        help="run the brain-methods text canary behind the golden gate (default: off)",
+    )
     p.add_argument("--stamp", default="manual", help="backup subdir name (pass a timestamp)")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("check")
@@ -1840,18 +1962,27 @@ def build_parser() -> argparse.ArgumentParser:
     prop.add_argument("--apply", action="store_true", help="actually write (default: dry-run)")
     sub.add_parser("revalidate")
     cap = sub.add_parser("capture")
-    cap.add_argument("--apply", action="store_true",
-                     help="write vault + run canaries + commit (default: dry-run)")
-    cap.add_argument("--allow-dirty", action="store_true",
-                     help="capture uncommitted working-tree state (loudly listed)")
-    cap.add_argument("--no-commit", action="store_true",
-                     help="write vault but do not git-commit it")
+    cap.add_argument(
+        "--apply",
+        action="store_true",
+        help="write vault + run canaries + commit (default: dry-run)",
+    )
+    cap.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="capture uncommitted working-tree state (loudly listed)",
+    )
+    cap.add_argument(
+        "--no-commit", action="store_true", help="write vault but do not git-commit it"
+    )
     for verb in ("init-project", "post-upgrade"):
         cp = sub.add_parser(verb)
-        cp.add_argument("--target", required=True,
-                        help="target project: a bare name (under --root) or a path")
-        cp.add_argument("--apply", action="store_true",
-                        help="actually write the target (default: dry-run)")
+        cp.add_argument(
+            "--target", required=True, help="target project: a bare name (under --root) or a path"
+        )
+        cp.add_argument(
+            "--apply", action="store_true", help="actually write the target (default: dry-run)"
+        )
     sub.add_parser("menu")
     return p
 

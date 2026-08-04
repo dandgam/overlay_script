@@ -25,8 +25,8 @@ import pytest
 _SPEC = importlib.util.spec_from_file_location(
     "overlay_sync", Path(__file__).resolve().parents[1] / "tools" / "overlay_sync.py"
 )
+assert _SPEC and _SPEC.loader  # сужает тип до ModuleSpec ДО использования (mypy arg-type)
 osync = importlib.util.module_from_spec(_SPEC)
-assert _SPEC and _SPEC.loader
 sys.modules["overlay_sync"] = osync
 _SPEC.loader.exec_module(osync)
 
@@ -86,8 +86,13 @@ def test_step_parse_healthy_cuts_emdash_prose() -> None:
 def test_step_parse_sick_keeps_phantom_columns() -> None:
     s = osync.step_parse(GOLDEN / "sick" / "step-02a-user-selected.md")
     assert s.parse_columns == (
-        "category", "technique_name", "description",
-        "facilitation_prompts", "best_for", "energy_level", "typical_duration",
+        "category",
+        "technique_name",
+        "description",
+        "facilitation_prompts",
+        "best_for",
+        "energy_level",
+        "typical_duration",
     )
     assert (36, 7) in s.declared_counts
 
@@ -282,8 +287,9 @@ def test_meta_proof_phantom_call_mutation(tmp_path: Path) -> None:
     root = _clone_golden(tmp_path)
     step = root / "6.8.0" / "healthy" / "step-02a-user-selected.md"
     original = step.read_text(encoding="utf-8")
-    step.write_text(original + "\n- Includes: Ghost Technique That Does Not Exist\n",
-                    encoding="utf-8")
+    step.write_text(
+        original + "\n- Includes: Ghost Technique That Does Not Exist\n", encoding="utf-8"
+    )
     ok, reason = osync.golden_gate("6.8.0", golden_root=root)
     assert not ok and "false-red" in reason
     step.write_text(original, encoding="utf-8")

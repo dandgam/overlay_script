@@ -11,14 +11,15 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 _SPEC = importlib.util.spec_from_file_location(
     "overlay_sync", Path(__file__).resolve().parents[1] / "tools" / "overlay_sync.py"
 )
+assert _SPEC and _SPEC.loader  # сужает тип до ModuleSpec ДО использования (mypy arg-type)
 osync = importlib.util.module_from_spec(_SPEC)
-assert _SPEC and _SPEC.loader
 sys.modules["overlay_sync"] = osync  # register before exec so dataclasses resolve __module__
 _SPEC.loader.exec_module(osync)
 
@@ -159,14 +160,11 @@ def test_skill_drift_diff_and_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # DIFF: check reports each canon file missing in legal
     findings = [f for f in osync.run_invariants(m, root, []) if f.inv != "INV-PERSIST"]
     missing = {
-        f.artifact for f in findings
-        if f.project == "legal" and f.inv == "INV-OVERLAY-PRESENT"
+        f.artifact for f in findings if f.project == "legal" and f.inv == "INV-OVERLAY-PRESENT"
     }
     assert str(osync.OWN_SKILL_DIR / "SKILL.md") in missing
     # excluded files never surface as drift
-    assert not any(
-        n in f.artifact for f in findings for n in ("customize.toml", "learnings.md")
-    )
+    assert not any(n in f.artifact for f in findings for n in ("customize.toml", "learnings.md"))
     # COPY: propagate plans CREATE for each canon file into legal
     plan = osync.build_plan(m, root, [])
     creates = {it.artifact for it in plan if it.action == "CREATE" and it.project == "legal"}
@@ -177,7 +175,9 @@ def test_skill_drift_diff_and_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 # --- invariants + plan -----------------------------------------------------
 
 
-def _manifest(tree: Path, monkeypatch: pytest.MonkeyPatch, exemptions=None):
+def _manifest(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, exemptions: list[Any] | None = None
+) -> Any:
     monkeypatch.setattr(osync, "git_show_head", lambda repo, rel: None)
     steps_up = tree.parent / "upstream" / "bmad-brainstorming" / "steps"
     return osync.build_manifest(tree, "odyssey", ["odyssey", "legal"], steps_up, exemptions or [])
@@ -201,15 +201,21 @@ def test_presence_exempt_downgrades_missing(tree: Path, monkeypatch: pytest.Monk
     ex = [osync.Exemption("bmad-auto-dev.toml", "legal", "odyssey-only by-design")]
     m = _manifest(tree, monkeypatch, ex)
     adv = [
-        f for f in osync.run_invariants(m, tree, ex)
-        if f.inv == "INV-OVERLAY-PRESENT" and f.artifact == "bmad-auto-dev.toml" and f.project == "legal"
+        f
+        for f in osync.run_invariants(m, tree, ex)
+        if f.inv == "INV-OVERLAY-PRESENT"
+        and f.artifact == "bmad-auto-dev.toml"
+        and f.project == "legal"
     ]
     assert adv and adv[0].severity == "warn"
     # no exempt -> stays a hard error
     m2 = _manifest(tree, monkeypatch, [])
     adv2 = [
-        f for f in osync.run_invariants(m2, tree, [])
-        if f.inv == "INV-OVERLAY-PRESENT" and f.artifact == "bmad-auto-dev.toml" and f.project == "legal"
+        f
+        for f in osync.run_invariants(m2, tree, [])
+        if f.inv == "INV-OVERLAY-PRESENT"
+        and f.artifact == "bmad-auto-dev.toml"
+        and f.project == "legal"
     ]
     assert adv2 and adv2[0].severity == "error"
 
@@ -251,11 +257,23 @@ def test_propagate_all_create_writes_rollback(tmp_path: Path) -> None:
     up = tmp_path / "upstream"
     up.mkdir()
     rc = osync.main(
-        ["--root", str(root), "--canonical", "odyssey", "--projects", "odyssey,legal",
-         "--upstream", str(up), "propagate", "--apply"]
+        [
+            "--root",
+            str(root),
+            "--canonical",
+            "odyssey",
+            "--projects",
+            "odyssey,legal",
+            "--upstream",
+            str(up),
+            "propagate",
+            "--apply",
+        ]
     )
     assert rc == osync.EXIT_OK
-    assert (root / "legal" / "_bmad" / "custom" / "bmad-x.toml").read_text(encoding="utf-8") == 'k = "v"\n'
+    assert (root / "legal" / "_bmad" / "custom" / "bmad-x.toml").read_text(
+        encoding="utf-8"
+    ) == 'k = "v"\n'
     assert list((root / "odyssey" / "_bmad" / ".overlay_sync_backups").rglob("ROLLBACK.json"))
 
 
@@ -339,8 +357,9 @@ def test_apply_capture_overlay_copy_and_fork_patch(tmp_path: Path) -> None:
     _write(up / "step-02b-ai-recommended.md", base)
     fork = base.replace("line5\n", "CHANGED\n")  # sparse -> patch
     frel = str(
-        _write(canon / osync.FORK_SKILL_STEPS / "step-02b-ai-recommended.md", fork)
-        .relative_to(canon)
+        _write(canon / osync.FORK_SKILL_STEPS / "step-02b-ai-recommended.md", fork).relative_to(
+            canon
+        )
     )
     vault = tmp_path / "vault"
     items = [
@@ -366,12 +385,15 @@ def test_apply_capture_fork_dense_is_snapshot(tmp_path: Path) -> None:
     _write(up / "step-02a-user-selected.md", base)
     fork = "".join(f"X{i}\n" for i in range(10))  # every line changed -> snapshot
     frel = str(
-        _write(canon / osync.FORK_SKILL_STEPS / "step-02a-user-selected.md", fork)
-        .relative_to(canon)
+        _write(canon / osync.FORK_SKILL_STEPS / "step-02a-user-selected.md", fork).relative_to(
+            canon
+        )
     )
     res = osync.apply_capture(
         [osync.CaptureItem(osync.CAT_FORK, "step-02a-user-selected.md", frel, "capture")],
-        canon, up, tmp_path / "vault",
+        canon,
+        up,
+        tmp_path / "vault",
     )
     assert res.forks[0].storage == "snapshot"
     assert (tmp_path / "vault" / "forks" / "step-02a-user-selected.md.snapshot").read_text(
@@ -384,7 +406,9 @@ def test_apply_capture_canary_halts_on_bad_toml(tmp_path: Path) -> None:
     _write(canon / "_bmad" / "custom" / "bad.toml", "this is = = not toml\n")
     res = osync.apply_capture(
         [osync.CaptureItem(osync.CAT_OVERLAY, "bad.toml", "_bmad/custom/bad.toml", "capture")],
-        canon, tmp_path / "upstream", tmp_path / "vault",
+        canon,
+        tmp_path / "upstream",
+        tmp_path / "vault",
     )
     assert res.canary_errors  # HALT signal
     assert "bad.toml" not in res.overlays
@@ -422,7 +446,9 @@ def test_capture_skill_into_vault(tmp_path: Path) -> None:
     files = set(res.skill_files)
     assert {"SKILL.md", "scripts/tool.py", "templates/t.md"} <= files
     assert "customize.toml" not in files and "learnings.md" not in files
-    assert (vault / "skills" / "bmad-auto-dev" / "SKILL.md").read_text(encoding="utf-8") == "skill body\n"
+    assert (vault / "skills" / "bmad-auto-dev" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == "skill body\n"
     assert not (vault / "skills" / "bmad-auto-dev" / "customize.toml").exists()
     # manifest records the skill block (flat, load_manifest-safe)
     osync.write_manifest(vault, [], [], "h", "s", {}, res.skill_files)
@@ -456,7 +482,9 @@ def test_init_installs_skill_from_vault(tmp_path: Path) -> None:
     rc = osync.main(["--vault", str(vault), "init-project", "--target", str(target), "--apply"])
     assert rc == osync.EXIT_OK
     assert (target / osync.OWN_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8") == "skill body\n"
-    assert (target / osync.OWN_SKILL_DIR / "scripts" / "tool.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert (target / osync.OWN_SKILL_DIR / "scripts" / "tool.py").read_text(
+        encoding="utf-8"
+    ) == "x = 1\n"
     osync.run_git(["add", "-A"], target)
     osync.run_git(["commit", "-qm", "installed"], target)
     rc2 = osync.main(["--vault", str(vault), "init-project", "--target", str(target), "--apply"])
@@ -483,11 +511,13 @@ def _make_vault(
         osync.make_patch(base, fork, _STEP), encoding="utf-8"
     )
     rel = str(osync.FORK_SKILL_STEPS / _STEP)
-    cf = osync.CapturedFork(
-        _STEP, rel, osync.md5_bytes(base), osync.md5_bytes(fork), "patch", 0.1
-    )
+    cf = osync.CapturedFork(_STEP, rel, osync.md5_bytes(base), osync.md5_bytes(fork), "patch", 0.1)
     osync.write_manifest(
-        vault, ["bmad-x.toml"], [cf], "deadbeef", "2026-06-17T00:00:00+07:00",
+        vault,
+        ["bmad-x.toml"],
+        [cf],
+        "deadbeef",
+        "2026-06-17T00:00:00+07:00",
         {"bmad-x.toml": osync.md5_bytes(overlay_text.encode())},
     )
     return vault, rel
@@ -548,7 +578,9 @@ def test_init_project_installs_then_idempotent(tmp_path: Path) -> None:
 
     rc = osync.main(["--vault", str(vault), "init-project", "--target", str(target), "--apply"])
     assert rc == osync.EXIT_OK
-    assert (target / "_bmad" / "custom" / "bmad-x.toml").read_text(encoding="utf-8") == 'key = "v"\n'
+    assert (target / "_bmad" / "custom" / "bmad-x.toml").read_text(
+        encoding="utf-8"
+    ) == 'key = "v"\n'
     assert (target / rel).read_bytes() == fork  # fork applied onto base
 
     osync.run_git(["add", "-A"], target)
@@ -571,7 +603,9 @@ def test_init_project_conflict_halts_never_partial(tmp_path: Path) -> None:
     assert rc == osync.EXIT_CONFLICT
     # never partial: the installable fork was NOT written despite the overlay conflict
     assert (target / rel).read_bytes() == base
-    assert (target / "_bmad" / "custom" / "bmad-x.toml").read_text(encoding="utf-8") == "DIFFERENT\n"
+    assert (target / "_bmad" / "custom" / "bmad-x.toml").read_text(
+        encoding="utf-8"
+    ) == "DIFFERENT\n"
 
 
 def test_init_fork_diverged_is_conflict(tmp_path: Path) -> None:
@@ -591,8 +625,16 @@ def test_init_respects_exempt_presence(tmp_path: Path) -> None:
         "- artifact: bmad-x.toml\n  project: proj\n  reason: by-design absent\n",
     )
     rc = osync.main(
-        ["--exempt", str(exempt), "--vault", str(vault), "init-project",
-         "--target", str(target), "--apply"]
+        [
+            "--exempt",
+            str(exempt),
+            "--vault",
+            str(vault),
+            "init-project",
+            "--target",
+            str(target),
+            "--apply",
+        ]
     )
     assert rc == osync.EXIT_OK
     assert not (target / "_bmad" / "custom" / "bmad-x.toml").exists()  # exempt -> not installed
